@@ -39,6 +39,7 @@ SECRET_SUFFIXES = frozenset({
     '.jks', '.keystore', '.p12', '.pfx', '.pem', '.key', '.mobileprovision',
     '.der', '.p8', '.p7b', '.p7c', '.keychain', '.keychain-db',
     '.provisionprofile', '.cer', '.crt', '.pyc', '.pyo', '.xcuserstate',
+    '.iml', '.ipr', '.iws',
 })
 ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 

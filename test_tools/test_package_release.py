@@ -36,6 +36,7 @@ class PackageReleaseTest(unittest.TestCase):
                 '.tooling/flutter/secret', '.git/config', '.codex-doc-review/report.md',
                 'build/intermediates/token', 'build/app/outputs/flutter-apk/app-debug.apk',
                 'android/local.properties', 'android/key.properties', 'android/app/release.jks',
+                'android/nscontrol_android.iml', 'android/project.ipr', 'android/workspace.iws',
                 'android/app/signing.keystore', 'ios/key.p12', 'ios/Profile.mobileprovision',
                 'garmin/developer_key.der', 'garmin/developer_key.txt', 'garmin/bin/app.prg',
                 'ios/Flutter/Generated.xcconfig', 'ios/Flutter/flutter_export_environment.sh',
