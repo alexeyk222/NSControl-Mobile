@@ -1,0 +1,11 @@
+include: package:flutter_lints/flutter.yaml
+analyzer:
+  exclude:
+    - .tooling/**
+    - build/**
+    - .codex-doc-review-2026-10-15/**
+    - android/**
+    - ios/**
+linter:
+  rules:
+    unawaited_futures: true

@@ -1,0 +1,52 @@
+import Foundation
+
+func check(_ test: Bool, _ label: String) { if !test { fatalError(label) } }
+var sequence = 0
+func message(_ type: String, _ extra: [String: Any] = [:]) -> [String: Any] {
+    sequence += 1
+    return ["v": 1, "type": type, "message_id": "m\(sequence)", "connection_id": "c1", "session_id": "s1"]
+        .merging(extra) { _, new in new }
+}
+let gate = AlertGate()
+let alert = message("alert", ["event_id": "e1", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p1"])
+check(!gate.receive(alert, nowMs: 6000).vibrate, "reject before snapshot")
+_ = gate.receive(message("snapshot"), nowMs: 6000)
+_ = gate.receive(message("ping", ["message_id": "p1"]), nowMs: 6000)
+_ = gate.receive(message("clock_sync", ["sync_id": "p1", "watch_minus_phone_lower_ms": 5000.0]), nowMs: 6000)
+check(gate.receive(alert, nowMs: 6100).vibrate, "fresh alert")
+check(gate.receive(alert, nowMs: 6101).status == "duplicate", "deduplicate message")
+check(gate.receive(message("alert", ["event_id": "e1", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p1"]), nowMs: 6102).status == "duplicate", "deduplicate event")
+_ = gate.receive(message("cancel", ["target_ids": ["e2"]]), nowMs: 6103)
+check(gate.receive(message("alert", ["event_id": "e2", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p1"]), nowMs: 6104).status == "cancelled", "cancel target")
+check(gate.receive(message("alert", ["event_id": "late", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p1"]), nowMs: 8000).status == "expired", "upper age margin rejects boundary")
+check(gate.receive(message("alert", ["event_id": "future", "occurred_us": 9_000_000, "ttl_ms": 2000, "sync_id": "p1"]), nowMs: 8001).status == "expired", "reject negative age")
+_ = gate.receive(message("cancel", ["all": true]), nowMs: 8002)
+check(!gate.receive(alert, nowMs: 8003).vibrate, "cancel all disables")
+gate.disconnect()
+check(!gate.receive(alert, nowMs: 8004).vibrate, "disconnect requires new snapshot")
+_ = gate.receive(message("snapshot", ["connection_id": "c2"]), nowMs: 8005)
+check(!gate.receive(alert, nowMs: 8006).vibrate, "old connection cannot replay")
+let renewed = AlertGate()
+_ = renewed.receive(message("snapshot"), nowMs: 6000)
+_ = renewed.receive(message("ping", ["message_id": "p2"]), nowMs: 6000)
+check(renewed.receive(message("clock_sync", ["sync_id": "old", "watch_minus_phone_lower_ms": 5000.0]), nowMs: 6001).status == "invalid_sync", "reject unrelated sync")
+_ = renewed.receive(message("clock_sync", ["sync_id": "p2", "watch_minus_phone_lower_ms": 5000.0]), nowMs: 6002)
+check(renewed.receive(message("clock_sync", ["sync_id": "p2", "watch_minus_phone_lower_ms": 5000.0]), nowMs: 6003).status == "invalid_sync", "reject repeated sync")
+check(renewed.receive(message("alert", ["event_id": "expired-sync", "occurred_us": 32_000_000, "ttl_ms": 2000, "sync_id": "p2"]), nowMs: 37000).status == "unsynchronized", "sync validity bounds")
+_ = renewed.receive(message("snapshot", ["session_id": "s2"]), nowMs: 37001)
+check(renewed.receive(message("alert", ["event_id": "wrong-session", "occurred_us": 32_000_000, "ttl_ms": 2000, "sync_id": "p2"]), nowMs: 37002).status == "session_mismatch", "new session blocks old command")
+check(renewed.receive(message("alert", ["session_id": "s2", "event_id": "new-session", "occurred_us": 32_000_000, "ttl_ms": 2000, "sync_id": "p2"]), nowMs: 37003).status == "unsynchronized", "expired sync stays expired across session")
+check(renewed.receive(message("alert", ["session_id": "s2", "event_id": "rollover", "occurred_us": 0, "ttl_ms": 2000, "sync_id": "p2"]), nowMs: 1).status == "snapshot_required", "clock reset blocks playback")
+let sessionSwap = AlertGate()
+_ = sessionSwap.receive(message("snapshot"), nowMs: 6000)
+_ = sessionSwap.receive(message("ping", ["message_id": "p3"]), nowMs: 6000)
+_ = sessionSwap.receive(message("clock_sync", ["sync_id": "p3", "watch_minus_phone_lower_ms": 5000.0]), nowMs: 6001)
+_ = sessionSwap.receive(message("snapshot", ["session_id": "s2"]), nowMs: 6010)
+check(sessionSwap.receive(message("alert", ["session_id": "s1", "event_id": "old-session", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p3"]), nowMs: 6011).status == "session_mismatch", "session replacement rejects old alert")
+check(sessionSwap.receive(message("alert", ["session_id": "s2", "event_id": "new-session", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p3"]), nowMs: 6012).vibrate, "same process transport clock survives new session")
+_ = sessionSwap.receive(message("cancel", ["session_id": "s2", "all": true]), nowMs: 6020)
+check(sessionSwap.receive(message("alert", ["session_id": "s2", "event_id": "pending", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p3"]), nowMs: 6021).status == "snapshot_required", "cancel-all requires fresh snapshot")
+_ = sessionSwap.receive(message("snapshot", ["session_id": "s3"]), nowMs: 6022)
+check(sessionSwap.receive(message("alert", ["session_id": "s2", "event_id": "pending", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p3"]), nowMs: 6023).status == "session_mismatch", "cancelled old session cannot resume")
+check(sessionSwap.receive(message("alert", ["session_id": "s3", "event_id": "fresh-session", "occurred_us": 1_000_000, "ttl_ms": 2000, "sync_id": "p3"]), nowMs: 6024).vibrate, "cancel-all keeps clock for new session")
+print("Watch protocol: 21 safety assertions passed")
