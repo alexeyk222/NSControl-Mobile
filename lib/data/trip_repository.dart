@@ -661,6 +661,27 @@ class TripRepository {
       final unavailable = <String, int>{'eyes': 0, 'head': 0, 'both': 0};
       var incomplete = trip['journal_incomplete'] == 1;
       var interrupted = 0;
+      // Vigilance extension: trip-level counters are cumulative, so the
+      // latest session checkpoint carries the most complete values.
+      var fatigueMinutes = <int>[];
+      var breaks = 0, escalations = 0;
+      for (final session in sessions) {
+        final raw = session['diagnostics_json'];
+        Object? decoded;
+        try {
+          decoded = raw is String ? jsonDecode(raw) : null;
+        } catch (_) {
+          decoded = null;
+        }
+        if (decoded is! Map) continue;
+        final minutes = decoded['trip_fatigue_per_minute'];
+        if (minutes is List && minutes.length >= fatigueMinutes.length) {
+          fatigueMinutes = minutes.whereType<int>().toList();
+        }
+        final b = decoded['trip_breaks'], e = decoded['trip_escalations'];
+        if (b is int && b > breaks) breaks = b;
+        if (e is int && e > escalations) escalations = e;
+      }
       for (final session in sessions) {
         final last = session['last_us'] as int;
         final explicitEnd = ongoingSessionEndsUs[session['id']];
@@ -716,6 +737,12 @@ class TripRepository {
         ),
         'journal_incomplete': incomplete,
         'interrupted_sessions': interrupted,
+        'fatigue_per_minute': fatigueMinutes,
+        'fatigue_peak': fatigueMinutes.isEmpty
+            ? null
+            : fatigueMinutes.reduce((a, b) => a > b ? a : b),
+        'breaks': breaks,
+        'escalations': escalations,
         'duration_is_lower_bound': interrupted > 0,
       };
     });

@@ -600,4 +600,45 @@ void main() {
       expect(summary['journal_incomplete'], true);
     },
   );
+
+  test('summary takes the latest cumulative vigilance history', () async {
+    await repository.checkpointSession(
+      'session',
+      atUs: 120000000,
+      diagnostics: {
+        'trip_fatigue_per_minute': [1, 2],
+        'trip_breaks': 0,
+        'trip_escalations': 1,
+      },
+    );
+    await repository.insertSession({
+      'id': 'session-2',
+      'trip_id': 'trip',
+      'started_at': wall,
+      'settings_json': {'eyeThreshold': 0.4},
+      'calibration_json': {'pitch': 1.2},
+      'algorithm_version': '1',
+    });
+    await repository.checkpointSession(
+      'session-2',
+      atUs: 60000000,
+      diagnostics: {
+        'trip_fatigue_per_minute': [1, 2, -1, 3],
+        'trip_breaks': 1,
+        'trip_escalations': 1,
+      },
+    );
+    final summary = await repository.tripSummary('trip');
+    expect(summary['fatigue_per_minute'], [1, 2, -1, 3]);
+    expect(summary['fatigue_peak'], 3);
+    expect(summary['breaks'], 1);
+    expect(summary['escalations'], 1);
+  });
+
+  test('summary without vigilance diagnostics stays empty', () async {
+    final summary = await repository.tripSummary('trip');
+    expect(summary['fatigue_per_minute'], isEmpty);
+    expect(summary['fatigue_peak'], isNull);
+    expect(summary['breaks'], 0);
+  });
 }

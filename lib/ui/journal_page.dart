@@ -167,6 +167,8 @@ class _JournalPageState extends State<JournalPage> {
                   );
                 }),
                 const Divider(height: 28),
+                _vigilance(c, data),
+                const Divider(height: 28),
                 if (events.isEmpty)
                   const Text('Камерные события не зарегистрированы.'),
                 ...events.map(
@@ -298,4 +300,57 @@ class _JournalPageState extends State<JournalPage> {
       ],
     ),
   );
+
+  Widget _vigilance(BuildContext context, Map<String, Object?> data) {
+    final minutes = (data['fatigue_per_minute'] as List? ?? []).cast<int>();
+    final peak = data['fatigue_peak'] as int?;
+    final scheme = Theme.of(context).colorScheme;
+    Color color(int level) => switch (level) {
+      3 => scheme.error,
+      2 => const Color(0xffB26A00),
+      1 => scheme.primary,
+      _ => scheme.outlineVariant,
+    };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Бдительность', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        Text(
+          'Пик признаков усталости: ${switch (peak) {
+            3 => 'выраженные',
+            2 => 'умеренные',
+            1 => 'не видны',
+            _ => 'нет данных',
+          }}',
+        ),
+        Text('Перерывов: ${data['breaks'] ?? 0}'),
+        if ((data['escalations'] as int? ?? 0) > 0)
+          Text('Сигнал усиливался: ${data['escalations']} раз'),
+        if (minutes.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 2,
+            runSpacing: 2,
+            children: [
+              for (final level in minutes)
+                Container(
+                  width: 8,
+                  height: 16,
+                  decoration: BoxDecoration(
+                    color: color(level),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Каждый столбик — минута поездки; серый — камера не наблюдала.',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ],
+    );
+  }
 }

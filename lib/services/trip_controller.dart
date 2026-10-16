@@ -94,6 +94,10 @@ class TripController extends ChangeNotifier {
   int _lastFatigueUs = 0;
   String? watchAcknowledgedAt;
   bool alarmEscalated = false;
+  // Trip-level vigilance history; written into every session checkpoint.
+  final List<int> fatiguePerMinute = [];
+  int tripBreaks = 0, tripEscalations = 0, _fatigueMinutePeak = 0;
+  int _lastFatigueMinuteUs = 0;
   bool _foreground = true,
       _disposed = false,
       _cameraFailureBusy = false,
@@ -166,6 +170,11 @@ class TripController extends ChangeNotifier {
     tripId = _ids.v4();
     lastFinishedTrip = null;
     error = null;
+    fatiguePerMinute.clear();
+    tripBreaks = 0;
+    tripEscalations = 0;
+    _fatigueMinutePeak = 0;
+    _lastFatigueMinuteUs = clock.elapsedMicroseconds;
     drive.reset();
     drive.active(clock.elapsedMicroseconds);
     fatigue = FatigueSnapshot.empty;
@@ -263,6 +272,9 @@ class TripController extends ChangeNotifier {
     if (monitor == null || phase != TripPhase.observing) return;
     final previous = fatigue.level;
     fatigue = monitor.snapshot(sessionNowUs);
+    if (fatigue.level.index > _fatigueMinutePeak) {
+      _fatigueMinutePeak = fatigue.level.index;
+    }
     if (fatigue.level == previous) return;
     if (fatigue.level == FatigueLevel.high) {
       // A short chime, never louder than the configured alarm and never on
@@ -288,6 +300,7 @@ class TripController extends ChangeNotifier {
   void markBreak() {
     if (!active) return;
     drive.markBreak(clock.elapsedMicroseconds);
+    tripBreaks++;
     _fatigueMonitor = calibration == null ? null : _newFatigueMonitor();
     fatigue = FatigueSnapshot.empty;
     onBreakTaken?.call();
@@ -325,6 +338,7 @@ class TripController extends ChangeNotifier {
       return;
     }
     alarmEscalated = true;
+    tripEscalations++;
     unawaited(() async {
       try {
         await platform
@@ -347,7 +361,18 @@ class TripController extends ChangeNotifier {
   void _tick() {
     if (_disposed) return;
     final now = clock.elapsedMicroseconds;
-    if (active && phase != TripPhase.paused) drive.active(now);
+    if (active && phase != TripPhase.paused) {
+      if (drive.active(now)) tripBreaks++;
+    }
+    // One entry per trip minute: peak fatigue level index, or -1 when the
+    // camera did not observe during that minute.
+    if (active && now - _lastFatigueMinuteUs >= 60000000) {
+      _lastFatigueMinuteUs = now;
+      fatiguePerMinute.add(
+        phase == TripPhase.observing ? _fatigueMinutePeak : -1,
+      );
+      _fatigueMinutePeak = fatigue.level.index;
+    }
     checkEscalation();
     if (now - _lastFatigueUs >= 1000000) {
       _lastFatigueUs = now;
@@ -390,6 +415,9 @@ class TripController extends ChangeNotifier {
           'algorithm_version': ObservationEngine.algorithmVersion,
           'fatigue': fatigue.toJson(),
           'continuous_drive_s': drive.continuousUs(now) ~/ 1000000,
+          'trip_fatigue_per_minute': List.of(fatiguePerMinute),
+          'trip_breaks': tripBreaks,
+          'trip_escalations': tripEscalations,
         };
         _write(
           (db) =>

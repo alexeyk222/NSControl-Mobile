@@ -188,11 +188,14 @@ class DriveClock {
   final int breakAfterUs, restCreditUs;
   int? _segmentStartUs, _lastActiveUs;
 
-  void active(int nowUs) {
-    if (_lastActiveUs == null || nowUs - _lastActiveUs! >= restCreditUs) {
-      _segmentStartUs = nowUs;
-    }
+  /// Records activity; returns true when a pause long enough to count as a
+  /// rest has just ended (not for the very first activity).
+  bool active(int nowUs) {
+    final rested =
+        _lastActiveUs != null && nowUs - _lastActiveUs! >= restCreditUs;
+    if (_lastActiveUs == null || rested) _segmentStartUs = nowUs;
     _lastActiveUs = nowUs;
+    return rested;
   }
 
   /// Explicit "I took a break" from the user.
