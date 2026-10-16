@@ -2,7 +2,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/sleep_controller.dart';
 import '../services/trip_controller.dart';
+import '../logic/domain.dart';
 import 'components.dart';
+import 'sleep_week_card.dart';
 
 class IntegrationsPage extends StatefulWidget {
   const IntegrationsPage({super.key, required this.sleep, required this.trip});
@@ -164,6 +166,15 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 12),
+          SleepWeekCard(
+            week: SleepWeek.build(
+              records: sleep.records,
+              source: sleep.source,
+              now: DateTime.now(),
+            ),
+            source: sleep.source,
           ),
           const SizedBox(height: 12),
           SectionCard(

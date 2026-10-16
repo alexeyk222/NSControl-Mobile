@@ -21,6 +21,8 @@ class ControllerTestDetector implements FaceDetectorPort {
 class ControllerTestPlatform extends PlatformBridge {
   final messages = <Map<String, Object?>>[];
   int alertCalls = 0;
+  double? lastVolume;
+  bool? lastVibrate;
   int testAlertCalls = 0;
   bool alarmActive = false;
   Completer<void>? pendingCancel;
@@ -35,6 +37,8 @@ class ControllerTestPlatform extends PlatformBridge {
   @override
   Future<void> alert({required double volume, required bool vibrate}) async {
     alertCalls++;
+    lastVolume = volume;
+    lastVibrate = vibrate;
     alarmActive = true;
   }
 
@@ -465,4 +469,61 @@ void main() {
     trip.markBreak();
     expect(trip.drivingTime.inMinutes, 0);
   });
+
+  test(
+    'unacknowledged alarm escalates once after 5 s; acknowledged does not',
+    () async {
+      trip.settings = AlgorithmSettings(volume: .3, vibration: false);
+      trip.sessionId = 'esc-session';
+      trip.sessionBaseUs = trip.clock.elapsedMicroseconds - 4000000;
+      trip.sessionStartedAt = DateTime.now().toUtc();
+      trip.engine = ObservationEngine(
+        sessionId: 'esc-session',
+        calibration: testProfile(),
+        settings: trip.settings,
+      );
+      trip.phase = TripPhase.observing;
+      await repository.insertSession({
+        'id': 'esc-session',
+        'trip_id': trip.tripId,
+        'started_at': trip.sessionStartedAt!.toIso8601String(),
+      });
+      for (var at = 0; at <= 1700000; at += 100000) {
+        camera.onFaces(
+          [
+            const DetectedFace(
+              FaceMeasurement(
+                trackingId: 7,
+                leftEye: .1,
+                rightEye: .1,
+                pitchDown: 0,
+                yaw: 0,
+                roll: 0,
+              ),
+              Rect.fromLTWH(0, 0, 100, 100),
+            ),
+          ],
+          trip.sessionBaseUs + at,
+          trip.sessionBaseUs + at,
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(platform.lastVolume, .3);
+      // Alert requested at ~1.6 s, session time ~4 s: not yet escalated.
+      trip.checkEscalation();
+      expect(trip.alarmEscalated, isFalse);
+      trip.sessionBaseUs -= 3000000;
+      trip.checkEscalation();
+      await Future<void>.delayed(Duration.zero);
+      expect(trip.alarmEscalated, isTrue);
+      expect(platform.lastVolume, 1);
+      expect(platform.lastVibrate, isTrue);
+      final calls = platform.alertCalls;
+      trip.checkEscalation();
+      expect(platform.alertCalls, calls);
+      trip.acknowledge(trip.snapshot!.activeEvents.map((e) => e.id).toSet());
+      trip.checkEscalation();
+      expect(trip.alarmEscalated, isFalse);
+    },
+  );
 }

@@ -20,7 +20,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   late double eyes, head, pitch, yaw, volume;
-  late bool hidden, vibrate, preview;
+  late bool hidden, vibrate, preview, escalate;
   @override
   void initState() {
     super.initState();
@@ -33,6 +33,7 @@ class _SettingsPageState extends State<SettingsPage> {
     hidden = s.hiddenEyes;
     vibrate = s.vibration;
     preview = s.showPreview;
+    escalate = s.escalate;
   }
 
   Widget slider(
@@ -127,6 +128,15 @@ class _SettingsPageState extends State<SettingsPage> {
               value: vibrate,
               onChanged: (v) => setState(() => vibrate = v),
             ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Нарастающий сигнал'),
+              subtitle: const Text(
+                'Если тревогу не подтвердили за 5 с — максимальная громкость и вибрация',
+              ),
+              value: escalate,
+              onChanged: (v) => setState(() => escalate = v),
+            ),
             const Text(
               'Беззвучный режим, «Не беспокоить» и настройки ОС могут ограничивать сигнал. Красное предупреждение остаётся видимым.',
             ),
@@ -146,6 +156,7 @@ class _SettingsPageState extends State<SettingsPage> {
               vibration: vibrate,
               hiddenEyes: hidden,
               showPreview: preview,
+              escalate: escalate,
             ),
           );
           if (context.mounted) {

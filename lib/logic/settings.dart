@@ -9,6 +9,7 @@ class AlgorithmSettings {
     this.volume = 1,
     this.vibration = true,
     this.showPreview = true,
+    this.escalate = true,
   }) {
     if (eyesClosedUs < 1000000 ||
         eyesClosedUs > 3000000 ||
@@ -37,6 +38,11 @@ class AlgorithmSettings {
   final double pitchThreshold, headYawLimit, volume;
   final bool hiddenEyes, vibration, showPreview;
 
+  /// Raise an unacknowledged alarm to full volume with vibration after
+  /// [escalationDelayUs] (product extension; the base alarm is unchanged).
+  final bool escalate;
+  static const escalationDelayUs = 5000000;
+
   Map<String, Object?> toJson() => {
     'eyesClosedUs': eyesClosedUs,
     'headDownUs': headDownUs,
@@ -46,6 +52,7 @@ class AlgorithmSettings {
     'volume': volume,
     'vibration': vibration,
     'showPreview': showPreview,
+    'escalate': escalate,
   };
 
   factory AlgorithmSettings.fromJson(Map<String, dynamic> json) =>
@@ -58,6 +65,7 @@ class AlgorithmSettings {
         hiddenEyes: _boolean(json['hiddenEyes'], false),
         vibration: _boolean(json['vibration'], true),
         showPreview: _boolean(json['showPreview'], true),
+        escalate: _boolean(json['escalate'], true),
       );
 }
 

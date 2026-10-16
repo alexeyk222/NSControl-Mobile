@@ -93,6 +93,7 @@ class TripController extends ChangeNotifier {
   WearableVitals? vitals;
   int _lastFatigueUs = 0;
   String? watchAcknowledgedAt;
+  bool alarmEscalated = false;
   bool _foreground = true,
       _disposed = false,
       _cameraFailureBusy = false,
@@ -301,6 +302,41 @@ class TripController extends ChangeNotifier {
     headEventUs: settings.headDownUs,
   );
 
+  /// Escalates an alarm that stayed unacknowledged for 5 s. Runs on the
+  /// controller tick; exposed for tests.
+  @visibleForTesting
+  void checkEscalation() {
+    final current = snapshot;
+    final pending = current?.activeEvents
+        .where((e) => e.acknowledgedUs == null)
+        .map((e) => e.alertRequestedUs)
+        .fold<int?>(null, (a, b) => a == null || b < a ? b : a);
+    if (pending == null) {
+      if (alarmEscalated) {
+        alarmEscalated = false;
+        _notify();
+      }
+      return;
+    }
+    if (alarmEscalated ||
+        !settings.escalate ||
+        phase != TripPhase.observing ||
+        sessionNowUs - pending < AlgorithmSettings.escalationDelayUs) {
+      return;
+    }
+    alarmEscalated = true;
+    unawaited(() async {
+      try {
+        await platform
+            .alert(volume: 1, vibrate: true)
+            .timeout(const Duration(milliseconds: 500));
+      } catch (e) {
+        alertError = 'Усиление сигнала недоступно: $e';
+      }
+      _notify();
+    }());
+  }
+
   void _onVitals(WearableVitals value) {
     final changed = vitals?.bodyBattery != value.bodyBattery;
     vitals = value;
@@ -312,6 +348,7 @@ class TripController extends ChangeNotifier {
     if (_disposed) return;
     final now = clock.elapsedMicroseconds;
     if (active && phase != TripPhase.paused) drive.active(now);
+    checkEscalation();
     if (now - _lastFatigueUs >= 1000000) {
       _lastFatigueUs = now;
       _updateFatigue();
@@ -526,10 +563,11 @@ class TripController extends ChangeNotifier {
   void _syncAudio(bool start) {
     unawaited(() async {
       try {
+        // A new event during an escalated alarm keeps the escalated level.
         final request = start
             ? platform.alert(
-                volume: settings.volume,
-                vibrate: settings.vibration,
+                volume: alarmEscalated ? 1 : settings.volume,
+                vibrate: alarmEscalated || settings.vibration,
               )
             : platform.stopAlert();
         await request.timeout(const Duration(milliseconds: 500));

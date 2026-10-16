@@ -25,6 +25,20 @@ class VigilanceCard extends StatelessWidget {
     final total = DriveClock().breakAfterUs;
     final progress = (driving.inMicroseconds / total).clamp(0.0, 1.0);
     final vitals = trip.freshVitals;
+    final metrics = [
+      (
+        'Глаза закрыты',
+        f.perclos == null ? '—' : '${(f.perclos! * 100).round()} %',
+      ),
+      (
+        'Морганий в минуту',
+        f.blinksPerMinute == null ? '—' : '${f.blinksPerMinute!.round()}',
+      ),
+      ('Среднее моргание', f.meanBlinkMs == null ? '—' : '${f.meanBlinkMs} мс'),
+      ('Долгие за 5\u00a0мин', '${f.longBlinks}'),
+      ('Кивки за 5\u00a0мин', '${f.nods}'),
+      ('Охват глаз', '${(f.eyeCoverage * 100).round()} %'),
+    ];
     return SectionCard(
       title: 'Бдительность',
       icon: Icons.insights_outlined,
@@ -44,30 +58,18 @@ class VigilanceCard extends StatelessWidget {
             ).textTheme.titleMedium?.copyWith(color: color),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _metric(
-                context,
-                'Глаза закрыты',
-                f.perclos == null ? '—' : '${(f.perclos! * 100).round()} %',
-              ),
-              _metric(
-                context,
-                'Моргания/мин',
-                f.blinksPerMinute == null
-                    ? '—'
-                    : f.blinksPerMinute!.round().toString(),
-              ),
-              _metric(
-                context,
-                'Длит. моргания',
-                f.meanBlinkMs == null ? '—' : '${f.meanBlinkMs} мс',
-              ),
-              _metric(context, 'Долгие · 5 мин', '${f.longBlinks}'),
-              _metric(context, 'Кивки · 5 мин', '${f.nods}'),
-            ],
+          LayoutBuilder(
+            builder: (context, box) => Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final (name, value) in metrics)
+                  SizedBox(
+                    width: (box.maxWidth - 16) / 3,
+                    child: _metric(context, name, value),
+                  ),
+              ],
+            ),
           ),
           const Divider(height: 28),
           Text(
@@ -132,6 +134,7 @@ class VigilanceCard extends StatelessWidget {
   }
 
   Widget _metric(BuildContext context, String name, String value) => Container(
+    constraints: const BoxConstraints(minHeight: 76),
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
     decoration: BoxDecoration(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -141,7 +144,12 @@ class VigilanceCard extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(value, style: Theme.of(context).textTheme.titleMedium),
-        Text(name, style: Theme.of(context).textTheme.bodySmall),
+        Text(
+          name,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
       ],
     ),
   );
