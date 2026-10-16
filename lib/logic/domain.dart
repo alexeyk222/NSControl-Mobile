@@ -4,3 +4,4 @@ export 'calibration.dart';
 export 'observation.dart';
 export 'sleep.dart';
 export 'recommendation.dart';
+export 'fatigue.dart';

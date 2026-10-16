@@ -20,6 +20,12 @@ class SleepController extends ChangeNotifier {
       _rules = RecommendationEngine(tripId: const Uuid().v4());
       evaluate();
     };
+    trip.onFatigueHigh = evaluate;
+    trip.onVitalsChanged = evaluate;
+    trip.onBreakTaken = () {
+      _rules.restTaken();
+      evaluate();
+    };
     _timer = Timer.periodic(const Duration(minutes: 1), (_) => evaluate());
     evaluate();
   }
@@ -141,6 +147,9 @@ class SleepController extends ChangeNotifier {
       tripStarted: trip.active,
       eyesEventOccurred: eyes,
       headEventActive: head ?? (trip.snapshot?.head.activeEvent != null),
+      fatigueHigh: trip.fatigue.level == FatigueLevel.high,
+      drivingTime: trip.active ? trip.drivingTime : null,
+      bodyBattery: trip.freshVitals?.bodyBattery,
     );
     recommendation = update.recommendation;
     final rec = update.recommendation;
@@ -161,6 +170,9 @@ class SleepController extends ChangeNotifier {
           'utc_offset_minutes': now.timeZoneOffset.inMinutes,
           if (containsSleep) 'sleep': summary.toJson(),
           if (containsAssessment) 'self_assessment': assessment.name,
+          if (trip.active) 'driving_minutes': trip.drivingTime.inMinutes,
+          if (trip.active) 'fatigue': trip.fatigue.toJson(),
+          'body_battery': ?trip.freshVitals?.bodyBattery,
         },
         'rules_version': Recommendation.rulesVersion,
         'data_sufficient': summary.complete ? 1 : 0,

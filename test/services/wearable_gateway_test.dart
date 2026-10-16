@@ -154,4 +154,76 @@ void main() {
     now = 31000000;
     expect(gateway.synchronized, isFalse);
   });
+
+  test('vitals and watch acknowledgement require the live handshake', () async {
+    final sent = <Map<String, Object?>>[];
+    final vitals = <WearableVitals>[];
+    final acks = <List<String>>[];
+    final gateway = WearableGateway(
+      nowUs: () => 5000000,
+      send: (m) async => sent.add(m),
+      onVitals: vitals.add,
+      onUserAck: acks.add,
+    );
+    gateway.setState(
+      tripId: 't',
+      sessionId: 's',
+      activeEventIds: ['e1'],
+      extra: {'level': 'warning', 'type': 'spoofed'},
+    );
+    await gateway.connect();
+    final connection = sent.last['connection_id'];
+    // Before "ready" there is no receiver epoch, so nothing is accepted.
+    await gateway.receive({
+      'type': 'vitals',
+      'hr': 60,
+      'connection_id': connection,
+      'receiver_epoch': 'x',
+    });
+    expect(vitals, isEmpty);
+    await gateway.receive({
+      'type': 'ready',
+      'receiver_epoch': 'x',
+      'connection_id': connection,
+    });
+    final snapshot = sent.firstWhere((m) => m['type'] == 'snapshot');
+    expect(snapshot['level'], 'warning');
+    await gateway.receive({
+      'type': 'vitals',
+      'hr': 61.4,
+      'body_battery': 140,
+      'stress': 30,
+      'connection_id': connection,
+      'receiver_epoch': 'x',
+    });
+    expect(vitals.single.heartRate, 61);
+    expect(vitals.single.bodyBattery, isNull);
+    expect(vitals.single.stress, 30);
+    await gateway.receive({
+      'type': 'vitals',
+      'hr': 'n/a',
+      'connection_id': connection,
+      'receiver_epoch': 'x',
+    });
+    expect(vitals, hasLength(1));
+    await gateway.receive({
+      'type': 'user_ack',
+      'event_ids': ['old', 'e1'],
+      'connection_id': connection,
+      'receiver_epoch': 'x',
+    });
+    expect(acks.single, ['e1']);
+    await gateway.receive({
+      'type': 'user_ack',
+      'event_ids': ['old'],
+      'connection_id': connection,
+      'receiver_epoch': 'x',
+    });
+    await gateway.receive({
+      'type': 'user_ack',
+      'connection_id': 'other',
+      'receiver_epoch': 'x',
+    });
+    expect(acks, hasLength(1));
+  });
 }

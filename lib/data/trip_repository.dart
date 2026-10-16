@@ -866,7 +866,7 @@ String _wallTime(String value) {
 }
 
 final _sleepPattern = RegExp(
-  r'sleep|slumber|сон|сна|недосып|completeness|healthkit|healthconnect',
+  r'sleep|slumber|сон|сна|недосып|completeness|healthkit|healthconnect|body_battery',
   caseSensitive: false,
 );
 final _assessmentPattern = RegExp(

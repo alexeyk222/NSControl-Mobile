@@ -68,6 +68,25 @@
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Камера нужна для локального контроля закрытия глаз и наклона головы. Кадры не сохраняются и не передаются.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>org.nscontrol.garmin</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nscontrol-ciq</string>
+			</array>
+		</dict>
+	</array>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>gcm-ciq</string>
+	</array>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Bluetooth нужен для передачи предупреждений на часы Garmin.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Bluetooth нужен для передачи предупреждений на часы Garmin.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Завершённый сон с часов нужен для локальных рекомендаций; доступна только информация о сне.</string>
 </dict>

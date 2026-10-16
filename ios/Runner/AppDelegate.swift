@@ -7,10 +7,15 @@ import WatchConnectivity
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
-    private var platform: PlatformBridge?
+    static private(set) var platform: PlatformBridge?
     func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
         GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-        platform = PlatformBridge(messenger: engineBridge.applicationRegistrar.messenger())
+        Self.platform = PlatformBridge(messenger: engineBridge.applicationRegistrar.messenger())
+    }
+    override func application(_ app: UIApplication, open url: URL,
+                              options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        if Self.platform?.handle(url: url) == true { return true }
+        return super.application(app, open: url, options: options)
     }
 }
 
@@ -25,6 +30,13 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
     private let iso = ISO8601DateFormatter()
     private var observers: [NSObjectProtocol] = []
     private var watch: WCSession? { WCSession.isSupported() ? WCSession.default : nil }
+    private var garmin: GarminBridge!
+    private static let transportKey = "nscontrol.wearable.transport"
+    /// "garmin" or "watch_connectivity"; Apple Watch stays the default when paired.
+    private var transport: String {
+        get { UserDefaults.standard.string(forKey: Self.transportKey) ?? "watch_connectivity" }
+        set { UserDefaults.standard.set(newValue, forKey: Self.transportKey) }
+    }
 
     init(messenger: FlutterBinaryMessenger) {
         super.init()
@@ -32,6 +44,7 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         eventChannel = FlutterEventChannel(name: "nscontrol/events", binaryMessenger: messenger)
         eventChannel.setStreamHandler(self)
         channel.setMethodCallHandler { [weak self] call, result in self?.handle(call, result: result) }
+        garmin = GarminBridge { [weak self] event in self?.emit(event) }
         watch?.delegate = self; watch?.activate()
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification,
             object: nil, queue: .main) { [weak self] _ in
@@ -50,9 +63,14 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         })
     }
     deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    func handle(url: URL) -> Bool {
+        guard garmin.handle(url: url) else { return false }
+        transport = "garmin"
+        return true
+    }
     private func emit(_ event: [String: Any]) { DispatchQueue.main.async { self.sink?(event) } }
     func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        sink = events; events(["type": "wearable_status", "status": wearableStatus()]); return nil
+        sink = events; events(["type": "wearable_status", "status": currentWearableStatus()]); return nil
     }
     func onCancel(withArguments arguments: Any?) -> FlutterError? { sink = nil; return nil }
     private func finish(_ result: @escaping FlutterResult, _ value: Any?) { DispatchQueue.main.async { result(value) } }
@@ -83,13 +101,24 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
                     "limitation": "HealthKit does not disclose read permission. An empty result may mean no records or denied access."]) }
             }
         case "sleep.read": readSleep(args, result: result)
-        case "wearable.status": result(wearableStatus())
-        case "wearable.devices":
-            result(watch?.isPaired == true ? [["id": "apple_watch", "name": "Apple Watch", "connected": watch?.isReachable == true]] : [])
-        case "wearable.connect": watch?.activate(); result(wearableStatus())
+        case "wearable.status": result(currentWearableStatus())
+        case "wearable.devices": result(wearableDevices())
+        case "wearable.connect":
+            let id = args["deviceId"] as? String
+            if id == "garmin:select" { result(garmin.selectDevices()); return }
+            if id?.hasPrefix("garmin:") == true || (id == nil && transport == "garmin") {
+                transport = "garmin"
+                garmin.connect(id: id) { value in self.finish(result, value) }
+            } else {
+                transport = "watch_connectivity"; watch?.activate(); result(wearableStatus())
+            }
         case "wearable.send":
             guard let message = args["message"] as? [String: Any] else { result(["status": "error", "reason": "Missing message"]); return }
-            sendToWatch(message, result: result)
+            if transport == "garmin" {
+                garmin.send(propertyList(message) as? [String: Any] ?? [:]) { value in self.finish(result, value) }
+            } else {
+                sendToWatch(message, result: result)
+            }
         default: result(FlutterMethodNotImplemented)
         }
     }
@@ -145,6 +174,20 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         }
         health.execute(query)
     }
+    private func currentWearableStatus() -> [String: Any] {
+        transport == "garmin" ? garmin.status() : wearableStatus()
+    }
+    private func wearableDevices() -> [[String: Any]] {
+        var list: [[String: Any]] = []
+        if watch?.isPaired == true {
+            list.append(["id": "apple_watch", "name": "Apple Watch", "connected": watch?.isReachable == true, "transport": "watch_connectivity"])
+        }
+        list += garmin.deviceList()
+        if garmin.available {
+            list.append(["id": "garmin:select", "name": "Выбрать часы Garmin…", "connected": false, "transport": "garmin", "action": true])
+        }
+        return list
+    }
     private func wearableStatus() -> [String: Any] {
         guard let watch else { return ["status": "unavailable", "connected": false] }
         let active = watch.activationState == .activated
@@ -179,12 +222,16 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
             complete(["status": "sent", "accepted": true, "app_acknowledged": true, "physical_vibration_verified": false])
         }, errorHandler: { error in complete(["status": "error", "accepted": false, "reason": error.localizedDescription]) })
     }
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-        emit(["type": "wearable_status", "status": wearableStatus()])
+    // Apple Watch state is only reported while it is the selected transport.
+    private func emitWatchStatus(_ status: [String: Any]) {
+        if transport == "watch_connectivity" { emit(["type": "wearable_status", "status": status]) }
     }
-    func sessionReachabilityDidChange(_ session: WCSession) { emit(["type": "wearable_status", "status": wearableStatus()]) }
-    func sessionWatchStateDidChange(_ session: WCSession) { emit(["type": "wearable_status", "status": wearableStatus()]) }
-    func sessionDidBecomeInactive(_ session: WCSession) { emit(["type": "wearable_status", "status": ["status": "disconnected", "connected": false]]) }
+    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        emitWatchStatus(wearableStatus())
+    }
+    func sessionReachabilityDidChange(_ session: WCSession) { emitWatchStatus(wearableStatus()) }
+    func sessionWatchStateDidChange(_ session: WCSession) { emitWatchStatus(wearableStatus()) }
+    func sessionDidBecomeInactive(_ session: WCSession) { emitWatchStatus(["status": "disconnected", "connected": false]) }
     func sessionDidDeactivate(_ session: WCSession) { session.activate() }
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { emit(["type": "wearable_message", "message": message]) }
 }

@@ -47,6 +47,8 @@ class TripController extends ChangeNotifier {
       nowUs: () => clock.elapsedMicroseconds,
       send: platform.send,
       onDelivery: _delivery,
+      onVitals: _onVitals,
+      onUserAck: (ids) => acknowledge(ids.toSet(), fromWatch: true),
     );
     _timer = Timer.periodic(const Duration(milliseconds: 50), (_) => _tick());
     _platformEvents = platform.events.listen(
@@ -73,6 +75,7 @@ class TripController extends ChangeNotifier {
   String? tripId, sessionId, lastFinishedTrip;
   String? error, alertError;
   String wearableStatus = 'Часы не подключены';
+  List<Map<String, Object?>> wearableDevices = [];
   String? recommendationText;
   bool journalIncomplete = false;
   bool cameraPermissionBlocked = false;
@@ -84,6 +87,12 @@ class TripController extends ChangeNotifier {
   int _lastUiUs = 0, _lastReconnectUs = 0, _lastWatchSyncUs = 0;
   int _lastCheckpointUs = 0;
   final List<int> completedPerMinute = [];
+  FatigueMonitor? _fatigueMonitor;
+  FatigueSnapshot fatigue = FatigueSnapshot.empty;
+  final drive = DriveClock();
+  WearableVitals? vitals;
+  int _lastFatigueUs = 0;
+  String? watchAcknowledgedAt;
   bool _foreground = true,
       _disposed = false,
       _cameraFailureBusy = false,
@@ -94,6 +103,9 @@ class TripController extends ChangeNotifier {
   StreamSubscription<Map<String, Object?>>? _platformEvents;
   void Function(bool eyesEvent, bool headActive)? onCameraEvidence;
   VoidCallback? onTripStarted, onTripEnded;
+
+  /// Fatigue level reached "high", a break was taken, or watch vitals changed.
+  VoidCallback? onFatigueHigh, onBreakTaken, onVitalsChanged;
   ObservationSnapshot? get snapshot => engine?.snapshot;
   bool get active => tripId != null;
   int get sessionNowUs =>
@@ -102,6 +114,20 @@ class TripController extends ChangeNotifier {
       ((clock.elapsedMicroseconds - _calibrationStart) / 10000000).clamp(0, 1);
   int get calibrationSamples => _collector?.usableFrames ?? 0;
   Future<void> get pendingWrites => _writes;
+  Duration get drivingTime =>
+      Duration(microseconds: drive.continuousUs(clock.elapsedMicroseconds));
+  Duration get untilBreak =>
+      Duration(microseconds: drive.untilBreakUs(clock.elapsedMicroseconds));
+
+  /// Watch telemetry is used for 30 minutes after it was received.
+  WearableVitals? get freshVitals {
+    final v = vitals;
+    if (v == null) return null;
+    return clock.elapsedMicroseconds - v.receivedUs <= 30 * 60 * 1000000
+        ? v
+        : null;
+  }
+
   void journal(Future<void> Function(TripRepository) operation) =>
       _write(operation);
 
@@ -139,6 +165,9 @@ class TripController extends ChangeNotifier {
     tripId = _ids.v4();
     lastFinishedTrip = null;
     error = null;
+    drive.reset();
+    drive.active(clock.elapsedMicroseconds);
+    fatigue = FatigueSnapshot.empty;
     final id = tripId!;
     _write(
       (db) => db.insertTrip({
@@ -190,6 +219,7 @@ class TripController extends ChangeNotifier {
           faces: measurements,
         ),
       );
+      _feedFatigue(measurements, captured - sessionBaseUs);
       if (engine!.snapshot.requiresRecalibration) {
         unawaited(
           recalibrate(
@@ -202,9 +232,90 @@ class TripController extends ChangeNotifier {
     _throttledNotify();
   }
 
+  void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
+    final monitor = _fatigueMonitor, profile = calibration;
+    if (monitor == null || profile == null) return;
+    final face =
+        measured.length == 1 && measured.single.trackingId == profile.trackingId
+        ? measured.single
+        : null;
+    if (face != null &&
+        !settings.hiddenEyes &&
+        face.hasEyes &&
+        FaceMeasurement.angle(face.yaw) &&
+        face.yaw!.abs() <= profile.detector.eyeYawLimit) {
+      monitor.addEyes(atUs, face.leftEye!, face.rightEye!);
+    } else {
+      monitor.eyesUnavailable();
+    }
+    if (face != null &&
+        face.hasHeadAngles &&
+        (face.yaw! - profile.neutralYaw).abs() <= settings.headYawLimit) {
+      monitor.addHead(atUs, face.pitchDown! - profile.neutralPitch);
+    } else {
+      monitor.headUnavailable();
+    }
+  }
+
+  void _updateFatigue() {
+    final monitor = _fatigueMonitor;
+    if (monitor == null || phase != TripPhase.observing) return;
+    final previous = fatigue.level;
+    fatigue = monitor.snapshot(sessionNowUs);
+    if (fatigue.level == previous) return;
+    if (fatigue.level == FatigueLevel.high) {
+      // A short chime, never louder than the configured alarm and never on
+      // top of an active camera alarm.
+      if (!_audioRequested) {
+        unawaited(
+          _safe(
+            () => platform.testAlert(
+              volume: settings.volume * .6,
+              vibrate: settings.vibration,
+            ),
+          ),
+        );
+      }
+      onFatigueHigh?.call();
+    }
+    _pushWatchState();
+    _notify();
+  }
+
+  /// The user confirms a rest stop: restart the continuous-driving count and
+  /// clear fatigue trends (eye evidence stays until the trip ends).
+  void markBreak() {
+    if (!active) return;
+    drive.markBreak(clock.elapsedMicroseconds);
+    _fatigueMonitor = calibration == null ? null : _newFatigueMonitor();
+    fatigue = FatigueSnapshot.empty;
+    onBreakTaken?.call();
+    _pushWatchState();
+    _notify();
+  }
+
+  FatigueMonitor _newFatigueMonitor() => FatigueMonitor(
+    eyeThreshold: settings.hiddenEyes ? null : calibration!.eyeThreshold,
+    nodThreshold: settings.pitchThreshold * .6,
+    eyesEventUs: settings.eyesClosedUs,
+    headEventUs: settings.headDownUs,
+  );
+
+  void _onVitals(WearableVitals value) {
+    final changed = vitals?.bodyBattery != value.bodyBattery;
+    vitals = value;
+    if (changed) onVitalsChanged?.call();
+    _notify();
+  }
+
   void _tick() {
     if (_disposed) return;
     final now = clock.elapsedMicroseconds;
+    if (active && phase != TripPhase.paused) drive.active(now);
+    if (now - _lastFatigueUs >= 1000000) {
+      _lastFatigueUs = now;
+      _updateFatigue();
+    }
     if (phase == TripPhase.calibrating &&
         now - _calibrationStart >= 10000000 &&
         !_calibrationFinishing) {
@@ -240,6 +351,8 @@ class TripController extends ChangeNotifier {
               : 'debug',
           'app_version': '1.0.0+1',
           'algorithm_version': ObservationEngine.algorithmVersion,
+          'fatigue': fatigue.toJson(),
+          'continuous_drive_s': drive.continuousUs(now) ~/ 1000000,
         };
         _write(
           (db) =>
@@ -297,6 +410,8 @@ class TripController extends ChangeNotifier {
       calibration: calibration!,
       settings: settings,
     );
+    _fatigueMonitor = _newFatigueMonitor();
+    fatigue = FatigueSnapshot.empty;
     final row = <String, Object?>{
       'id': sessionId,
       'trip_id': tripId,
@@ -425,9 +540,13 @@ class TripController extends ChangeNotifier {
     }());
   }
 
-  void acknowledge(Set<String> ids) {
+  void acknowledge(Set<String> ids, {bool fromWatch = false}) {
     if (engine == null) return;
-    _apply(engine!.acknowledge(eventIds: ids, nowUs: sessionNowUs));
+    final update = engine!.acknowledge(eventIds: ids, nowUs: sessionNowUs);
+    if (fromWatch && update.acknowledged.isNotEmpty) {
+      watchAcknowledgedAt = DateTime.now().toUtc().toIso8601String();
+    }
+    _apply(update);
     unawaited(wearable.cancel(ids.toList()));
   }
 
@@ -445,6 +564,7 @@ class TripController extends ChangeNotifier {
     engine = null;
     sessionId = null;
     _collector = null;
+    _fatigueMonitor = null;
     _audioRequested = false;
     _syncAudio(false);
     unawaited(wearable.cancel([], all: true));
@@ -489,6 +609,8 @@ class TripController extends ChangeNotifier {
       }),
     );
     lastFinishedTrip = id;
+    drive.reset();
+    fatigue = FatigueSnapshot.empty;
     onTripEnded?.call();
     recommendationText = null;
     _pushWatchState();
@@ -589,11 +711,24 @@ class TripController extends ChangeNotifier {
   }
 
   void _pushWatchState() {
+    final camera = snapshot?.cameraStatus;
     wearable.setState(
       tripId: tripId,
       sessionId: sessionId,
       activeEventIds: snapshot?.activeEvents.map((e) => e.id).toList() ?? [],
       recommendation: recommendationText,
+      extra: {
+        'level': !active
+            ? 'idle'
+            : switch (camera) {
+                CameraStatus.warning => 'warning',
+                CameraStatus.observing => 'observing',
+                CameraStatus.limited => 'limited',
+                _ => 'unavailable',
+              },
+        'fatigue': fatigue.level.name,
+        if (active) 'drive_min': drivingTime.inMinutes,
+      },
     );
     unawaited(wearable.snapshot());
   }
@@ -614,7 +749,9 @@ class TripController extends ChangeNotifier {
         await wearable.connect();
       }
       _notify();
-      return await platform.wearableDevices();
+      wearableDevices = await platform.wearableDevices();
+      _notify();
+      return wearableDevices;
     } catch (e) {
       wearableStatus = 'Подключение недоступно: $e';
       _notify();
@@ -634,6 +771,13 @@ class TripController extends ChangeNotifier {
         );
         _notify();
       }());
+    } else if (event['type'] == 'wearable_devices' &&
+        event['devices'] is List) {
+      wearableDevices = (event['devices'] as List)
+          .whereType<Map>()
+          .map((m) => Map<String, Object?>.from(m))
+          .toList();
+      _notify();
     } else if (event['type'] == 'wearable_status') {
       final detail = event['status'] is Map
           ? Map<String, Object?>.from(event['status'] as Map)

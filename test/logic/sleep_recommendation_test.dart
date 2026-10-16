@@ -282,4 +282,87 @@ void main() {
       expect(repeat.recommendation.id, escalation.recommendation.id);
     },
   );
+
+  group('rules 1.1 product extensions', () {
+    test('long continuous drive asks for a break only during a trip', () {
+      final e = RecommendationEngine(tripId: 'trip');
+      final enough = summary([record('one', -9, -1)]);
+      final before = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        drivingTime: const Duration(hours: 3),
+      );
+      expect(before.recommendation.action, RecommendationAction.noGrounds);
+      final short = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        drivingTime: const Duration(minutes: 119),
+      );
+      expect(short.recommendation.action, RecommendationAction.noGrounds);
+      final due = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        drivingTime: const Duration(hours: 2, minutes: 5),
+      );
+      expect(due.recommendation.action, RecommendationAction.takeBreak);
+      expect(due.shouldNotify, isTrue);
+      expect(due.recommendation.reasonTexts.single, contains('2 ч 5 мин'));
+    });
+
+    test('fatigue trend latches until a break and ranks below head event', () {
+      final e = RecommendationEngine(tripId: 'trip');
+      final enough = summary([record('one', -9, -1)]);
+      final tired = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        fatigueHigh: true,
+      );
+      expect(tired.recommendation.action, RecommendationAction.takeBreak);
+      final later = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        headEventActive: true,
+      );
+      expect(later.recommendation.action, RecommendationAction.checkCondition);
+      expect(
+        later.recommendation.reasons,
+        contains(RecommendationReason.fatigueSigns),
+      );
+      e.restTaken();
+      final rested = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+      );
+      expect(rested.recommendation.action, RecommendationAction.noGrounds);
+    });
+
+    test('low Body Battery is a low-priority reason, eyes still dominate', () {
+      final e = RecommendationEngine(tripId: 'trip');
+      final enough = summary([record('one', -9, -1)]);
+      final low = e.evaluate(localNow: now, sleep: enough, bodyBattery: 15);
+      expect(
+        low.recommendation.action,
+        RecommendationAction.reconsiderTripTime,
+      );
+      expect(
+        low.recommendation.reasonTexts.single,
+        contains('Body Battery 15'),
+      );
+      final ok = e.evaluate(localNow: now, sleep: enough, bodyBattery: 21);
+      expect(ok.recommendation.reasons, isEmpty);
+      final eyes = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        eyesEventOccurred: true,
+        bodyBattery: 15,
+      );
+      expect(eyes.recommendation.action, RecommendationAction.stopAndRest);
+    });
+  });
 }

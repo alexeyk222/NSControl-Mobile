@@ -382,4 +382,87 @@ void main() {
       );
     },
   );
+
+  test(
+    'watch "accept" silences the phone for the current events only',
+    () async {
+      await trip.wearable.connect();
+      final connection = platform.messages.last['connection_id'];
+      await trip.wearable.receive({
+        'type': 'ready',
+        'connection_id': connection,
+        'receiver_epoch': 'watch',
+      });
+      trip.sessionId = 'ack-session';
+      // The session began 5 s ago so the acknowledgement follows the frames.
+      trip.sessionBaseUs = trip.clock.elapsedMicroseconds - 5000000;
+      trip.sessionStartedAt = DateTime.now().toUtc();
+      trip.engine = ObservationEngine(
+        sessionId: 'ack-session',
+        calibration: testProfile(),
+      );
+      trip.phase = TripPhase.observing;
+      await repository.insertSession({
+        'id': 'ack-session',
+        'trip_id': trip.tripId,
+        'started_at': trip.sessionStartedAt!.toIso8601String(),
+      });
+      for (var at = 0; at <= 1700000; at += 100000) {
+        camera.onFaces(
+          [
+            const DetectedFace(
+              FaceMeasurement(
+                trackingId: 7,
+                leftEye: .1,
+                rightEye: .1,
+                pitchDown: 0,
+                yaw: 0,
+                roll: 0,
+              ),
+              Rect.fromLTWH(0, 0, 100, 100),
+            ),
+          ],
+          trip.sessionBaseUs + at,
+          trip.sessionBaseUs + at,
+        );
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(platform.alarmActive, isTrue);
+      final snapshot = platform.messages.lastWhere(
+        (m) => m['type'] == 'snapshot',
+      );
+      expect(snapshot['level'], 'warning');
+      final eventId = trip.snapshot!.activeEvents.single.id;
+      await trip.wearable.receive({
+        'type': 'user_ack',
+        'event_ids': ['stale-event'],
+        'connection_id': connection,
+        'receiver_epoch': 'watch',
+      });
+      expect(trip.snapshot!.hasUnacknowledgedAlert, isTrue);
+      await trip.wearable.receive({
+        'type': 'user_ack',
+        'event_ids': [eventId],
+        'connection_id': connection,
+        'receiver_epoch': 'watch',
+      });
+      await Future<void>.delayed(Duration.zero);
+      expect(trip.snapshot!.hasUnacknowledgedAlert, isFalse);
+      expect(platform.alarmActive, isFalse);
+      expect(trip.watchAcknowledgedAt, isNotNull);
+      final cancel = platform.messages.lastWhere((m) => m['type'] == 'cancel');
+      expect(cancel['target_ids'], [eventId]);
+    },
+  );
+
+  test('break button restarts the continuous driving count', () async {
+    final now = trip.clock.elapsedMicroseconds;
+    trip.drive.reset();
+    for (var t = now - 7200000000; t <= now; t += 600000000) {
+      trip.drive.active(t);
+    }
+    expect(trip.drivingTime.inHours, 2);
+    trip.markBreak();
+    expect(trip.drivingTime.inMinutes, 0);
+  });
 }

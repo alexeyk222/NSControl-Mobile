@@ -5,6 +5,7 @@ import '../logic/domain.dart';
 import '../services/trip_controller.dart';
 import '../services/sleep_controller.dart';
 import 'components.dart';
+import 'vigilance_card.dart';
 
 class TripPage extends StatelessWidget {
   const TripPage({super.key, required this.trip, required this.sleep});
@@ -56,6 +57,10 @@ class TripPage extends StatelessWidget {
                 : Column(children: [camera, const SizedBox(height: 12), rec]);
           },
         ),
+        if (trip.active && trip.phase == TripPhase.observing) ...[
+          const SizedBox(height: 12),
+          VigilanceCard(trip: trip),
+        ],
         const SizedBox(height: 12),
         SectionCard(
           title: 'Как вы себя чувствуете?',
@@ -390,6 +395,10 @@ class TripPage extends StatelessWidget {
               ),
           ],
           const SizedBox(height: 14),
+          if (!trip.active && trip.freshVitals?.bodyBattery != null) ...[
+            Text('Body Battery по часам: ${trip.freshVitals!.bodyBattery}'),
+            const SizedBox(height: 6),
+          ],
           Text(
             'Часы: ${trip.wearableStatus}',
             maxLines: 3,

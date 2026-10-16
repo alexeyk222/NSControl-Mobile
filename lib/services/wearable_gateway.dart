@@ -5,10 +5,22 @@ typedef WatchMessage = Map<String, Object?>;
 /// Sends current state over an immediate transport. It intentionally has no
 /// retry queue for alert commands. Phone sound never waits on this gateway.
 class WearableGateway {
-  WearableGateway({required this.nowUs, required this.send, this.onDelivery});
+  WearableGateway({
+    required this.nowUs,
+    required this.send,
+    this.onDelivery,
+    this.onVitals,
+    this.onUserAck,
+  });
   final int Function() nowUs;
   final Future<void> Function(WatchMessage) send;
   final void Function(WatchMessage message, String status)? onDelivery;
+
+  /// Validated wearable telemetry (heart rate, Body Battery, stress).
+  final void Function(WearableVitals vitals)? onVitals;
+
+  /// The user pressed "accept" on the watch for the listed event ids.
+  final void Function(List<String> eventIds)? onUserAck;
   final _ids = const Uuid();
   String? _connectionId;
   String? _receiverEpoch;
@@ -23,6 +35,7 @@ class WearableGateway {
   String? _sessionId;
   List<String> _activeIds = [];
   String? _recommendation;
+  Map<String, Object?> _extra = const {};
   bool get connected => _connected;
   bool get synchronized =>
       _connected &&
@@ -45,11 +58,13 @@ class WearableGateway {
     String? sessionId,
     List<String> activeEventIds = const [],
     String? recommendation,
+    Map<String, Object?> extra = const {},
   }) {
     _tripId = tripId;
     _sessionId = sessionId;
     _activeIds = List.of(activeEventIds);
     _recommendation = recommendation;
+    _extra = Map.unmodifiable(extra);
   }
 
   Future<void> _transmit(WatchMessage message) async {
@@ -84,6 +99,7 @@ class WearableGateway {
   Future<void> snapshot() async {
     if (!_connected || _receiverEpoch == null) return;
     await _transmit({
+      ..._extra,
       ..._envelope('snapshot'),
       'active_event_ids': _activeIds,
       'recommendation': _recommendation,
@@ -154,6 +170,16 @@ class WearableGateway {
         _syncRequestedUs = null;
       }
       onDelivery?.call(message, 'received_${message['status']}');
+    } else if (message['type'] == 'vitals') {
+      final vitals = WearableVitals.fromMessage(message, nowUs());
+      if (vitals != null) onVitals?.call(vitals);
+    } else if (message['type'] == 'user_ack') {
+      final ids = message['event_ids'];
+      // Only events the phone currently reports as active can be acknowledged.
+      final targets = ids is List
+          ? ids.whereType<String>().where(_activeIds.contains).toList()
+          : List.of(_activeIds);
+      if (targets.isNotEmpty) onUserAck?.call(targets);
     }
   }
 
@@ -185,4 +211,42 @@ class WearableGateway {
       'all': all,
     });
   }
+}
+
+/// Telemetry sent by the Garmin app. Values outside physiological ranges are
+/// dropped individually; a message without any valid value is ignored.
+class WearableVitals {
+  const WearableVitals({
+    required this.receivedUs,
+    this.heartRate,
+    this.bodyBattery,
+    this.stress,
+  });
+  final int receivedUs;
+  final int? heartRate, bodyBattery, stress;
+
+  static int? _ranged(Object? value, int min, int max) {
+    if (value is! num || !value.isFinite) return null;
+    final v = value.round();
+    return v < min || v > max ? null : v;
+  }
+
+  static WearableVitals? fromMessage(WatchMessage m, int nowUs) {
+    final hr = _ranged(m['hr'], 25, 240);
+    final battery = _ranged(m['body_battery'], 0, 100);
+    final stress = _ranged(m['stress'], 0, 100);
+    if (hr == null && battery == null && stress == null) return null;
+    return WearableVitals(
+      receivedUs: nowUs,
+      heartRate: hr,
+      bodyBattery: battery,
+      stress: stress,
+    );
+  }
+
+  Map<String, Object?> toJson() => {
+    'hr': heartRate,
+    'body_battery': bodyBattery,
+    'stress': stress,
+  };
 }

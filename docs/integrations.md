@@ -101,13 +101,32 @@ swiftc -module-cache-path /tmp/nscontrol-swift-cache watchos/NSControlWatch/Aler
 
 ### Garmin Connect IQ
 
-Установить официальный Connect IQ SDK 9.2.0 и профиль устройства `fenix7x` через SDK Manager после входа в Garmin Connect account (вход требуется официальной инструкцией); путь к SDK передать явно. В рабочем окружении официальный менеджер подготовлен по пути `.tooling/SdkManager.app` (вне распространяемого исходного комплекта); однако проверка `codesign --verify --deep --strict` выявила недействительную arm64-подпись как в исходном официальном DMG, так и в копии. Менеджер не запускался; защиту macOS не отключали и приложение не переподписывали. Для входа следует получить проверенный актуальный менеджер с официального сайта Garmin, затем самостоятельно войти и загрузить fenix7x. Компилятор уже доступен в `.tooling/connectiq/bin/monkeyc`. Создать developer key локально, не включать его в комплект. `monkey.jungle`, manifest, ресурсы и исходники находятся в `garmin/`.
+Установить официальный Connect IQ SDK 9.2.0 и профиль устройства через SDK Manager после входа в Garmin Connect account. Для базовой модели из ТЗ нужен `fenix7x`, для подключённых fēnix 7X Pro Sapphire Solar — `fenix7xpro`. Обе цели включены в manifest, результаты испытаний фиксируются раздельно.
+
+В рабочем окружении официальный менеджер находится в `.tooling/SdkManager.app` (вне распространяемого комплекта). Проверки `codesign --verify --deep --strict` и `spctl --assess --type execute` вне песочницы успешно подтвердили подпись и нотариализацию Apple. Предыдущая ошибка проверки внутри ограниченной среды не означала повреждение приложения. Менеджер открыт; лицензионное соглашение должен принять пользователь либо явно подтвердить принятие от его имени. Защита macOS не отключалась, приложение не переподписывалось.
+
+Компилятор доступен в `.tooling/connectiq/bin/monkeyc`. Создать developer key локально, не включать его в комплект. `monkey.jungle`, manifest, ресурсы и исходники находятся в `garmin/`.
 
 ```sh
 mkdir -p build/garmin
 "$CIQ_SDK/bin/monkeyc" -f garmin/monkey.jungle -d fenix7x -y /private/path/developer_key.der -o build/garmin/NSControl.prg
 "$CIQ_SDK/bin/monkeydo" build/garmin/NSControl.prg fenix7x
+# Для подключённой Pro-модели в обеих командах выбрать fenix7xpro.
 ```
+
+Быстрый путь для подключённых по USB часов (macOS, `brew install libmtp`, Garmin Express закрыт): `bash tools/install_garmin.sh fenix7xpro`. Скрипт собирает PRG локальным ключом и копирует его в `GARMIN/Apps/NSCTRL.PRG` по MTP. Приложение появится в списке после отключения кабеля. `--build-only` вторым аргументом только собирает.
+
+#### Расширения протокола v1 (часы 1.1)
+
+| Направление | type | Поля | Поведение |
+|---|---|---|---|
+| телефон → часы | `snapshot` | `level` (`idle/observing/limited/warning/unavailable`), `fatigue`, `drive_min` | Отображение статуса и кольца; служебные поля конверта не перезаписываются |
+| часы → телефон | `vitals` | `hr`, `body_battery`, `stress` | Раз в минуту после рукопожатия; значения вне диапазона отбрасываются |
+| часы → телефон | `user_ack` | `event_ids` | Кнопка START на экране тревоги. Телефон подтверждает только события, активные сейчас, и шлёт `cancel` |
+
+#### Garmin на iPhone
+
+`ios/Runner/GarminBridge.swift` использует официальный Connect IQ iOS SDK. Подключение: Xcode → Runner → Package Dependencies → `https://github.com/garmin/connectiq-companion-app-sdk-ios`, добавить `ConnectIQ` к Runner (Embed), в Other Linker Flags `-ObjC`. Без пакета код собирается в заглушку «Сборка без Garmin Connect IQ SDK». Info.plist уже содержит схему `nscontrol-ciq`, `LSApplicationQueriesSchemes` = `gcm-ciq` и описание Bluetooth. В приложении: «Сон и часы» → «Подключить часы» → «Выбрать часы Garmin…». Откроется Garmin Connect; после выбора вернуться в NSControl и открыть приложение на часах.
 
 Для часов установить подписанный PRG в `GARMIN/APPS` поддерживаемым устройством способом; для магазина/пакета использовать экспорт SDK. UUID manifest должен совпадать с Android `GarminBridge.APP_ID`. Проверить отображение русского текста и его обрезку на устройстве. В приложении нет фонового сервиса, workout session или обещания работы после выгрузки; обязательный тест — запущенное приложение с активным и автоматически погасшим экраном.
 

@@ -6,9 +6,13 @@ enum SelfAssessment { unknown, notSleepy, sleepy }
 enum RecommendationAction {
   noGrounds(0, 'По доступным данным основания для рекомендации не выявлены'),
   reconsiderTripTime(1, 'Пересмотрите время поездки'),
-  checkCondition(2, 'Продолжительный наклон головы — проверьте состояние'),
-  delayAndRest(3, 'Отложите начало поездки и отдохните'),
-  stopAndRest(4, 'Остановитесь в безопасном месте для отдыха');
+  takeBreak(
+    2,
+    'Сделайте перерыв: остановитесь в безопасном месте на 15–20 минут',
+  ),
+  checkCondition(3, 'Продолжительный наклон головы — проверьте состояние'),
+  delayAndRest(4, 'Отложите начало поездки и отдохните'),
+  stopAndRest(5, 'Остановитесь в безопасном месте для отдыха');
 
   const RecommendationAction(this.priority, this.label);
   final int priority;
@@ -32,7 +36,13 @@ enum RecommendationReason {
   nightPeriod(
     'night_period',
     'Ночной период повышенной сонливости: 00:00–06:00',
-  );
+  ),
+  fatigueSigns(
+    'fatigue_signs',
+    'Ранние признаки усталости по камере: долгие моргания или кивки',
+  ),
+  longDrive('long_drive', 'Непрерывная поездка без перерыва'),
+  lowBodyBattery('low_body_battery', 'Низкий запас энергии по данным часов');
 
   const RecommendationReason(this.code, this.label);
   final String code, label;
@@ -48,8 +58,10 @@ class Recommendation {
     required this.assessment,
     required this.sleep,
     required this.evaluatedAt,
+    this.drivingTime,
+    this.bodyBattery,
   }) : reasons = List.unmodifiable(reasons);
-  static const rulesVersion = '1.0.0';
+  static const rulesVersion = '1.1.0';
   final String id, tripId;
   final RecommendationAction action;
   final List<RecommendationReason> reasons;
@@ -57,6 +69,8 @@ class Recommendation {
   final SelfAssessment assessment;
   final SleepSummary sleep;
   final DateTime evaluatedAt;
+  final Duration? drivingTime;
+  final int? bodyBattery;
   int get priority => action.priority;
   bool get actionable => priority > 0;
   String get message => action.label;
@@ -65,9 +79,15 @@ class Recommendation {
       : 'Полнота сведений о сне подтверждена';
   List<String> get reasonTexts => List.unmodifiable(
     reasons.map(
-      (r) => r == RecommendationReason.insufficientSleep
-          ? '${r.label}: ${sleep.duration.inHours} ч ${sleep.duration.inMinutes.remainder(60)} мин, источник: ${sleep.source}'
-          : r.label,
+      (r) => switch (r) {
+        RecommendationReason.insufficientSleep =>
+          '${r.label}: ${sleep.duration.inHours} ч ${sleep.duration.inMinutes.remainder(60)} мин, источник: ${sleep.source}',
+        RecommendationReason.longDrive when drivingTime != null =>
+          '${r.label}: ${drivingTime!.inHours} ч ${drivingTime!.inMinutes.remainder(60)} мин',
+        RecommendationReason.lowBodyBattery when bodyBattery != null =>
+          '${r.label}: Body Battery $bodyBattery',
+        _ => r.label,
+      },
     ),
   );
   Map<String, Object?> toJson() => {
@@ -83,6 +103,8 @@ class Recommendation {
     'assessment': assessment.name,
     'sleep': sleep.toJson(),
     'evaluatedAt': evaluatedAt.toIso8601String(),
+    'drivingMinutes': drivingTime?.inMinutes,
+    'bodyBattery': bodyBattery,
   };
 }
 
@@ -102,7 +124,9 @@ class RecommendationEngine {
     if (tripId.isEmpty) throw ArgumentError('Поездка должна иметь ID');
   }
   final String tripId;
-  bool _eyesSeen = false;
+  static const longDrive = Duration(hours: 2);
+  static const lowBodyBatteryLimit = 20;
+  bool _eyesSeen = false, _fatigueSeen = false;
   int _sequence = 0;
   Recommendation? _previous;
   String? _previousState;
@@ -114,8 +138,19 @@ class RecommendationEngine {
     bool tripStarted = false,
     bool eyesEventOccurred = false,
     bool headEventActive = false,
+    bool fatigueHigh = false,
+    Duration? drivingTime,
+    int? bodyBattery,
   }) {
     _eyesSeen = _eyesSeen || eyesEventOccurred;
+    // Fatigue trends are latched like eye evidence, but a break clears them.
+    _fatigueSeen = tripStarted && (_fatigueSeen || fatigueHigh);
+    final driveDue =
+        tripStarted && drivingTime != null && drivingTime >= longDrive;
+    final lowEnergy =
+        bodyBattery != null &&
+        bodyBattery >= 0 &&
+        bodyBattery <= lowBodyBatteryLimit;
     final reasons = <RecommendationReason>[];
     if (_eyesSeen) reasons.add(RecommendationReason.eyesClosed);
     if (assessment == SelfAssessment.sleepy) {
@@ -126,6 +161,9 @@ class RecommendationEngine {
     }
     if (headEventActive) reasons.add(RecommendationReason.headPitchDown);
     if (localNow.hour < 6) reasons.add(RecommendationReason.nightPeriod);
+    if (_fatigueSeen) reasons.add(RecommendationReason.fatigueSigns);
+    if (driveDue) reasons.add(RecommendationReason.longDrive);
+    if (lowEnergy) reasons.add(RecommendationReason.lowBodyBattery);
     var action = RecommendationAction.noGrounds;
     if (_eyesSeen) {
       action = RecommendationAction.stopAndRest;
@@ -136,7 +174,10 @@ class RecommendationEngine {
           : RecommendationAction.delayAndRest;
     } else if (headEventActive) {
       action = RecommendationAction.checkCondition;
-    } else if (reasons.contains(RecommendationReason.nightPeriod)) {
+    } else if (_fatigueSeen || driveDue) {
+      action = RecommendationAction.takeBreak;
+    } else if (reasons.contains(RecommendationReason.nightPeriod) ||
+        lowEnergy) {
       action = RecommendationAction.reconsiderTripTime;
     }
     final state = jsonEncode([
@@ -147,6 +188,7 @@ class RecommendationEngine {
       sleep.source,
       sleep.duration.inMicroseconds,
       sleep.readStatus.name,
+      lowEnergy,
     ]);
     final changed = state != _previousState;
     final shouldNotify =
@@ -161,6 +203,8 @@ class RecommendationEngine {
       assessment: assessment,
       sleep: sleep,
       evaluatedAt: localNow,
+      drivingTime: drivingTime,
+      bodyBattery: bodyBattery,
     );
     _previous = recommendation;
     _previousState = state;
@@ -171,9 +215,13 @@ class RecommendationEngine {
     );
   }
 
+  /// A confirmed break clears fatigue trends; eye evidence stays per ТЗ.
+  void restTaken() => _fatigueSeen = false;
+
   /// Ends the retention of camera evidence; create a fresh engine for a new trip.
   void endTrip() {
     _eyesSeen = false;
+    _fatigueSeen = false;
     _previous = null;
     _previousState = null;
   }

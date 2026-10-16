@@ -13,17 +13,11 @@ class IntegrationsPage extends StatefulWidget {
 }
 
 class _IntegrationsPageState extends State<IntegrationsPage> {
-  List<Map<String, Object?>> devices = [];
   bool connecting = false;
   Future<void> connect([String? id]) async {
     setState(() => connecting = true);
-    final found = await widget.trip.connectWearable(deviceId: id);
-    if (mounted) {
-      setState(() {
-        devices = found;
-        connecting = false;
-      });
-    }
+    await widget.trip.connectWearable(deviceId: id);
+    if (mounted) setState(() => connecting = false);
   }
 
   @override
@@ -55,13 +49,17 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                   icon: const Icon(Icons.bluetooth_searching),
                   label: Text(connecting ? 'Подключение…' : 'Подключить часы'),
                 ),
-                ...devices.map(
+                ...widget.trip.wearableDevices.map(
                   (d) => ListTile(
                     contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.watch),
+                    leading: Icon(
+                      d['action'] == true ? Icons.add_link : Icons.watch,
+                    ),
                     title: Text(d['name']?.toString() ?? d['id'].toString()),
                     subtitle: Text(
-                      d['connected'] == true
+                      d['action'] == true
+                          ? 'Откроется Garmin Connect'
+                          : d['connected'] == true
                           ? 'Связь установлена'
                           : 'Устройство сопряжено',
                     ),
@@ -71,7 +69,7 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'Откройте NSControl на Apple Watch SE или Garmin fēnix 7X. Ответ приложения часов подтверждает приём команды, а не физическую вибрацию.',
+                  'Откройте NSControl на Apple Watch SE или Garmin fēnix 7X. Ответ приложения часов подтверждает приём команды, а не физическую вибрацию. На Garmin кнопка START подтверждает тревогу; часы раз в минуту передают пульс, Body Battery и стресс.',
                 ),
               ],
             ),
