@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import '../data/trip_repository.dart';
 import '../logic/domain.dart';
+import '../version.dart';
 import 'camera_service.dart';
 import 'detector.dart';
 import 'platform_bridge.dart';
@@ -411,7 +412,7 @@ class TripController extends ChangeNotifier {
               : kProfileMode
               ? 'profile'
               : 'debug',
-          'app_version': '1.0.0+1',
+          'app_version': appVersion,
           'algorithm_version': ObservationEngine.algorithmVersion,
           'fatigue': fatigue.toJson(),
           'continuous_drive_s': drive.continuousUs(now) ~/ 1000000,

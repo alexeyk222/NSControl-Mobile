@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import '../logic/domain.dart';
 import '../services/trip_controller.dart';
+import '../version.dart';
 import 'components.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -204,7 +205,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 'Детектор: ${widget.trip.detector.capabilities.id} ${widget.trip.detector.capabilities.version}',
               ),
               Text(
-                'Алгоритм: ${ObservationEngine.algorithmVersion} · NSControl 1.0.0+1',
+                'Алгоритм: ${ObservationEngine.algorithmVersion} · NSControl $appVersion',
               ),
               Text(
                 'Завершено анализов: ${widget.trip.camera.pipeline.completed}',
@@ -225,11 +226,21 @@ class _SettingsPageState extends State<SettingsPage> {
               Text(
                 'Возраст результата: ${widget.trip.camera.pipeline.lastCompletedUs == null ? '—' : '${((widget.trip.clock.elapsedMicroseconds - widget.trip.camera.pipeline.lastCompletedUs!) / 1000).round()} мс'}',
               ),
-              if (widget.trip.faces.length == 1)
+              if (widget.trip.faces.length == 1) ...[
                 Text(
                   'Pitch ↓ ${widget.trip.faces.single.measurement.pitchDown?.toStringAsFixed(1) ?? '—'}° · Yaw ${widget.trip.faces.single.measurement.yaw?.toStringAsFixed(1) ?? '—'}°',
                 ),
+                Text(
+                  'Глаза L/R: ${widget.trip.faces.single.measurement.leftEye?.toStringAsFixed(2) ?? '—'} / ${widget.trip.faces.single.measurement.rightEye?.toStringAsFixed(2) ?? '—'} · порог ${widget.trip.calibration?.eyeThreshold?.toStringAsFixed(2) ?? '—'}',
+                ),
+              ],
+              Text(
+                'Усталость: ${widget.trip.fatigue.level.name} · PERCLOS ${widget.trip.fatigue.perclos == null ? '—' : '${(widget.trip.fatigue.perclos! * 100).toStringAsFixed(1)}%'}',
+              ),
               Text('Часы: ${widget.trip.wearableStatus}'),
+              Text(
+                'Обмен с часами: ${widget.trip.wearable.connected ? (widget.trip.wearable.synchronized ? 'время синхронизировано' : 'нет синхронизации') : 'не подключены'}',
+              ),
               const SizedBox(height: 12),
               const Text(
                 'Контроль скорости и задержки выполняется в release на целевых устройствах. Кадры не сохраняются.',
