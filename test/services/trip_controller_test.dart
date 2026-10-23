@@ -526,4 +526,26 @@ void main() {
       expect(trip.alarmEscalated, isFalse);
     },
   );
+
+  test('wearable status codes are shown in Russian', () {
+    expect(
+      TripController.describeWearable({'status': 'unpaired'}),
+      contains('Apple Watch не сопряжены'),
+    );
+    expect(
+      TripController.describeWearable({
+        'status': 'disconnected',
+        'reason': 'Open NSControl on Apple Watch',
+      }),
+      'Часы не на связи. Откройте NSControl на часах',
+    );
+    expect(
+      TripController.describeWearable({
+        'status': 'app_not_installed',
+        'transport': 'garmin',
+        'reason': 'Приложение NSControl не установлено на часах',
+      }),
+      'Приложение NSControl не установлено на часах',
+    );
+  });
 }

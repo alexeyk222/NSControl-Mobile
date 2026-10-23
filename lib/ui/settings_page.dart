@@ -235,7 +235,12 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
               ],
               Text(
-                'Усталость: ${widget.trip.fatigue.level.name} · PERCLOS ${widget.trip.fatigue.perclos == null ? '—' : '${(widget.trip.fatigue.perclos! * 100).toStringAsFixed(1)}%'}',
+                'Усталость: ${switch (widget.trip.fatigue.level) {
+                  FatigueLevel.unknown => 'нет данных',
+                  FatigueLevel.low => 'не видна',
+                  FatigueLevel.moderate => 'умеренная',
+                  FatigueLevel.high => 'высокая',
+                }} · PERCLOS ${widget.trip.fatigue.perclos == null ? '—' : '${(widget.trip.fatigue.perclos! * 100).toStringAsFixed(1)}%'}',
               ),
               Text('Часы: ${widget.trip.wearableStatus}'),
               Text(

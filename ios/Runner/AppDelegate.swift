@@ -194,7 +194,7 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         return ["status": !active ? "connecting" : !watch.isPaired ? "unpaired" : !watch.isWatchAppInstalled ? "app_not_installed" : watch.isReachable ? "connected" : "disconnected",
             "connected": active && watch.isReachable, "paired": watch.isPaired,
             "app_installed": watch.isWatchAppInstalled, "transport": "watch_connectivity",
-            "reason": watch.isReachable ? "Live channel available" : "Open NSControl on Apple Watch"]
+            "reason": watch.isReachable ? "Apple Watch на связи" : "Откройте NSControl на Apple Watch"]
     }
     private func propertyList(_ value: Any) -> Any? {
         if value is NSNull { return nil }

@@ -810,8 +810,7 @@ class TripController extends ChangeNotifier {
       final result = await platform.call('wearable.connect', {
         'deviceId': deviceId,
       });
-      wearableStatus = (result['message'] ?? result['status'] ?? 'Подключение')
-          .toString();
+      wearableStatus = describeWearable(result);
       if (result['status'] == 'connected' || result['reachable'] == true) {
         await wearable.connect();
       }
@@ -850,8 +849,7 @@ class TripController extends ChangeNotifier {
           ? Map<String, Object?>.from(event['status'] as Map)
           : event;
       final status = detail['status'];
-      wearableStatus = (detail['reason'] ?? detail['message'] ?? status)
-          .toString();
+      wearableStatus = describeWearable(detail);
       if (status == 'connected' || detail['reachable'] == true) {
         if (!wearable.connected) unawaited(wearable.connect());
       } else if (detail['connected'] == false || status != 'connected') {
@@ -859,6 +857,30 @@ class TripController extends ChangeNotifier {
       }
       _notify();
     }
+  }
+
+  /// User-facing wearable state. Native layers report status codes; Garmin
+  /// bridges also supply Russian reasons, other free-form text is not shown.
+  static String describeWearable(Map<String, Object?> detail) {
+    final reason = detail['reason']?.toString();
+    if (detail['transport'] == 'garmin' &&
+        reason != null &&
+        reason.isNotEmpty) {
+      return reason;
+    }
+    return switch (detail['status']) {
+      'connected' => 'Часы на связи',
+      'disconnected' => 'Часы не на связи. Откройте NSControl на часах',
+      'unpaired' => 'Apple Watch не сопряжены. Для Garmin выберите часы ниже',
+      'app_not_installed' => 'Приложение NSControl не установлено на часах',
+      'connecting' => 'Подключение…',
+      'unavailable' => 'Обмен с часами недоступен на этом устройстве',
+      'selection_required' => 'Выберите часы в списке',
+      'selection_requested' => 'Выберите часы в Garmin Connect и вернитесь',
+      'timeout' => 'Часы не ответили вовремя',
+      'error' => 'Ошибка связи с часами',
+      _ => 'Часы не подключены',
+    };
   }
 
   final Map<String, Map<String, Object?>> _deliveries = {};

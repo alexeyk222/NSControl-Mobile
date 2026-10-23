@@ -13,17 +13,17 @@ class GarminBridge(private val context: Context, private val emit: (Map<String, 
     private val main = Handler(Looper.getMainLooper())
     private val sdk = ConnectIQ.getInstance(context, ConnectIQ.IQConnectType.WIRELESS)
     private var ready = false
-    private var reason = "Garmin SDK initializing"
+    private var reason = "Запуск Garmin Connect IQ"
     private var device: IQDevice? = null
     private var app: IQApp? = null
     init {
         try {
             sdk.initialize(context, false, object : ConnectIQ.ConnectIQListener {
-                override fun onSdkReady() { ready = true; reason = "Select a paired Garmin device"; notifyStatus() }
+                override fun onSdkReady() { ready = true; reason = "Выберите сопряжённые часы Garmin"; notifyStatus() }
                 override fun onInitializeError(error: ConnectIQ.IQSdkErrorStatus) {
                     ready = false; reason = error.name; notifyStatus()
                 }
-                override fun onSdkShutDown() { ready = false; reason = "Garmin SDK stopped"; notifyStatus() }
+                override fun onSdkShutDown() { ready = false; reason = "Garmin Connect IQ остановлен"; notifyStatus() }
             })
         } catch (e: Exception) { reason = e.message ?: "Garmin SDK unavailable" }
     }
@@ -49,16 +49,16 @@ class GarminBridge(private val context: Context, private val emit: (Map<String, 
         val selected = if (id != null) known.find { it.deviceIdentifier.toString() == id }
             else known.singleOrNull()
         if (selected == null) {
-            complete(mapOf("status" to "selection_required", "reason" to "Select a paired device", "devices" to devices())); return
+            complete(mapOf("status" to "selection_required", "reason" to "Выберите сопряжённые часы", "devices" to devices())); return
         }
         sdk.unregisterAllForEvents()
-        device = selected; app = null; reason = "Checking NSControl watch app"
+        device = selected; app = null; reason = "Проверка приложения NSControl на часах"
         sdk.registerForDeviceEvents(selected) { _, state ->
             reason = state.name; notifyStatus()
         }
         var finished = false
         fun finish(value: Map<String, Any?>) { if (!finished) { finished = true; complete(value) } }
-        main.postDelayed({ finish(mapOf("status" to "error", "reason" to "Garmin app discovery timed out")) }, 8000)
+        main.postDelayed({ finish(mapOf("status" to "error", "reason" to "Garmin не ответил за 8 с. Проверьте Garmin Connect и связь.")) }, 8000)
         sdk.getApplicationInfo(APP_ID, selected, object : ConnectIQ.IQApplicationInfoListener {
             override fun onApplicationInfoReceived(installed: IQApp) {
                 if (device?.deviceIdentifier != selected.deviceIdentifier) return
@@ -72,11 +72,11 @@ class GarminBridge(private val context: Context, private val emit: (Map<String, 
                         emit(mapOf("type" to "wearable_status", "status" to mapOf("status" to "error", "reason" to result.name)))
                     }
                 }
-                reason = "App installed; open NSControl on watch for live handshake"
+                reason = "Откройте NSControl на часах для обмена"
                 notifyStatus(); finish(status())
             }
             override fun onApplicationNotInstalled(applicationId: String) {
-                reason = "NSControl Connect IQ application is not installed"
+                reason = "Приложение NSControl не установлено на часах"
                 notifyStatus(); finish(mapOf("status" to "app_not_installed", "reason" to reason))
             }
         })
