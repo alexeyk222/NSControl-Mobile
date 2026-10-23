@@ -41,7 +41,7 @@ final class GarminBridge: NSObject {
 
     /// Opens Garmin Connect for the user to choose watches.
     func selectDevices() -> [String: Any] {
-        sdk.showConnectIQDeviceSelection()
+        sdk.showDeviceSelection()
         reason = "Выберите часы в Garmin Connect и вернитесь в NSControl"
         return ["status": "selection_requested", "reason": reason, "transport": "garmin"]
     }
@@ -86,7 +86,7 @@ final class GarminBridge: NSObject {
         sdk.unregister(forAllDeviceEvents: self)
         sdk.unregister(forAllAppMessages: self)
         device = selected; appInstalled = false
-        app = IQApp(uuid: UUID(uuidString: Self.appId), storeUuid: UUID(), device: selected)
+        app = IQApp(uuid: UUID(uuidString: Self.appId), store: UUID(), device: selected)
         reason = "Проверка приложения NSControl на часах"
         sdk.register(forDeviceEvents: selected, delegate: self)
         var finished = false
