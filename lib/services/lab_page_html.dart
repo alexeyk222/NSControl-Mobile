@@ -253,7 +253,7 @@ function draw(c) {
   g.strokeStyle = css("--line"); g.fillStyle = css("--muted"); g.lineWidth = 1; g.font = "11px sans-serif"; g.setLineDash([]);
   const ticks = c.sym != null ? [lo, lo / 2, 0, hi / 2, hi] : [lo, (lo + hi) / 2, hi];
   for (const v of ticks) { g.beginPath(); g.moveTo(pad.l, y(v)); g.lineTo(w - pad.r, y(v)); g.stroke(); g.fillText(Number(v.toFixed(2)).toString(), 2, y(v) + 4); }
-  for (let s = Math.ceil(t0 / 5) * 5; s <= t1; s += 5) g.fillText(fmtT(s), x(s) - 14, h - 2);
+  for (let s = Math.max(0, Math.ceil(t0 / 5) * 5); s <= t1; s += 5) g.fillText(fmtT(s), x(s) - 14, h - 2);
   const flat = [];
   if (c.threshold && threshold != null) flat.push([threshold, "#888"]);
   if (c.id === "timers") flat.push([thresholds.eyes, "#3b7dd8"], [thresholds.head, "#d23f31"]);

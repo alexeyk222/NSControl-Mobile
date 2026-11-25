@@ -165,7 +165,10 @@ class LabServer {
     final server = _server;
     _server = null;
     for (final socket in _clients.toList()) {
-      await socket.close();
+      // A page that never answers the close handshake must not block us.
+      unawaited(
+        socket.close().timeout(const Duration(seconds: 1), onTimeout: () {}),
+      );
     }
     _clients.clear();
     await server?.close(force: true);
