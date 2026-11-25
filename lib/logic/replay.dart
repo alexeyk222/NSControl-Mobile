@@ -6,6 +6,7 @@ import 'calibration.dart';
 import 'driver_continuity.dart';
 import 'face.dart';
 import 'fatigue.dart';
+import 'mount.dart';
 import 'observation.dart';
 import 'settings.dart';
 import 'signals.dart';
@@ -377,6 +378,7 @@ class ReplayResult {
     required this.options,
     required this.profile,
     required this.calibrationSource,
+    this.calibrationNote,
     required this.episodes,
     required this.events,
     required this.outsideSteps,
@@ -399,6 +401,9 @@ class ReplayResult {
   final ReplayOptions options;
   final CalibrationProfile profile;
   final String calibrationSource;
+
+  /// A restriction of the calibration (side mount: eyes not evaluated).
+  final String? calibrationNote;
   final List<EpisodeResult> episodes;
   final List<ReplayEvent> events;
 
@@ -429,10 +434,8 @@ class ReplayRunner {
     if (frames.isEmpty) {
       throw ArgumentError('В записи нет кадров движка ${options.engine}');
     }
-    final (profile, source, calibrationEndUs, calibrationLine) = _calibration(
-      frames,
-      options,
-    );
+    final (profile, source, calibrationEndUs, calibrationLine, note) =
+        _calibration(frames, options);
     final zones = _zones(profile, calibrationLine, frames, calibrationEndUs);
     // The same entry point as the lab: reset, anchor, updateFaces with
     // every face of the frame, lastMeasurements into the automaton.
@@ -450,9 +453,11 @@ class ReplayRunner {
       break;
     }
     final settings = AlgorithmSettings(hiddenEyes: profile.hiddenEyes);
+    // Road-frame profile (neutral 0) with mountRelative, as in the lab.
+    final engineProfile = pipeline.engineCalibration;
     final engine = ObservationEngine(
       sessionId: 'replay',
-      calibration: profile,
+      calibration: engineProfile,
       settings: settings,
     );
     final fatigue = FatigueMonitor(
@@ -465,10 +470,15 @@ class ReplayRunner {
     final open = <String, int>{};
     final episodes = [
       for (final e in Episode.fromLabels(recording.labels))
-        EpisodeResult(
-          e,
-          ScenarioExpectations.expected(e.step, options.attention),
-        ),
+        EpisodeResult(e, {
+          // Eyes not evaluated (head-only calibration): no eyes_closed can
+          // be expected; the report says so instead of counting misses.
+          for (final t in ScenarioExpectations.expected(
+            e.step,
+            options.attention,
+          ))
+            if (!profile.hiddenEyes || t != ScenarioExpectations.eyesClosed) t,
+        }),
     ];
     var ambiguous = 0, rejected = 0, observed = 0;
     var tzSign = false, eyesEvent = false, restored = 0;
@@ -561,7 +571,7 @@ class ReplayRunner {
           ),
         );
       }
-      _feedFatigue(fatigue, attention, frame, profile, settings);
+      _feedFatigue(fatigue, attention, frame, engineProfile, settings);
       final snapshot = update.snapshot;
       tzSign = tzSignActive(snapshot);
       eyesEvent = snapshot.eyes.activeEvent != null;
@@ -606,6 +616,7 @@ class ReplayRunner {
       options: options,
       profile: profile,
       calibrationSource: source,
+      calibrationNote: note,
       episodes: episodes,
       events: events,
       outsideSteps: outside,
@@ -620,7 +631,7 @@ class ReplayRunner {
     );
   }
 
-  (CalibrationProfile, String, int, RecordedCalibration?) _calibration(
+  (CalibrationProfile, String, int, RecordedCalibration?, String?) _calibration(
     List<RecordedFrame> frames,
     ReplayOptions options,
   ) {
@@ -648,7 +659,42 @@ class ReplayRunner {
     if (!options.recalibrate &&
         profile != null &&
         profile.detector.id == options.engine) {
-      return (profile, 'строка calibration записи', line!.atUs, line);
+      var used = profile;
+      var source = 'строка calibration записи';
+      // Side mount: a lab build before the mount calibration raised the ML
+      // Kit eye limit to pass the calibration. The recorded neutral pose
+      // stays; the eyes follow the ТЗ limit, as the mount calibration does.
+      final mlKit = DetectorCapabilities.mlKit;
+      if (options.attention.mountRelative &&
+          profile.detector.id == mlKit.id &&
+          profile.detector.eyeYawLimit != mlKit.eyeYawLimit) {
+        final hidden =
+            profile.hiddenEyes || profile.neutralYaw.abs() > mlKit.eyeYawLimit;
+        used = CalibrationProfile(
+          trackingId: profile.trackingId,
+          detector: mlKit,
+          hiddenEyes: hidden,
+          neutralPitch: profile.neutralPitch,
+          neutralYaw: profile.neutralYaw,
+          neutralRoll: profile.neutralRoll,
+          leftEyeMedian: hidden ? null : profile.leftEyeMedian,
+          rightEyeMedian: hidden ? null : profile.rightEyeMedian,
+          eyeThreshold: hidden ? null : profile.eyeThreshold,
+        );
+        source +=
+            '; предел глаз ML Kit ${profile.detector.eyeYawLimit.round()}° '
+            'заменён на ${mlKit.eyeYawLimit.round()}° по ТЗ';
+      }
+      String? note;
+      if (options.attention.mountRelative &&
+          used.hiddenEyes &&
+          used.neutralYaw.abs() > used.detector.eyeYawLimit) {
+        note = MountCalibrationCollector.eyesNote(
+          used.neutralYaw,
+          used.detector.eyeYawLimit,
+        );
+      }
+      return (used, source, line!.atUs, line, note);
     }
     // Recompute from the frames of this engine: the 10 s before the recorded
     // calibration, or the first 10 s of the recording. When the recording
@@ -663,56 +709,102 @@ class ReplayRunner {
       endUs = line.atUs + calibrationUs;
       source = 'пересчитана по 10 с после строки calibration';
     }
-    final startUs = endUs - calibrationUs;
-    final trackingId =
-        frames
-            .where((f) => f.capturedUs >= startUs && f.signals != null)
-            .map((f) => f.signals!.trackingId)
-            .firstWhere((id) => id != null, orElse: () => null) ??
-        profile?.trackingId ??
-        0;
-    final detector = options.engine == DetectorCapabilities.mlKit.id
-        ? DetectorCapabilities.mlKit
-        : DetectorCapabilities(
-            id: options.engine,
-            version: 'replay',
-            eyeYawLimit: options.eyeYawLimit,
-          );
-    final collector = CalibrationCollector(
-      trackingId: trackingId,
-      detector: detector,
-      hiddenEyes: profile?.hiddenEyes ?? false,
-      startedUs: math.max(0, startUs),
-    );
-    for (final f in frames) {
-      if (f.capturedUs < startUs || f.capturedUs > endUs) continue;
-      final faces = <FaceMeasurement>[];
-      if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
-        final m = f.signals!.toMeasurement();
-        faces.add(
-          FaceMeasurement(
-            trackingId: m.trackingId ?? trackingId,
-            leftEye: m.leftEye,
-            rightEye: m.rightEye,
-            pitchDown: m.pitchDown,
-            yaw: m.yaw,
-            roll: m.roll,
-          ),
+    (CalibrationProfile?, List<String>, String?) attempt(int endUs) {
+      final startUs = endUs - calibrationUs;
+      final trackingId =
+          frames
+              .where((f) => f.capturedUs >= startUs && f.signals != null)
+              .map((f) => f.signals!.trackingId)
+              .firstWhere((id) => id != null, orElse: () => null) ??
+          profile?.trackingId ??
+          0;
+      final detector = options.engine == DetectorCapabilities.mlKit.id
+          ? DetectorCapabilities.mlKit
+          : DetectorCapabilities(
+              id: options.engine,
+              version: 'replay',
+              eyeYawLimit: options.eyeYawLimit,
+            );
+      if (options.attention.mountRelative) {
+        // Side mount: the lab calibrates with MountCalibrationCollector.
+        final collector = MountCalibrationCollector(
+          trackingId: trackingId,
+          detector: detector,
+          hiddenEyes: false,
+          startedUs: math.max(0, startUs),
         );
-      } else if (f.faceCount > 1) {
-        faces.addAll(const [FaceMeasurement(), FaceMeasurement()]);
+        for (final f in frames) {
+          if (f.capturedUs < startUs || f.capturedUs > endUs) continue;
+          final s = f.signals;
+          collector.add(
+            capturedUs: f.capturedUs,
+            faces: [
+              if (f.faceCount >= 1 && s != null)
+                s.trackingId == null ? _withTrackingId(s, trackingId) : s,
+              if (f.faceCount > 1) ...f.others,
+            ],
+          );
+        }
+        final result = collector.finish(nowUs: endUs);
+        return (result.profile, result.issues, result.note);
       }
-      collector.add(capturedUs: f.capturedUs, faces: faces);
+      final collector = CalibrationCollector(
+        trackingId: trackingId,
+        detector: detector,
+        hiddenEyes: profile?.hiddenEyes ?? false,
+        startedUs: math.max(0, startUs),
+      );
+      for (final f in frames) {
+        if (f.capturedUs < startUs || f.capturedUs > endUs) continue;
+        final faces = <FaceMeasurement>[];
+        if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
+          final m = f.signals!.toMeasurement();
+          faces.add(
+            FaceMeasurement(
+              trackingId: m.trackingId ?? trackingId,
+              leftEye: m.leftEye,
+              rightEye: m.rightEye,
+              pitchDown: m.pitchDown,
+              yaw: m.yaw,
+              roll: m.roll,
+            ),
+          );
+        } else if (f.faceCount > 1) {
+          faces.addAll(const [FaceMeasurement(), FaceMeasurement()]);
+        }
+        collector.add(capturedUs: f.capturedUs, faces: faces);
+      }
+      final result = collector.finish(nowUs: endUs);
+      return (result.profile, result.issues, null);
     }
-    final result = collector.finish(nowUs: endUs);
-    if (!result.successful) {
+
+    var (calibrated, issues, note) = attempt(endUs);
+    if (calibrated == null && line == null) {
+      // No calibration line (a trial recording): the first stable 10 s
+      // window, sliding by 1 s.
+      final lastUs = frames.last.capturedUs;
+      for (var end = endUs + 1000000; end <= lastUs; end += 1000000) {
+        final (p, _, n) = attempt(end);
+        if (p != null) {
+          (calibrated, note, endUs) = (p, n, end);
+          source =
+              'пересчитана по первым устойчивым 10 с '
+              '(${((end - calibrationUs - frames.first.capturedUs) / 1e6).toStringAsFixed(0)}–'
+              '${((end - frames.first.capturedUs) / 1e6).toStringAsFixed(0)} с записи)';
+          break;
+        }
+      }
+    }
+    if (calibrated == null) {
       throw StateError(
-        'Калибровка по кадрам ${options.engine} не удалась: '
-        '${result.issues.join(' ')}',
+        'Калибровка по кадрам ${options.engine} не удалась: ${issues.join(' ')}',
       );
     }
-    return (result.profile!, source, endUs, line);
+    return (calibrated, source, endUs, line, note);
   }
+
+  static FaceSignals _withTrackingId(FaceSignals s, int id) =>
+      FaceSignals.fromJson({...s.toJson(), 'trackingId': id});
 
   ZoneMap _zones(
     CalibrationProfile profile,
@@ -896,6 +988,23 @@ String replayReport(Recording recording, List<ReplayResult> results) {
     '- Устройство: ${meta['device'] ?? '—'}, ${meta['os'] ?? '—'}; '
     'приложение ${meta['app'] ?? '—'}; участник ${meta['subject'] ?? '—'}.',
   );
+  final mount = meta['mount'];
+  if (mount is Map) {
+    final position = switch (mount['position']) {
+      'vent_left' || 'left' => 'решётка слева от водителя',
+      'vent_right' || 'right' => 'решётка справа от водителя',
+      'front' || 'center' => 'перед водителем',
+      final other => '$other',
+    };
+    final angle = mount['angleDeg'];
+    final distance = mount['distanceCm'];
+    b.writeln(
+      '- Крепление: $position'
+      '${angle is num ? ', повёрнут к водителю примерно на ${angle.round()}°' : ''}'
+      '${distance is num ? ', до лица ${distance.round()} см' : ''}'
+      '${mount['note'] is String && (mount['note'] as String).isNotEmpty ? '; ${mount['note']}' : ''}.',
+    );
+  }
   b.writeln(
     '- Движки в записи: ${recording.engines.join(', ')}; '
     'кадров ${recording.frames.length}, меток ${recording.labels.length}, '
@@ -915,15 +1024,24 @@ String replayReport(Recording recording, List<ReplayResult> results) {
     b.writeln();
     final mode = r.options.attention.isAcceptance
         ? 'приёмка (только ТЗ)'
-        : 'расширения: ${[if (r.options.attention.gazeAwareEyes) 'глаза с учётом взгляда', if (r.options.attention.headOnlyLookDown) 'взгляд вниз по голове', if (r.options.attention.distraction) 'отвлечение'].join(', ')}';
+        : 'расширения: ${[if (r.options.attention.gazeAwareEyes) 'глаза с учётом взгляда', if (r.options.attention.headOnlyLookDown) 'взгляд вниз по голове', if (r.options.attention.distraction) 'отвлечение', if (r.options.attention.mountRelative) 'углы относительно дороги'].join(', ')}';
     b.writeln('## ${r.options.engine}, $mode');
     b.writeln();
     b.writeln(
       '- Калибровка: ${r.calibrationSource}; T = '
       '${r.profile.eyeThreshold?.toStringAsFixed(2) ?? 'нет (глаза скрыты)'}, '
       'нейтраль: поворот ${_deg(r.profile.neutralYaw)}, '
-      'наклон ${_deg(r.profile.neutralPitch)}.',
+      'наклон ${_deg(r.profile.neutralPitch)}'
+      '${r.options.attention.mountRelative ? ' (ракурс камеры на дорогу; автоматы получают углы относительно этой позы)' : ''}; '
+      'предел глаз ${_deg(r.profile.detector.eyeYawLimit)}.',
     );
+    if (r.calibrationNote != null) b.writeln('- ${r.calibrationNote}');
+    if (r.profile.hiddenEyes) {
+      b.writeln(
+        '- Глаза не оцениваются: шаги eyes_closed_* не ждут события и не '
+        'считаются пропусками.',
+      );
+    }
     b.writeln(
       '- Кадров после калибровки ${r.frames} за ${_s(r.observedUs)} с'
       '${r.observedUs > 0 ? ' (${(r.frames * 1e6 / r.observedUs).toStringAsFixed(1)} в секунду)' : ''}'
