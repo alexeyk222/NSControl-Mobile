@@ -334,8 +334,10 @@ class ZoneMap {
 
   /// Direction of [s] relative to the road, from gaze when the engine
   /// measures it and from the head pose otherwise. Null without usable angles.
-  GazeDirection? directionOf(FaceSignals s) {
-    if (mountRelative) return _mountDirectionOf(s);
+  /// On a side mount [adaptation] moves the road pose of the head direction
+  /// with the slow drift of the driver's posture, as for the automata.
+  GazeDirection? directionOf(FaceSignals s, {RoadAdaptation? adaptation}) {
+    if (mountRelative) return _mountDirectionOf(s, adaptation);
     if (s.hasGaze) {
       return GazeDirection(
         s.gazeLeft! - roadGazeLeft,
@@ -354,14 +356,15 @@ class ZoneMap {
     return null;
   }
 
-  GazeDirection? _mountDirectionOf(FaceSignals s) {
+  GazeDirection? _mountDirectionOf(FaceSignals s, RoadAdaptation? adaptation) {
     if (s.hasGaze) {
       final (gl, gd) = _frame.direction(s.gazeLeft!, s.gazeDown!);
       final (rl, rd) = _frame.direction(roadGazeLeft, roadGazeDown);
       return GazeDirection(gl - rl, gd - rd, fromGaze: true);
     }
-    final head = _frame.head(s);
-    if (head == null) return null;
+    final raw = _frame.head(s);
+    if (raw == null) return null;
+    final head = adaptation?.apply(raw) ?? raw;
     return GazeDirection(head.$1, head.$2, fromGaze: false);
   }
 
@@ -550,6 +553,9 @@ class GazeZoneTracker {
   });
   final ZoneMap map;
 
+  /// Slow drift of the road pose (profile), applied to head directions.
+  RoadAdaptation? adaptation;
+
   /// Side mount ([ZoneMap.mountRelative]): a face lost while turned at
   /// least this far from the camera, and away from the road, was turned away
   /// from the phone. The face is lost earlier on that side (a mirror on the
@@ -589,7 +595,9 @@ class GazeZoneTracker {
   GazeDirection? get direction => _direction;
 
   GazeZone update(int atUs, FaceSignals? face) {
-    final d = face != null && face.tracked ? map.directionOf(face) : null;
+    final d = face != null && face.tracked
+        ? map.directionOf(face, adaptation: adaptation)
+        : null;
     _direction = d;
     final GazeZone raw;
     if (d != null) {
@@ -1088,7 +1096,7 @@ class AttentionPipeline {
            settings.mountRelative && settings.roadAdaptDegPerMin != null
            ? RoadAdaptation(degPerMin: settings.roadAdaptDegPerMin!)
            : null {
-    tracker = GazeZoneTracker(this.zones);
+    tracker = GazeZoneTracker(this.zones)..adaptation = roadAdaptation;
   }
 
   static ZoneMap _zonesFor(

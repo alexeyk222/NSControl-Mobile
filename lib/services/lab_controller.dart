@@ -115,6 +115,10 @@ class LabController extends ChangeNotifier {
   /// Zone layout of the current calibration (road + optional mirrors).
   ZoneMap? zones;
   ZoneCalibrationCollector? _mirrors;
+
+  /// Mirror calibration of the other engines (compare mode), on their own
+  /// frames in the same windows: each engine gets its own regions.
+  final Map<String, ZoneCalibrationCollector> _otherMirrors = {};
   final List<(int, void Function())> _mirrorPlan = [];
   bool get calibratingMirrors => _mirrorPlan.isNotEmpty;
 
@@ -459,6 +463,10 @@ class LabController extends ChangeNotifier {
       if (pending != null && identical(pending.$1, result)) 'raw': pending.$2,
     });
     if (result.engineId != primaryEngine) {
+      _otherMirrors[result.engineId]?.add(
+        captured,
+        result.faces.length == 1 ? signals : null,
+      );
       if (_otherCollectors.containsKey(result.engineId)) {
         _collectOther(result, captured, all, signals);
       }
@@ -845,8 +853,18 @@ class LabController extends ChangeNotifier {
     final base = zones;
     if (calibration == null || base == null || calibratingMirrors) return;
     if (scenario != null || phase != LabPhase.observing) return;
-    final collector = ZoneCalibrationCollector(base);
+    // The glances are measured in the frame the zones are used in: relative
+    // to the road pose on a side mount.
+    final collector = ZoneCalibrationCollector(_mounted(base, calibration!));
     _mirrors = collector;
+    _otherMirrors
+      ..clear()
+      ..addAll({
+        for (final MapEntry(key: id, value: (p, m))
+            in otherCalibrations.entries)
+          id: ZoneCalibrationCollector(_mounted(m, p)),
+      });
+    final others = Map.of(_otherMirrors);
     var t = nowUs + 500000;
     for (final (zone, name) in [
       (GazeZone.mirrorLeft, 'левое'),
@@ -861,12 +879,24 @@ class LabController extends ChangeNotifier {
             _setPrompt('Смотрите в $name зеркало');
           },
         ))
-        ..add((t + 1500000, () => collector.begin(zone, nowUs)))
+        ..add((
+          t + 1500000,
+          () {
+            collector.begin(zone, nowUs);
+            for (final c in others.values) {
+              c.begin(zone, nowUs);
+            }
+          },
+        ))
         ..add((
           t + 4000000,
           () {
             final issue = collector.end(nowUs);
             if (issue != null) _note('Зеркало $name: $issue');
+            for (final MapEntry(key: id, value: c) in others.entries) {
+              final other = c.end(nowUs);
+              if (other != null) _note('Зеркало $name, $id: $other');
+            }
             _say('Дорога');
             _setPrompt('Дорога');
           },
@@ -878,6 +908,35 @@ class LabController extends ChangeNotifier {
     _notify(force: true);
   }
 
+  /// [map] relative to the road pose when the profile uses a side mount.
+  ZoneMap _mounted(ZoneMap map, CalibrationProfile p) =>
+      (attentionSettings?.mountRelative ?? false) && !map.mountRelative
+      ? map.withMount(roadHeadRoll: p.neutralRoll, engineId: p.detector.id)
+      : map;
+
+  /// Mirror lines of the other engines, after the primary engine's line.
+  void _finishOtherMirrors() {
+    final others = Map.of(_otherMirrors);
+    _otherMirrors.clear();
+    for (final MapEntry(key: id, value: c) in others.entries) {
+      final calibrated = otherCalibrations[id];
+      final m = c.finish();
+      if (calibrated == null || !m.mirrorsCalibrated) {
+        _note('Зеркала $id не откалиброваны');
+        continue;
+      }
+      otherCalibrations[id] = (calibrated.$1, m);
+      _emit(
+        RecordingSchema.calibration(
+          atUs: nowUs,
+          profile: calibrated.$1,
+          zones: m.toJson(),
+          engine: id,
+        ),
+      );
+    }
+  }
+
   void _finishMirrors(ZoneCalibrationCollector collector) {
     _mirrors = null;
     _setPrompt(null);
@@ -885,6 +944,7 @@ class LabController extends ChangeNotifier {
     if (!map.mirrorsCalibrated || calibration == null) {
       _say('Зеркала не откалиброваны');
       _note('Зеркала не откалиброваны, остались стартовые секторы');
+      _finishOtherMirrors();
       return;
     }
     zones = map;
@@ -897,6 +957,7 @@ class LabController extends ChangeNotifier {
         engine: otherCalibrations.isEmpty ? null : calibration!.detector.id,
       ),
     );
+    _finishOtherMirrors();
     _newSession();
     _say('Зеркала откалиброваны');
     _note('Зеркала откалиброваны');
@@ -906,6 +967,7 @@ class LabController extends ChangeNotifier {
     if (_mirrorPlan.isEmpty && _mirrors == null) return;
     _mirrorPlan.clear();
     _mirrors = null;
+    _otherMirrors.clear();
     _setPrompt(null);
   }
 

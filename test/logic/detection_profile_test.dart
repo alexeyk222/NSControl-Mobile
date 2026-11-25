@@ -246,6 +246,24 @@ void main() {
       expect(a.pitch, 0);
     });
 
+    test('head zones follow the drift too', () {
+      final map = ZoneMap.fromCalibration(calibration(), mountRelative: true);
+      const s = FaceSignals(
+        engineId: 'mlkit_face_detection',
+        trackingId: 1,
+        headYawLeft: 0,
+        headPitchDown: -10,
+        headRollRight: 0,
+        eyeOpenLeft: .9,
+        eyeOpenRight: .9,
+      );
+      // The driver sits 10° higher than at calibration: off the road...
+      expect(map.classify(map.directionOf(s)!), isNot(GazeZone.road));
+      // ...until the road pose has followed the posture.
+      final a = RoadAdaptation(degPerMin: 1)..pitch = -8;
+      expect(map.classify(map.directionOf(s, adaptation: a)!), GazeZone.road);
+    });
+
     test('the correction is applied as a rotation', () {
       final a = RoadAdaptation(degPerMin: 1)..pitch = 5;
       final (y, p, r) = a.apply((0, 20, 0));
