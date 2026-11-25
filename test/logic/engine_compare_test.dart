@@ -220,11 +220,58 @@ void main() {
     );
     expect(report, isNot(contains('ошибка:')));
     expect(report, contains('| mlkit_face_detection | приёмка | пересчитана'));
+    // Both engines get the recording's 45°, so ML Kit's eyes are measured
+    // at 35° to the camera instead of being hidden by the ТЗ 18°.
+    expect(report, contains('Предел глаз к камере у всех движков один, 45°'));
+    expect(report, contains('**mlkit_face_detection** (T = '));
     expect(
       EngineComparison(
         SyntheticScenario(SyntheticStyle.mlKit).toJsonl(),
       ).sideMount,
       isFalse,
+    );
+  });
+
+  test('ML Kit settling at the start calibrates on a later window', () {
+    // ARKit calibrated before the recording; ML Kit's first 3 s are the head
+    // turning into the road pose, so its first 10 s are not stable.
+    final lines = <String>[];
+    int? firstUs;
+    for (final line in const LineSplitter().convert(
+      SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
+    )) {
+      final json = jsonDecode(line) as Map<String, dynamic>;
+      final s = json['signals'] as Map<String, dynamic>?;
+      if (json['type'] == 'frame' &&
+          json['engine'] == 'mlkit_face_detection' &&
+          s?['headYawLeft'] is num) {
+        final t = json['capturedUs'] as int;
+        firstUs ??= t;
+        if (t - firstUs < 3000000) {
+          s!['headYawLeft'] = (s['headYawLeft'] as num) + 30;
+        }
+      }
+      lines.add(jsonEncode(json));
+    }
+    final report = EngineComparison('${lines.join('\n')}\n').report();
+    expect(report, isNot(contains('ошибка:')));
+    expect(
+      report,
+      contains(
+        '| mlkit_face_detection | приёмка | пересчитана по первым устойчивым',
+      ),
+    );
+  });
+
+  test('a phone hot before the recording is called out', () {
+    final text = _comparison().replaceAll('"nominal"', '"serious"');
+    final report = EngineComparison(text).report();
+    expect(report, contains('В начале записи: serious; впервые fair на'));
+    expect(report, contains('Телефон уже был нагрет до записи'));
+    expect(report, contains('- Питание: unplugged.'));
+    expect(
+      EngineComparison(_comparison()).report(),
+      contains('В начале записи: nominal; впервые fair на'),
     );
   });
 

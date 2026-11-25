@@ -175,16 +175,18 @@ class EngineComparison {
   Map<String, ReplayResult?> _gated = const {};
   Map<String, String> _replayErrors = const {};
 
-  /// Eye limit for an engine other than ML Kit whose calibration is
-  /// recomputed from frames: the largest limit a recorded calibration used,
-  /// else the replay default. ML Kit always keeps the ТЗ 18°.
+  /// Eye limit to the camera for every engine in the comparison, ML Kit
+  /// included: the largest limit a recorded calibration used, else the
+  /// replay default. The comparison measures each engine's limit (section
+  /// 3), so both engines get the same wide one; by the user's decision of
+  /// 25.11 the ТЗ 18° for ML Kit is not binding.
   double get recalibrationEyeYawLimit {
     double? best;
     for (final c in recording.calibrations) {
       final limit = c.profile?.detector.eyeYawLimit;
       if (limit != null && (best == null || limit > best)) best = limit;
     }
-    return best ?? const ReplayOptions(engine: '').eyeYawLimit;
+    return best ?? ReplayOptions.defaultEyeYawLimit;
   }
 
   /// The phone stands on a side vent: the lab recorded with `mountRelative`,
@@ -257,11 +259,16 @@ class EngineComparison {
     if (sideMount) {
       b.writeln(
         '- Боковое крепление: оба режима идут с mountRelative (углы '
-        'относительно позы «дорога», глаза в пределе движка к камере, '
-        'калибровка MountCalibrationCollector). Строгая калибровка ТЗ при '
-        'таком креплении не проходит; пороги ТЗ те же.',
+        'относительно позы «дорога», калибровка MountCalibrationCollector). '
+        'Строгая калибровка ТЗ при таком креплении не проходит; пороги ТЗ '
+        'те же.',
       );
     }
+    b.writeln(
+      '- Предел глаз к камере у всех движков один, '
+      '${_f(recalibrationEyeYawLimit, 0)}°: свой предел каждого движка '
+      'измеряет раздел 3.',
+    );
     if (swappedEyes.isNotEmpty) {
       b.writeln(
         '- Левый и правый глаз переставлены перед сравнением у: '
@@ -674,6 +681,36 @@ class EngineComparison {
     b.writeln(
       '- Тепловое состояние iOS: ${thermal.entries.map((e) => '${e.key} ${_minutes(e.value)} мин').join(', ')}.',
     );
+    // When each state was first reached: a state already present at the
+    // first line was inherited from before the recording and says nothing
+    // about the engines.
+    final startUs = (first['atUs'] as num).toInt();
+    final reached = <String, int>{};
+    for (final d in devices) {
+      final state = d['thermal'];
+      if (state is String) {
+        reached.putIfAbsent(state, () => (d['atUs'] as num).toInt());
+      }
+    }
+    final atStart = first['thermal'];
+    final later = [
+      for (final e in reached.entries)
+        if (e.key != atStart) '${e.key} на ${_minutes(e.value - startUs)} мин',
+    ];
+    if (atStart is String) {
+      b.writeln(
+        '- В начале записи: $atStart'
+        '${later.isEmpty ? ', и до конца не менялось' : '; впервые ${later.join(', ')}'}.'
+        '${atStart == 'serious' || atStart == 'critical' ? ' Телефон уже был нагрет до записи: нагрев по ней движкам не приписать.' : ''}',
+      );
+    }
+    final plugged = {
+      for (final d in devices)
+        if (d['batteryState'] is String) d['batteryState'] as String,
+    };
+    if (plugged.isNotEmpty) {
+      b.writeln('- Питание: ${plugged.join(', ')}.');
+    }
     if (b0 != null && b1 != null && spanUs > 0) {
       final drop = (b0 - b1) * 100;
       b.writeln(
@@ -682,6 +719,13 @@ class EngineComparison {
         '(iOS отдаёт заряд шагами по 1–5 %, поэтому мерить на записи не '
         'короче 20 минут и без зарядки).',
       );
+      if (b0 >= .99 || plugged.any((p) => p != 'unplugged')) {
+        b.writeln(
+          '- Расход по этой записи не оценить: '
+          '${plugged.any((p) => p != 'unplugged') ? 'телефон на зарядке' : 'iOS держит 100 % первые проценты разряда'}. '
+          'Начинать с заряда не выше 90 % и без кабеля.',
+        );
+      }
     }
     final charging = devices.any(
       (d) => d['batteryState'] == 'charging' || d['batteryState'] == 'full',

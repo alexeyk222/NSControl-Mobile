@@ -304,7 +304,7 @@ class ReplayOptions {
     required this.engine,
     this.attention = const AttentionSettings(),
     this.recalibrate = false,
-    this.eyeYawLimit = 25,
+    this.eyeYawLimit,
   });
   final String engine;
   final AttentionSettings attention;
@@ -313,9 +313,14 @@ class ReplayOptions {
   /// carries a profile for this engine.
   final bool recalibrate;
 
-  /// Eye yaw limit for an engine other than ML Kit when the profile has to be
-  /// recomputed. ARKit's own limit is measured by the ARKit thread.
-  final double eyeYawLimit;
+  /// Eye yaw limit to the camera for a recomputed profile, and for ML Kit
+  /// also over a recorded one. Null: ML Kit keeps the ТЗ 18°, other engines
+  /// [defaultEyeYawLimit]. Set for every engine when the limit is being
+  /// measured (engine comparison): by the user's decision of 25.11 each
+  /// engine's limit is a measured value, not the ТЗ 18°.
+  final double? eyeYawLimit;
+
+  static const defaultEyeYawLimit = 25.0;
 }
 
 /// Per-step outcome.
@@ -664,7 +669,13 @@ class ReplayRunner {
       // Side mount: a lab build before the mount calibration raised the ML
       // Kit eye limit to pass the calibration. The recorded neutral pose
       // stays; the eyes follow the ТЗ limit, as the mount calibration does.
-      final mlKit = DetectorCapabilities.mlKit;
+      final mlKit = options.eyeYawLimit == null
+          ? DetectorCapabilities.mlKit
+          : DetectorCapabilities(
+              id: DetectorCapabilities.mlKit.id,
+              version: DetectorCapabilities.mlKit.version,
+              eyeYawLimit: options.eyeYawLimit!,
+            );
       if (options.attention.mountRelative &&
           profile.detector.id == mlKit.id &&
           profile.detector.eyeYawLimit != mlKit.eyeYawLimit) {
@@ -683,7 +694,8 @@ class ReplayRunner {
         );
         source +=
             '; предел глаз ML Kit ${profile.detector.eyeYawLimit.round()}° '
-            'заменён на ${mlKit.eyeYawLimit.round()}° по ТЗ';
+            'заменён на ${mlKit.eyeYawLimit.round()}°'
+            '${options.eyeYawLimit == null ? ' по ТЗ' : ' (замер)'}';
       }
       String? note;
       if (options.attention.mountRelative &&
@@ -718,12 +730,14 @@ class ReplayRunner {
               .firstWhere((id) => id != null, orElse: () => null) ??
           profile?.trackingId ??
           0;
-      final detector = options.engine == DetectorCapabilities.mlKit.id
+      final mlKit = options.engine == DetectorCapabilities.mlKit.id;
+      final detector = mlKit && options.eyeYawLimit == null
           ? DetectorCapabilities.mlKit
           : DetectorCapabilities(
               id: options.engine,
-              version: 'replay',
-              eyeYawLimit: options.eyeYawLimit,
+              version: mlKit ? DetectorCapabilities.mlKit.version : 'replay',
+              eyeYawLimit:
+                  options.eyeYawLimit ?? ReplayOptions.defaultEyeYawLimit,
             );
       if (options.attention.mountRelative) {
         // Side mount: the lab calibrates with MountCalibrationCollector.
@@ -779,9 +793,12 @@ class ReplayRunner {
     }
 
     var (calibrated, issues, note) = attempt(endUs);
-    if (calibrated == null && line == null) {
-      // No calibration line (a trial recording): the first stable 10 s
-      // window, sliding by 1 s.
+    if (calibrated == null &&
+        (line == null || line.profile?.detector.id != options.engine)) {
+      // No calibration line of this engine (a trial recording, or the other
+      // engine of a comparison calibrated before the recording started, so
+      // its first 10 s include settling into the road pose): the first
+      // stable 10 s window, sliding by 1 s.
       final lastUs = frames.last.capturedUs;
       for (var end = endUs + 1000000; end <= lastUs; end += 1000000) {
         final (p, _, n) = attempt(end);
@@ -800,7 +817,14 @@ class ReplayRunner {
         'Калибровка по кадрам ${options.engine} не удалась: ${issues.join(' ')}',
       );
     }
-    return (calibrated, source, endUs, line, note);
+    // The zones of another engine's line are in that engine's angles.
+    final own =
+        line != null &&
+            (line.profile == null ||
+                line.profile!.detector.id == options.engine)
+        ? line
+        : null;
+    return (calibrated, source, endUs, own, note);
   }
 
   static FaceSignals _withTrackingId(FaceSignals s, int id) =>
