@@ -55,6 +55,7 @@ a{color:var(--accent)}
     <span class="chip" id="c-eyes">глаза —</span>
     <span class="chip" id="c-head">голова —</span>
     <span class="chip" id="c-rec">запись —</span>
+    <span class="chip" id="c-device">телефон —</span>
   </div>
 </header>
 <main id="grid"></main>
@@ -192,6 +193,16 @@ function onLine(m) {
       else { const b = [...bands].reverse().find(b => b.step === m.step && b.t1 == null); if (b) b.t1 = t; }
       addFeed(`метка ${m.step}${m.rep ? " #" + m.rep : ""} ${m.edge === "start" ? "начало" : "конец"}${m.aborted ? " (прервано)" : ""}`, "lb");
       dirty = true; break;
+    }
+    case "device": {
+      const th = {nominal:"норма",fair:"тёплый",serious:"горячий",critical:"перегрев"};
+      const parts = ["телефон: " + (th[m.thermal] || m.thermal)];
+      if (m.battery != null) parts.push(Math.round(m.battery * 100) + "%" + (m.batteryState === "charging" ? " ⚡" : ""));
+      if (m.arkitFps != null) parts.push("ARKit " + m.arkitFps + " к/с");
+      if (m.mlKitDone != null) parts.push("ML Kit " + m.mlKitDone + "/с");
+      if (m.mlKitOrientation) parts.push(m.mlKitOrientation);
+      setChip("c-device", parts.join(" · "), m.thermal === "serious" || m.thermal === "critical" ? "bad" : "");
+      break;
     }
     case "lab":
       if (m.prompt !== undefined) document.getElementById("prompt").textContent = m.prompt || "";

@@ -4,7 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
 import '../logic/driver_continuity.dart';
-import '../logic/replay.dart' show channelSignActive, tzSignActive;
+import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
 import 'detector.dart';
 import 'face_source.dart';
@@ -86,6 +86,17 @@ class LabController extends ChangeNotifier {
   /// How the attention pipeline identified the driver on the last frame
   /// (`same`, `restored`, `no_face`, `ambiguous`, `different`).
   String? driverDecision;
+
+  /// Driver reference for [ZoneAttentionProvider.anchorDriver]: the last
+  /// calibration frame, and when the driver was last seen (absolute clock).
+  FaceSignals? _anchorFace;
+  int? _driverSeenAbsUs;
+
+  /// Engine numbers of the result being delivered (ARKit `raw`).
+  (FaceResult, Map<String, Object?>)? _pendingRaw;
+
+  /// Latest `device` line (ARKit source), for the screen.
+  Map<String, Object?>? lastDevice;
 
   /// Zone layout of the current calibration (road + optional mirrors).
   ZoneMap? zones;
@@ -182,7 +193,10 @@ class LabController extends ChangeNotifier {
   /// Writes to the recording (when on) and to every connected page.
   void _emit(Map<String, Object?> line) {
     recorder.write(line);
-    server.broadcast(line);
+    // The page does not use the raw engine numbers; keep the stream light.
+    server.broadcast(
+      line.containsKey('raw') ? ({...line}..remove('raw')) : line,
+    );
   }
 
   List<Map<String, Object?>> _greeting() => [
@@ -355,15 +369,30 @@ class LabController extends ChangeNotifier {
     final signals = _signalsOf(driver, result.engineId);
     lastResults[result.engineId] = result;
     lastSignals[result.engineId] = signals;
-    _emit(
-      RecordingSchema.frame(
+    final pending = _pendingRaw;
+    _pendingRaw = null;
+    // Every face in the order the engine reported it (and the pipeline gets
+    // it); the frame line keeps the chosen face in `signals`, the rest in
+    // `others`, so a replay sees the same ambiguity (ФТ-02).
+    final all = [
+      for (final f in result.faces)
+        identical(f, driver) ? signals! : _signalsOf(f, result.engineId)!,
+    ];
+    _emit({
+      ...RecordingSchema.frame(
         engine: result.engineId,
         capturedUs: captured,
         completedUs: completed,
         faceCount: result.faces.length,
         signals: signals,
       ),
-    );
+      if (result.faces.length > 1)
+        'others': [
+          for (var i = 0; i < all.length; i++)
+            if (!identical(result.faces[i], driver)) all[i].toJson(),
+        ],
+      if (pending != null && identical(pending.$1, result)) 'raw': pending.$2,
+    });
     if (result.engineId != primaryEngine) {
       _notify();
       return;
@@ -382,21 +411,23 @@ class LabController extends ChangeNotifier {
     final collector = _collector;
     if (collector != null) {
       collector.add(capturedUs: captured, faces: measurements);
-      if (result.faces.length == 1 && signals != null && signals.hasGaze) {
-        _calibrationGaze.add(signals);
+      if (result.faces.length == 1 && signals != null) {
+        _anchorFace = signals;
+        _driverSeenAbsUs = result.capturedUs;
+        if (signals.hasGaze) _calibrationGaze.add(signals);
       }
     }
-    // The provider takes one face for now: with several faces it sees none
-    // and the engine gets them all directly (it suspends observation, ФТ-02).
     final single = result.faces.length == 1 ? signals : null;
     _mirrors?.add(captured, single);
     final previousDriver = driverDecision;
-    attentionState = attention.update(single, captured);
     final zoned = zoneProvider;
-    if (zoned != null && result.faces.length > 1) {
-      driverDecision = ContinuityDecision.ambiguous.code;
-    } else {
-      driverDecision = attentionState.details['driver'] as String?;
+    attentionState = zoned != null
+        ? zoned.updateFaces(all, captured)
+        : attention.update(single, captured);
+    driverDecision = attentionState.details['driver'] as String?;
+    if (driverDecision == ContinuityDecision.same.code ||
+        driverDecision == ContinuityDecision.restored.code) {
+      _driverSeenAbsUs = result.capturedUs;
     }
     if (driverDecision == ContinuityDecision.restored.code &&
         previousDriver != driverDecision) {
@@ -405,13 +436,10 @@ class LabController extends ChangeNotifier {
       );
     }
     if (collector == null && engine != null) {
-      // In both modes the engine gets the pipeline's measurements: driver
-      // continuity restores the calibrated id after a loss, and the lab-mode
-      // eye gate may withhold lowered lids from `eyes_closed`.
-      if (zoned != null && result.faces.length <= 1) {
-        final m = zoned.lastMeasurement;
-        measurements = [?m];
-      }
+      // In both modes the engine gets only the pipeline's measurements:
+      // driver continuity restores the calibrated id after a loss, and the
+      // lab-mode eye gate may withhold lowered lids from `eyes_closed`.
+      if (zoned != null) measurements = zoned.lastMeasurements;
       _apply(
         engine!.process(
           sessionId: _sessionId!,
@@ -422,7 +450,7 @@ class LabController extends ChangeNotifier {
       );
       _feedFatigue(measurements, captured);
       zoned?.tzSignActive = tzSignActive(engine!.snapshot);
-      zoned?.eyesSignActive = channelSignActive(engine!.snapshot.eyes);
+      zoned?.eyesEventActive = engine!.snapshot.eyes.activeEvent != null;
       _distraction(zoned?.lastFrame);
     }
     // 10 per second is enough for the page and keeps an hour-long file
@@ -541,6 +569,7 @@ class LabController extends ChangeNotifier {
   void _beginCollector(int trackingId, int atUs) {
     _calibrationStartUs = atUs;
     _calibrationGaze.clear();
+    _anchorFace = null;
     _collector = CalibrationCollector(
       trackingId: trackingId,
       detector: source!.engines.first,
@@ -694,6 +723,27 @@ class LabController extends ChangeNotifier {
     );
     fatigue = FatigueSnapshot.empty;
     attention.reset(profile);
+    // Where the driver was last seen, so a loss right after the start of the
+    // session is judged by geometry (ПЗ: the selected face keeps its profile).
+    final anchor = _anchorFace, seen = _driverSeenAbsUs;
+    if (anchor != null && seen != null) {
+      zoneProvider?.anchorDriver(anchor, seen - baseUs);
+    }
+  }
+
+  /// ARKit hands the engine numbers of a result just before the result
+  /// itself; they go into its `frame` line as `raw`.
+  void attachRaw(FaceResult result, Map<String, Object?> raw) =>
+      _pendingRaw = (result, raw);
+
+  /// A `device` line (ArkitStats.toJson) on the lab time base.
+  void deviceLine(Map<String, Object?> line) {
+    if (!_open) return;
+    final at = line['atUs'];
+    final rebased = {...line, if (at is int) 'atUs': at - baseUs};
+    if (rebased['atUs'] is int && (rebased['atUs'] as int) < 0) return;
+    lastDevice = rebased;
+    _emit(rebased);
   }
 
   // ---- recording ----------------------------------------------------------

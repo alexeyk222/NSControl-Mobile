@@ -18,7 +18,11 @@ import 'signals.dart';
 /// - without any geometry the face is taken back only within [noGeometryGapUs];
 /// - two or more faces, a face elsewhere or of another size, or a longer loss
 ///   pass through unchanged, and the engine suspends observation until the
-///   face is confirmed and calibrated again (ФТ-02).
+///   face is confirmed and calibrated again (ФТ-02);
+/// - a face that was last seen touching or crossing the frame edge (within
+///   [edgeMargin]) has left the frame, as a participant does when another
+///   takes the seat (ПМИ, replacement of the participant): whoever comes back
+///   is not taken back, whatever the geometry.
 ///
 /// This is how ФТ-02/ФТ-03 are met, not an extension: it is active in
 /// acceptance mode too.
@@ -31,6 +35,7 @@ class DriverContinuity {
     this.minSizeRatio = .7,
     this.maxSizeRatio = 1.4,
     this.distanceToleranceM = .12,
+    this.edgeMargin = .02,
   });
 
   /// Tracking id of the calibrated face.
@@ -51,25 +56,44 @@ class DriverContinuity {
   /// Allowed difference of the face distance, metres (ARKit).
   final double distanceToleranceM;
 
+  /// A box this close to a frame edge (fraction of the frame) touches it.
+  final double edgeMargin;
+
   final Set<int> _aliases = {};
   FaceBox? _referenceBox, _lastBox;
   double? _referenceDistance, _lastDistance;
   int? _lastSeenUs;
-  bool _lost = false;
+  bool _lost = false, _leftFrame = false;
   ContinuityDecision _decision = ContinuityDecision.noFace;
 
   ContinuityDecision get decision => _decision;
+
+  /// Sets where and when the driver was last seen before observation starts:
+  /// the last calibration frame (or the median box and distance of the
+  /// calibration). Without it a face lost between the end of calibration and
+  /// the first observed frame comes back with a new ML Kit id and is taken
+  /// for another face. The first face after the start is then checked
+  /// against this reference by the same rules as after any loss.
+  void anchor(int atUs, {FaceBox? box, double? distanceM}) {
+    _lastSeenUs = atUs;
+    _lost = false;
+    _leftFrame = false;
+    _referenceBox = box;
+    _lastBox = box;
+    _referenceDistance = distanceM;
+    _lastDistance = distanceM;
+  }
 
   /// Returns [faces] with the calibrated id restored where the face is the
   /// driver; everything else is passed on as is.
   List<FaceSignals> resolve(int atUs, List<FaceSignals> faces) {
     if (faces.isEmpty) {
-      _lost = true;
+      _lose();
       _decision = ContinuityDecision.noFace;
       return faces;
     }
     if (faces.length > 1) {
-      _lost = true;
+      _lose();
       _decision = ContinuityDecision.ambiguous;
       return faces;
     }
@@ -94,9 +118,27 @@ class DriverContinuity {
     return faces;
   }
 
+  /// True when the driver was last seen at the frame edge before the loss.
+  bool get leftFrame => _leftFrame;
+
+  void _lose() {
+    if (!_lost) {
+      final box = _lastBox;
+      _leftFrame = box != null && _atEdge(box);
+    }
+    _lost = true;
+  }
+
+  bool _atEdge(FaceBox b) =>
+      b.left <= edgeMargin ||
+      b.top <= edgeMargin ||
+      b.left + b.width >= 1 - edgeMargin ||
+      b.top + b.height >= 1 - edgeMargin;
+
   void _confirm(int atUs, FaceSignals face) {
     _lastSeenUs = atUs;
     _lost = false;
+    _leftFrame = false;
     if (face.box != null) {
       _referenceBox ??= face.box;
       _lastBox = face.box;
@@ -109,7 +151,7 @@ class DriverContinuity {
 
   bool _matches(int atUs, FaceSignals face) {
     final last = _lastSeenUs;
-    if (last == null) return false;
+    if (last == null || _leftFrame) return false;
     final gap = atUs - last;
     final box = face.box, distance = face.distanceM;
     final canBox = box != null && _referenceBox != null;
