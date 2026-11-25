@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
+import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
 import 'detector.dart';
 import 'face_source.dart';
@@ -34,7 +36,8 @@ class LabController extends ChangeNotifier {
     this.startServer = true,
     int Function()? clockUs,
   }) : clockUs = clockUs ?? (Stopwatch()..start()).elapsedMicrosecondsOf,
-       attention = attention ?? const UnknownAttentionProvider(),
+       attention =
+           attention ?? ZoneAttentionProvider(settings: AttentionSettings.lab),
        recorder = LabRecorder(recordingsDirectory) {
     this.server =
         server ?? LabServer(recordings: recorder.list, onConnected: _greeting);
@@ -45,7 +48,10 @@ class LabController extends ChangeNotifier {
   final List<LabEngineOption> options;
   final PlatformBridge platform;
   final LabRecorder recorder;
-  final AttentionStateProvider attention;
+
+  /// Zones and decisions over the ТЗ automata. With [ZoneAttentionProvider]
+  /// its eye gate also decides what goes into the automata (lab mode only).
+  AttentionStateProvider attention;
   final bool startServer;
   late final LabServer server;
 
@@ -73,6 +79,15 @@ class LabController extends ChangeNotifier {
   String? _sessionId;
   int _sessions = 0;
 
+  /// Road gaze collected during the ТЗ calibration (engines with gaze).
+  final List<FaceSignals> _calibrationGaze = [];
+
+  /// Zone layout of the current calibration (road + optional mirrors).
+  ZoneMap? zones;
+  ZoneCalibrationCollector? _mirrors;
+  final List<(int, void Function())> _mirrorPlan = [];
+  bool get calibratingMirrors => _mirrorPlan.isNotEmpty;
+
   /// Last results per engine id (primary first in [engineIds]).
   final Map<String, FaceResult> lastResults = {};
   final Map<String, FaceSignals?> lastSignals = {};
@@ -93,6 +108,28 @@ class LabController extends ChangeNotifier {
   Map<String, String>? _device;
 
   bool get recording => recorder.active;
+
+  ZoneAttentionProvider? get zoneProvider {
+    final a = attention;
+    return a is ZoneAttentionProvider ? a : null;
+  }
+
+  /// Acceptance (ТЗ only) or lab extensions; null for another provider.
+  AttentionSettings? get attentionSettings => zoneProvider?.settings;
+
+  /// Switches the attention mode. The automata restart with the same
+  /// calibration, because the eye gate changes their input.
+  void setAttentionSettings(AttentionSettings next) {
+    if (recording || attentionSettings == null) return;
+    attention = ZoneAttentionProvider(settings: next, zones: zones);
+    _newSession();
+    _note(
+      next.isAcceptance
+          ? 'Режим приёмки: только ТЗ'
+          : 'Режим Лаборатории: расширения включены',
+    );
+  }
+
   bool get isOpen => _open;
   List<String> get engineIds =>
       source?.engines.map((e) => e.id).toList() ?? option.engineIds;
@@ -146,7 +183,11 @@ class LabController extends ChangeNotifier {
   List<Map<String, Object?>> _greeting() => [
     _metaLine(live: !recording),
     if (calibration != null)
-      RecordingSchema.calibration(atUs: 0, profile: calibration!),
+      RecordingSchema.calibration(
+        atUs: 0,
+        profile: calibration!,
+        zones: zones?.toJson(),
+      ),
     {'type': 'lab', 'prompt': prompt ?? ''},
   ];
 
@@ -161,6 +202,8 @@ class LabController extends ChangeNotifier {
     extra: {
       if (live) 'live': true,
       'attention': attention.id,
+      if (attentionSettings != null)
+        'attentionSettings': attentionSettings!.toJson(),
       'algorithm': ObservationEngine.algorithmVersion,
       'settings': settings.toJson(),
     },
@@ -228,6 +271,7 @@ class LabController extends ChangeNotifier {
   Future<void> pause() async {
     if (!_open) return;
     _cancelCalibration();
+    _cancelMirrors();
     await _stopSource();
     _notify(force: true);
   }
@@ -241,7 +285,10 @@ class LabController extends ChangeNotifier {
     if (recording || next.id == option.id) return;
     option = next;
     calibration = null;
+    zones = null;
+    zoneProvider?.zones = null;
     _cancelCalibration();
+    _cancelMirrors();
     engine = null;
     attention.reset(null);
     await _stopSource();
@@ -319,7 +366,7 @@ class LabController extends ChangeNotifier {
     _primaryCompletions.add(result.completedUs);
     _primaryCompletions.removeWhere((t) => t < clockUs() - 2000000);
     lastLatencyUs = completed - captured;
-    final measurements = result.faces.map((f) => f.measurement).toList();
+    var measurements = result.faces.map((f) => f.measurement).toList();
 
     if (_calibrationRequested && _collector == null) {
       if (result.faces.length == 1 &&
@@ -330,8 +377,23 @@ class LabController extends ChangeNotifier {
     final collector = _collector;
     if (collector != null) {
       collector.add(capturedUs: captured, faces: measurements);
+      if (result.faces.length == 1 && signals != null && signals.hasGaze) {
+        _calibrationGaze.add(signals);
+      }
     } else if (engine != null) {
       _rebindIfNeeded(result.faces);
+    }
+    final face = driver == null ? null : signals;
+    _mirrors?.add(captured, face);
+    attentionState = attention.update(face, captured);
+    final zoned = zoneProvider;
+    if (collector == null && engine != null) {
+      // The eye gate of the lab mode may withhold lowered lids from the
+      // `eyes_closed` automaton; in acceptance mode this is the same input.
+      if (zoned != null && result.faces.length <= 1) {
+        final m = zoned.lastMeasurement;
+        measurements = [?m];
+      }
       _apply(
         engine!.process(
           sessionId: _sessionId!,
@@ -341,11 +403,9 @@ class LabController extends ChangeNotifier {
         ),
       );
       _feedFatigue(measurements, captured);
+      zoned?.tzSignActive = tzSignActive(engine!.snapshot);
+      _distraction(zoned?.lastFrame);
     }
-    attentionState = attention.update(
-      driver == null ? null : signals,
-      captured,
-    );
     // 10 per second is enough for the page and keeps an hour-long file
     // small; the replay recomputes decisions from the frames anyway.
     if (completed - _lastDerivedUs >= 100000 || completed < _lastDerivedUs) {
@@ -417,6 +477,27 @@ class LabController extends ChangeNotifier {
     }
   }
 
+  void _distraction(AttentionFrame? frame) {
+    final started = frame?.distractionStarted, ended = frame?.distractionEnded;
+    if (started != null) {
+      _emit({
+        'type': 'event',
+        'change': 'started',
+        'atUs': nowUs,
+        'event': started.toJson(),
+      });
+      _note('Отвлечение (${started.zone.code})', important: true);
+    }
+    if (ended != null) {
+      _emit({
+        'type': 'event',
+        'change': 'ended',
+        'atUs': nowUs,
+        'event': ended.toJson(),
+      });
+    }
+  }
+
   void _emitDerived(int atUs) {
     final snapshot = engine?.snapshot;
     _emit(
@@ -447,6 +528,7 @@ class LabController extends ChangeNotifier {
   void calibrate() {
     if (source == null) return;
     _cancelCalibration();
+    _cancelMirrors();
     _calibrationRequested = true;
     engine = null;
     _say('Калибровка. Смотрите на дорогу десять секунд');
@@ -455,6 +537,7 @@ class LabController extends ChangeNotifier {
 
   void _beginCollector(int trackingId, int atUs) {
     _calibrationStartUs = atUs;
+    _calibrationGaze.clear();
     _collector = CalibrationCollector(
       trackingId: trackingId,
       detector: source!.engines.first,
@@ -472,6 +555,7 @@ class LabController extends ChangeNotifier {
   void _finishCalibration() {
     final collector = _collector!;
     final result = collector.finish(nowUs: nowUs);
+    final gaze = List.of(_calibrationGaze);
     _cancelCalibration();
     final profile = result.profile;
     if (profile == null) {
@@ -486,7 +570,23 @@ class LabController extends ChangeNotifier {
     }
     error = null;
     calibration = profile;
-    _emit(RecordingSchema.calibration(atUs: nowUs, profile: profile));
+    // Road gaze: median gaze of the calibration window, as the replay does.
+    final map = gaze.length < 10
+        ? ZoneMap.fromCalibration(profile)
+        : ZoneMap.fromCalibration(
+            profile,
+            roadGazeLeft: median(gaze.map((s) => s.gazeLeft!)),
+            roadGazeDown: median(gaze.map((s) => s.gazeDown!)),
+          );
+    zones = map;
+    zoneProvider?.zones = map;
+    _emit(
+      RecordingSchema.calibration(
+        atUs: nowUs,
+        profile: profile,
+        zones: map.toJson(),
+      ),
+    );
     _newSession();
     _say('Калибровка завершена');
     _note(
@@ -499,6 +599,75 @@ class LabController extends ChangeNotifier {
       _pendingScenario = null;
       _beginScenario(pending, delayUs: 2500000);
     }
+  }
+
+  /// Optional mirror step: about 2.5 s of gaze into each mirror on a voice
+  /// prompt. The calibrated centres replace the default sectors.
+  void calibrateMirrors() {
+    final base = zones;
+    if (calibration == null || base == null || calibratingMirrors) return;
+    if (scenario != null || phase != LabPhase.observing) return;
+    final collector = ZoneCalibrationCollector(base);
+    _mirrors = collector;
+    var t = nowUs + 500000;
+    for (final (zone, name) in [
+      (GazeZone.mirrorLeft, 'левое'),
+      (GazeZone.mirrorRight, 'правое'),
+      (GazeZone.mirrorRear, 'салонное'),
+    ]) {
+      _mirrorPlan
+        ..add((
+          t,
+          () {
+            _say('Смотрите в $name зеркало');
+            _setPrompt('Смотрите в $name зеркало');
+          },
+        ))
+        ..add((t + 1500000, () => collector.begin(zone, nowUs)))
+        ..add((
+          t + 4000000,
+          () {
+            final issue = collector.end(nowUs);
+            if (issue != null) _note('Зеркало $name: $issue');
+            _say('Дорога');
+            _setPrompt('Дорога');
+          },
+        ));
+      t += 6000000;
+    }
+    _mirrorPlan.add((t, () => _finishMirrors(collector)));
+    _note('Калибровка зеркал');
+    _notify(force: true);
+  }
+
+  void _finishMirrors(ZoneCalibrationCollector collector) {
+    _mirrors = null;
+    _setPrompt(null);
+    final map = collector.finish();
+    if (!map.mirrorsCalibrated || calibration == null) {
+      _say('Зеркала не откалиброваны');
+      _note('Зеркала не откалиброваны, остались стартовые секторы');
+      return;
+    }
+    zones = map;
+    zoneProvider?.zones = map;
+    _emit(
+      RecordingSchema.calibration(
+        atUs: nowUs,
+        profile: calibration!,
+        zones: map.toJson(),
+      ),
+    );
+    _newSession();
+    _say('Зеркала откалиброваны');
+    _note('Зеркала откалиброваны');
+  }
+
+  void _cancelMirrors() {
+    if (_mirrorPlan.isEmpty && _mirrors == null) return;
+    _mirrorPlan.clear();
+    _mirrors = null;
+    _setPrompt(null);
   }
 
   /// New ObservationEngine session on the current time base.
@@ -541,6 +710,7 @@ class LabController extends ChangeNotifier {
     // restarts; the automata start a new session with the same profile.
     final wasCalibrating = _collector != null || _calibrationRequested;
     _cancelCalibration();
+    _cancelMirrors();
     baseUs = clockUs();
     _primaryCompletions.clear();
     try {
@@ -552,7 +722,13 @@ class LabController extends ChangeNotifier {
     }
     _emit(_metaLine());
     if (calibration != null) {
-      _emit(RecordingSchema.calibration(atUs: 0, profile: calibration!));
+      _emit(
+        RecordingSchema.calibration(
+          atUs: 0,
+          profile: calibration!,
+          zones: zones?.toJson(),
+        ),
+      );
       _newSession();
     }
     if (wasCalibrating) calibrate();
@@ -575,7 +751,9 @@ class LabController extends ChangeNotifier {
   // ---- scenarios ----------------------------------------------------------
 
   Future<void> startScenario(Scenario next) async {
-    if (!_open || source == null || scenario != null) return;
+    if (!_open || source == null || scenario != null || calibratingMirrors) {
+      return;
+    }
     if (!recording) await startRecording();
     if (calibration == null) {
       _pendingScenario = next;
@@ -636,6 +814,9 @@ class LabController extends ChangeNotifier {
         _calibrationStartUs != null &&
         now - _calibrationStartUs! >= 10000000) {
       _finishCalibration();
+    }
+    while (_mirrorPlan.isNotEmpty && _mirrorPlan.first.$1 <= now) {
+      _mirrorPlan.removeAt(0).$2();
     }
     final current = engine;
     if (current != null) {

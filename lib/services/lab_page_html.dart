@@ -173,9 +173,15 @@ function onLine(m) {
       updateHeader(); dirty = true; break;
     }
     case "event": {
-      const e = m.event, name = e.type === "eyes_closed" ? "глаза закрыты" : "голова опущена";
-      if (m.change === "started") { events.push({t: e.thresholdUs / 1e6, type: e.type}); addFeed("ТРЕВОГА: " + name, "ev"); }
-      else addFeed(`Событие «${name}» ${m.change === "ended" ? "завершено (" + e.endReason + ")" : m.change}`, "ev");
+      const e = m.event;
+      const name = e.type === "eyes_closed" ? "глаза закрыты"
+        : e.type === "head_pitch_down" ? "голова опущена"
+        : e.type === "distraction" ? `отвлечение (${e.kind || ""}, ${e.zone || ""})` : e.type;
+      if (m.change === "started") {
+        events.push({t: e.thresholdUs / 1e6, type: e.type});
+        addFeed((e.type === "distraction" ? "Расширение: " : "ТРЕВОГА: ") + name, "ev");
+      }
+      else addFeed(`Событие «${name}» ${m.change === "ended" ? "завершено" + (e.endReason ? " (" + e.endReason + ")" : "") : m.change}`, "ev");
       dirty = true; break;
     }
     case "label": {
