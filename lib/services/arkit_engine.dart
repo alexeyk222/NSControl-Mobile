@@ -99,6 +99,8 @@ class ArkitStats {
     this.battery,
     this.mlKitOrientation,
     this.lightIntensity,
+    this.imageWidth,
+    this.imageHeight,
   });
   final int atUs, arFrames, sent, droppedEvents;
   final int mlKitDone, mlKitSkipped, mlKitErrors, mlKitBusyUs;
@@ -106,6 +108,10 @@ class ArkitStats {
   final bool lowPower;
   final double? battery, lightIntensity;
   final String? mlKitOrientation;
+
+  /// `capturedImage` size of the running ARKit format (sensor orientation);
+  /// ML Kit analyses the same image in comparison mode.
+  final int? imageWidth, imageHeight;
 
   /// The `device` line of the recording (see the contract).
   Map<String, Object?> toJson() => {
@@ -124,6 +130,8 @@ class ArkitStats {
     'mlKitErrors': mlKitErrors,
     'mlKitBusyUs': mlKitBusyUs,
     if (mlKitOrientation != null) 'mlKitOrientation': mlKitOrientation,
+    if (imageWidth != null) 'imageWidth': imageWidth,
+    if (imageHeight != null) 'imageHeight': imageHeight,
   };
 }
 
@@ -425,6 +433,8 @@ class ArkitEngine {
             batteryState: event['batteryState'] as String? ?? 'unknown',
             battery: d('battery'),
             mlKitOrientation: event['mlKitOrientation'] as String?,
+            imageWidth: info?.width,
+            imageHeight: info?.height,
           ),
         );
       case 'error':
