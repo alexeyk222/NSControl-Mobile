@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'attention_zones.dart';
 import 'calibration.dart';
+import 'face.dart';
 import 'replay.dart';
 import 'signals.dart';
 
@@ -174,18 +175,62 @@ class EngineComparison {
   Map<String, ReplayResult?> _gated = const {};
   Map<String, String> _replayErrors = const {};
 
+  /// Eye limit for an engine other than ML Kit whose calibration is
+  /// recomputed from frames: the largest limit a recorded calibration used,
+  /// else the replay default. ML Kit always keeps the ТЗ 18°.
+  double get recalibrationEyeYawLimit {
+    double? best;
+    for (final c in recording.calibrations) {
+      final limit = c.profile?.detector.eyeYawLimit;
+      if (limit != null && (best == null || limit > best)) best = limit;
+    }
+    return best ?? const ReplayOptions(engine: '').eyeYawLimit;
+  }
+
+  /// The phone stands on a side vent: the lab recorded with `mountRelative`,
+  /// meta names a vent, or a recorded road pose is beyond the ТЗ 18° to the
+  /// camera. Then the strict ТЗ calibration cannot pass, and both replay
+  /// modes run with [AttentionSettings.mountRelative] (thread 3: angles
+  /// relative to the road pose, eyes within the engine's limit to the
+  /// camera, `MountCalibrationCollector`); the ТЗ thresholds are unchanged.
+  bool get sideMount {
+    final settings = recording.meta['attentionSettings'];
+    if (settings is Map && settings['mountRelative'] == true) return true;
+    final mount = recording.meta['mount'];
+    final position = mount is Map ? mount['position'] : mount;
+    if (position is String && position.startsWith('vent')) return true;
+    return recording.calibrations.any(
+      (c) =>
+          (c.profile?.neutralYaw.abs() ?? 0) >
+          DetectorCapabilities.mlKit.eyeYawLimit,
+    );
+  }
+
   void _runReplays() {
     final results = <String, ReplayResult?>{};
     final gated = <String, ReplayResult?>{};
     final errors = <String, String>{};
+    final limit = recalibrationEyeYawLimit;
+    final side = sideMount;
     for (final engine in recording.engines) {
       try {
-        results[engine] = ReplayRunner(
-          recording,
-        ).run(ReplayOptions(engine: engine));
-        gated[engine] = ReplayRunner(
-          recording,
-        ).run(ReplayOptions(engine: engine, attention: gatedEyes));
+        results[engine] = ReplayRunner(recording).run(
+          ReplayOptions(
+            engine: engine,
+            attention: AttentionSettings(mountRelative: side),
+            eyeYawLimit: limit,
+          ),
+        );
+        gated[engine] = ReplayRunner(recording).run(
+          ReplayOptions(
+            engine: engine,
+            attention: AttentionSettings(
+              gazeAwareEyes: gatedEyes.gazeAwareEyes,
+              mountRelative: side,
+            ),
+            eyeYawLimit: limit,
+          ),
+        );
       } catch (error) {
         results[engine] = null;
         gated[engine] = null;
@@ -209,6 +254,14 @@ class EngineComparison {
       '${recording.frames.length}, шагов ${episodes.length}, строк device '
       '${devices.length}.',
     );
+    if (sideMount) {
+      b.writeln(
+        '- Боковое крепление: оба режима идут с mountRelative (углы '
+        'относительно позы «дорога», глаза в пределе движка к камере, '
+        'калибровка MountCalibrationCollector). Строгая калибровка ТЗ при '
+        'таком креплении не проходит; пороги ТЗ те же.',
+      );
+    }
     if (swappedEyes.isNotEmpty) {
       b.writeln(
         '- Левый и правый глаз переставлены перед сравнением у: '
@@ -226,6 +279,7 @@ class EngineComparison {
     _criterion3(b);
     _criterion4(b);
     _signs(b);
+    _faceLoss(b);
     _agreement(b);
     return b.toString();
   }
@@ -787,6 +841,53 @@ class EngineComparison {
       }
       b.writeln('| $step | $expectation | ${cells.join(' | ')} |');
     }
+  }
+
+  /// Steps where an engine loses the face: share of the step's frames that
+  /// carry head angles, listed when it is below [faceKept] for any engine.
+  static const faceKept = .9;
+
+  void _faceLoss(StringBuffer b) {
+    final rows = <String>[];
+    final steps = <String>{for (final e in episodes) e.step}.toList()..sort();
+    for (final step in steps) {
+      final share = <String, (int, int)>{};
+      for (final engine in recording.engines) {
+        var frames = 0, kept = 0;
+        for (final e in episodes.where((e) => e.step == step)) {
+          for (final f in recording.frames) {
+            if (f.engine != engine ||
+                f.capturedUs < e.startUs ||
+                f.capturedUs > e.endUs) {
+              continue;
+            }
+            frames++;
+            final s = f.signals;
+            if (f.faceCount > 0 &&
+                s != null &&
+                s.tracked &&
+                s.headYawLeft != null) {
+              kept++;
+            }
+          }
+        }
+        if (frames > 0) share[engine] = (kept, frames);
+      }
+      if (!share.values.any((v) => v.$1 < faceKept * v.$2)) continue;
+      rows.add(
+        '- **$step**: ${[for (final e in share.entries) '${e.key} — углы в ${_pct(e.value.$1, e.value.$2)} кадров (${e.value.$1} из ${e.value.$2})'].join('; ')}.',
+      );
+    }
+    if (rows.isEmpty) return;
+    b.writeln();
+    b.writeln('## Потеря лица по шагам');
+    b.writeln();
+    b.writeln(
+      'Шаги, где у какого-то движка углы головы есть меньше чем в '
+      '${_pctValue(faceKept)} кадров шага.',
+    );
+    b.writeln();
+    rows.forEach(b.writeln);
   }
 
   // Agreement on the same frames.
