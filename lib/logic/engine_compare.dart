@@ -16,7 +16,14 @@ import 'signals.dart';
 /// Plus the sign checks of `signs-v1` and, for comparison recordings, the
 /// agreement of both engines on the same frames.
 class EngineComparison {
-  EngineComparison(this.text) : recording = Recording.parse(text) {
+  /// [swapEyes]: engines whose left and right eye are exchanged before the
+  /// comparison (`eyeOpen*` and Left/Right blendshapes of the driver and of
+  /// the other faces), for a recording made before a naming fix.
+  factory EngineComparison(String text, {Set<String> swapEyes = const {}}) =>
+      EngineComparison._(swapEyesOf(text, swapEyes), swapEyes);
+
+  EngineComparison._(this.text, this.swappedEyes)
+    : recording = Recording.parse(text) {
     for (final line in const LineSplitter().convert(text)) {
       if (!line.contains('"device"')) continue;
       try {
@@ -33,7 +40,66 @@ class EngineComparison {
   }
 
   final String text;
+  final Set<String> swappedEyes;
   final Recording recording;
+
+  /// [text] with left and right eyes exchanged in the frames of [engines].
+  static String swapEyesOf(String text, Set<String> engines) {
+    if (engines.isEmpty) return text;
+    Map<String, dynamic> swap(Map<String, dynamic> s) {
+      String other(String key) => key.endsWith('Left')
+          ? '${key.substring(0, key.length - 4)}Right'
+          : key.endsWith('Right')
+          ? '${key.substring(0, key.length - 5)}Left'
+          : key;
+      final result = <String, dynamic>{};
+      for (final e in s.entries) {
+        result[e.key.startsWith('eyeOpen') ? other(e.key) : e.key] = e.value;
+      }
+      final shapes = s['blendshapes'];
+      if (shapes is Map) {
+        result['blendshapes'] = {
+          for (final e in shapes.entries) other(e.key as String): e.value,
+        };
+      }
+      return result;
+    }
+
+    final out = StringBuffer();
+    for (final line in const LineSplitter().convert(text)) {
+      if (!line.contains('"frame"')) {
+        out.writeln(line);
+        continue;
+      }
+      final json = jsonDecode(line) as Map<String, dynamic>;
+      if (json['type'] != 'frame' || !engines.contains(json['engine'])) {
+        out.writeln(line);
+        continue;
+      }
+      if (json['signals'] is Map) {
+        json['signals'] = swap(
+          Map<String, dynamic>.from(json['signals'] as Map),
+        );
+      }
+      if (json['others'] is List) {
+        json['others'] = [
+          for (final o in json['others'] as List)
+            o is Map
+                ? {
+                    ...o,
+                    if (o['signals'] is Map)
+                      'signals': swap(
+                        Map<String, dynamic>.from(o['signals'] as Map),
+                      ),
+                  }
+                : o,
+        ];
+      }
+      out.writeln(jsonEncode(json));
+    }
+    return out.toString();
+  }
+
   final List<Map<String, dynamic>> devices = [];
 
   /// Steps where closed or narrowed eyes are expected, left out of the
@@ -143,6 +209,12 @@ class EngineComparison {
       '${recording.frames.length}, шагов ${episodes.length}, строк device '
       '${devices.length}.',
     );
+    if (swappedEyes.isNotEmpty) {
+      b.writeln(
+        '- Левый и правый глаз переставлены перед сравнением у: '
+        '${swappedEyes.join(', ')}.',
+      );
+    }
     b.writeln(
       '- Эталон — метки сценария (момент подсказки), а не детектор. '
       'Порог T и нейтральные углы — из калибровки каждого движка '

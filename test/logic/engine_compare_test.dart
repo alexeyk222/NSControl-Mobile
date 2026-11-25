@@ -172,6 +172,28 @@ void main() {
     expect(report, contains('надёжны до |поворот к камере| ≈ 40°'));
   });
 
+  test('swapping one engine\'s eyes', () {
+    final report = EngineComparison(
+      _comparison(),
+      swapEyes: const {'mlkit_face_detection'},
+    ).report();
+    expect(
+      report,
+      contains('переставлены перед сравнением у: mlkit_face_detection'),
+    );
+    final line = EngineComparison.swapEyesOf(
+      '{"type":"frame","engine":"e","signals":{"eyeOpenLeft":0.1,'
+      '"eyeOpenRight":0.9,"blendshapes":{"eyeBlinkLeft":0.9}}}\n'
+      '{"type":"frame","engine":"other","signals":{"eyeOpenLeft":0.1}}',
+      const {'e'},
+    ).split('\n');
+    final s = (jsonDecode(line[0]) as Map)['signals'] as Map;
+    expect(s['eyeOpenLeft'], .9);
+    expect(s['eyeOpenRight'], .1);
+    expect(s['blendshapes'], {'eyeBlinkRight': .9});
+    expect(line[1], contains('"eyeOpenLeft":0.1'));
+  });
+
   test('a scaled ML Kit frame is compared by its own size', () {
     final report = EngineComparison(_comparison(scaled: true)).report();
     expect(report, contains('Кадр ARKit: 1280×720; ML Kit'));

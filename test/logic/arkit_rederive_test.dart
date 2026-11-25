@@ -42,6 +42,20 @@ String _frame(int us, double yaw) {
 void main() {
   final jsonl = [
     jsonEncode({'type': 'meta', 'schema': 1}),
+    jsonEncode({
+      'type': 'calibration',
+      'profile': {
+        'detector': {'id': 'arkit_face_tracking'},
+        'neutralYaw': 30.0,
+        'neutralPitch': 5.0,
+        'neutralRoll': -2.0,
+        'leftEyeMedian': .9,
+        'rightEyeMedian': .8,
+      },
+      'zones': {
+        'road': {'headLeft': 30.0, 'headDown': 5.0, 'gazeLeft': 20.0},
+      },
+    }),
     _frame(0, 30),
     _frame(33000, 30),
     jsonEncode({'type': 'frame', 'engine': 'mlkit_face_detection'}),
@@ -51,10 +65,27 @@ void main() {
     final out = const LineSplitter().convert(
       ArkitRawRecording(jsonl).rederive(const ArkitAxes(mirror: true)),
     );
-    expect(out, hasLength(4));
+    expect(out, hasLength(5));
+    // The calibration follows the new axes.
+    final cal =
+        jsonDecode(
+              ArkitRawRecording(jsonl)
+                  .rederive(const ArkitAxes(mirror: true, swapEyes: true))
+                  .split('\n')[1],
+            )
+            as Map<String, dynamic>;
+    expect(cal['profile'], containsPair('neutralYaw', -30.0));
+    expect(cal['profile'], containsPair('neutralPitch', 5.0));
+    expect(cal['profile'], containsPair('neutralRoll', 2.0));
+    expect(cal['profile'], containsPair('leftEyeMedian', .8));
+    expect(cal['zones']['road'], {
+      'headLeft': -30.0,
+      'headDown': 5.0,
+      'gazeLeft': -20.0,
+    });
     expect(out.first, contains('"meta"'));
     expect(out.last, contains('mlkit_face_detection'));
-    final frame = jsonDecode(out[1]) as Map<String, dynamic>;
+    final frame = jsonDecode(out[2]) as Map<String, dynamic>;
     final s = FaceSignals.fromJson(frame['signals'] as Map<String, dynamic>);
     expect(s.headYawLeft, closeTo(-30, 1e-6));
     expect(s.eyeOpenLeft, closeTo(.9, 1e-12));
@@ -64,8 +95,9 @@ void main() {
     final standard = jsonDecode(
       const LineSplitter().convert(
         ArkitRawRecording(jsonl).rederive(ArkitAxes.standard),
-      )[1],
+      )[2],
     );
+    expect(standard['type'], 'frame');
     expect(standard['signals']['headYawLeft'], closeTo(30, 1e-6));
   });
 
