@@ -40,12 +40,22 @@ class WearableGateway {
   String? _syncMessageId;
   int? _syncRequestedUs;
   bool _connected = false;
+  int? _helloUs;
   String? _tripId;
   String? _sessionId;
   List<String> _activeIds = [];
   String? _recommendation;
   Map<String, Object?> _extra = const {};
   bool get connected => _connected;
+
+  /// `hello` went out but no `ready` came back within [readyTimeoutUs]
+  /// (the reply was lost or the watch app was suspended). Send `hello` again.
+  bool get awaitingReadyTooLong =>
+      _connected &&
+      _receiverEpoch == null &&
+      _helloUs != null &&
+      nowUs() - _helloUs! >= readyTimeoutUs;
+  static const readyTimeoutUs = 5000000;
   bool get synchronized =>
       _connected &&
       _syncedUs != null &&
@@ -91,6 +101,7 @@ class WearableGateway {
     disconnect();
     _connected = true;
     _connectionId = _ids.v4();
+    _helloUs = nowUs();
     await _transmit(_envelope('hello'));
   }
 

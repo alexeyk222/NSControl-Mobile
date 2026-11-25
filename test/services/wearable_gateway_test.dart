@@ -274,4 +274,27 @@ void main() {
       expect(states, ['off', 'active']);
     },
   );
+
+  test('hello without ready is reported as stale after 5 s', () async {
+    var now = 1000000;
+    final sent = <Map<String, Object?>>[];
+    final gateway = WearableGateway(
+      nowUs: () => now,
+      send: (m) async => sent.add(m),
+    );
+    await gateway.connect();
+    expect(gateway.awaitingReadyTooLong, isFalse);
+    now += 4999999;
+    expect(gateway.awaitingReadyTooLong, isFalse);
+    now += 1;
+    expect(gateway.awaitingReadyTooLong, isTrue);
+    await gateway.receive({
+      'type': 'ready',
+      'receiver_epoch': 'x',
+      'connection_id': sent.first['connection_id'],
+    });
+    expect(gateway.awaitingReadyTooLong, isFalse);
+    gateway.disconnect();
+    expect(gateway.awaitingReadyTooLong, isFalse);
+  });
 }
