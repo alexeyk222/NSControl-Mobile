@@ -461,30 +461,44 @@ class EngineComparison {
   static const cameraPluginPixels = 640 * 480;
 
   void _resolution(StringBuffer b) {
-    final sized = devices.where(
-      (d) => d['imageWidth'] is num && d['imageHeight'] is num,
-    );
-    if (sized.isEmpty) {
+    (int, int)? size(String w, String h) {
+      for (final d in devices) {
+        if (d[w] is num && d[h] is num) {
+          return ((d[w] as num).toInt(), (d[h] as num).toInt());
+        }
+      }
+      return null;
+    }
+
+    final arkit = size('imageWidth', 'imageHeight');
+    final mlKit = size('mlKitWidth', 'mlKitHeight') ?? arkit;
+    if (mlKit == null) {
       b.writeln(
-        '- Разрешение кадра ARKit в записи не указано (нет imageWidth в '
-        'строках device).',
+        '- Размер кадра ARKit и ML Kit в записи не указан (нет imageWidth и '
+        'mlKitWidth в строках device).',
       );
       return;
     }
-    final w = (sized.first['imageWidth'] as num).toInt();
-    final h = (sized.first['imageHeight'] as num).toInt();
+    final (w, h) = mlKit;
     final ratio = w * h / cameraPluginPixels;
     b.writeln(
-      '- Кадр ARKit (его же в режиме сравнения анализирует ML Kit): $w×$h. '
-      'Обычный путь ML Kit через плагин camera (ResolutionPreset.medium) '
-      'получает 640×480.',
+      '- Кадр ARKit: ${arkit == null ? '—' : '${arkit.$1}×${arkit.$2}'}; ML Kit '
+      'в режиме сравнения анализирует $w×$h. Обычный путь ML Kit через '
+      'плагин camera (ResolutionPreset.medium) получает 640×480.',
     );
     if (ratio > 1.5 || ratio < 1 / 1.5) {
       b.writeln(
-        '- **Разрешения заметно разные (в ${_f(ratio, 1)} раза по числу '
-        'пикселей): сравнение ML Kit с ARKit на кадрах ARKit не полностью '
-        'повторяет обычный путь ML Kit. Для честного вывода нужен короткий '
-        'прогон ML Kit через плагин camera.**',
+        '- **Разрешения заметно разные (в ${_f(ratio >= 1 ? ratio : 1 / ratio, 1)} '
+        'раза по числу пикселей): сравнение ML Kit с ARKit на кадрах ARKit не '
+        'полностью повторяет обычный путь ML Kit. Для честного вывода нужен '
+        'короткий прогон ML Kit через плагин camera.**',
+      );
+    }
+    if ((w / h - 4 / 3).abs() > .05) {
+      b.writeln(
+        '- Поле зрения разное: кадр ARKit ${_f(w / h, 2)}:1 (16:9), у плагина '
+        'camera 4:3. Лицо занимает другую долю кадра, поэтому ML Kit через '
+        'обычный путь проверяется отдельно (signs-v1).',
       );
     }
   }

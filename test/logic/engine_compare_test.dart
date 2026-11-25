@@ -6,7 +6,11 @@ import 'package:nscontrol/logic/synthetic.dart';
 
 /// The synthetic ARKit scenario plus an "ML Kit" engine on the same frames
 /// (angles and eye openness only) and a `device` line per second.
-String _comparison({double mlYawSign = 1, bool devices = true}) {
+String _comparison({
+  double mlYawSign = 1,
+  bool devices = true,
+  bool scaled = false,
+}) {
   final out = <String>[];
   var lastUs = 0;
   for (final line in const LineSplitter().convert(
@@ -58,6 +62,8 @@ String _comparison({double mlYawSign = 1, bool devices = true}) {
           'mlKitBusyUs': 15 * 25000,
           'imageWidth': 1280,
           'imageHeight': 720,
+          if (scaled) 'mlKitWidth': 640,
+          if (scaled) 'mlKitHeight': 360,
         }),
       );
     }
@@ -93,12 +99,8 @@ void main() {
     expect(yaw, startsWith('| headYawLeft | 1,00 |'));
     expect(report, contains('Тепловое состояние iOS: nominal'));
     expect(report, contains('Заряд: 90 % → 80 %'));
-    expect(
-      report,
-      contains(
-        'Кадр ARKit (его же в режиме сравнения анализирует ML Kit): 1280×720',
-      ),
-    );
+    expect(report, contains('ML Kit в режиме сравнения анализирует 1280×720'));
+    expect(report, contains('Поле зрения разное'));
     expect(report, contains('Разрешения заметно разные (в 3,0 раза'));
     // Both replay modes for criteria 1 and 2.
     expect(report, contains('| arkit_face_tracking | приёмка |'));
@@ -111,6 +113,14 @@ void main() {
     expect(RegExp(r'· \d+ / \d+').allMatches(instruments).length, 2);
     expect(report, contains('Веки надёжны до |поворот| ≈ 60°'));
     expect(report, contains('ML Kit на кадрах ARKit: проанализировано'));
+  });
+
+  test('a scaled ML Kit frame is compared by its own size', () {
+    final report = EngineComparison(_comparison(scaled: true)).report();
+    expect(report, contains('Кадр ARKit: 1280×720; ML Kit'));
+    expect(report, contains('анализирует 640×360'));
+    expect(report, isNot(contains('Разрешения заметно разные')));
+    expect(report, contains('Поле зрения разное'));
   });
 
   test('flags an engine whose yaw sign is inverted', () {
