@@ -522,6 +522,14 @@ class RoadAdaptation {
   final List<(int, double, double)> _samples = [];
   int? _lastUpdateUs;
 
+  /// The posture has drifted past [maxOffset]: the correction sits at the
+  /// cap and the median road pose of the window lies beyond it. More than
+  /// a slow drift of the posture: the holder may have moved (FR-CAL-08), so
+  /// the trip may offer a new calibration. Since when, in [observe] time;
+  /// null while the correction is within the cap.
+  int? atLimitSinceUs;
+  bool get atLimit => atLimitSinceUs != null;
+
   /// Head angles relative to the corrected road pose, from angles relative
   /// to the calibrated one.
   (double, double, double) apply((double, double, double) h) {
@@ -548,8 +556,14 @@ class RoadAdaptation {
         degPerMin * (last == null ? updateEveryUs : atUs - last) / 60e6;
     double toward(double from, double to) =>
         (from + (to - from).clamp(-step, step)).clamp(-maxOffset, maxOffset);
-    yaw = toward(yaw, median(_samples.map((s) => s.$2)));
-    pitch = toward(pitch, median(_samples.map((s) => s.$3)));
+    final targetYaw = median(_samples.map((s) => s.$2)),
+        targetPitch = median(_samples.map((s) => s.$3));
+    yaw = toward(yaw, targetYaw);
+    pitch = toward(pitch, targetPitch);
     _lastUpdateUs = atUs;
+    final capped =
+        (yaw.abs() >= maxOffset && targetYaw.abs() > maxOffset) ||
+        (pitch.abs() >= maxOffset && targetPitch.abs() > maxOffset);
+    atLimitSinceUs = capped ? (atLimitSinceUs ?? atUs) : null;
   }
 }
