@@ -27,12 +27,18 @@ class ArkitAxes {
   const ArkitAxes({this.mirror = false, this.swapEyes = false});
   static const standard = ArkitAxes();
 
-  /// What the iPhone needs: ARKit's front-camera space is mirrored. On the
-  /// 25.11 trial recordings (same side mount, minutes apart) ARKit gave
-  /// head yaw +37° where ML Kit, whose signs are confirmed on `signs-v1`,
-  /// gave −44°; the pitch is unaffected. To be confirmed on `signs-v1` in
-  /// the «ARKit + ML Kit» variant.
-  static const device = ArkitAxes(mirror: true);
+  /// What the iPhone needs: ARKit's front-camera space is mirrored, and its
+  /// face model is fitted to that mirror image, so the model's "left" eye is
+  /// the driver's right.
+  /// - mirror: on the 25.11 side-mount recordings ARKit gave head yaw +37°
+  ///   where ML Kit (signs confirmed on `signs-v1`) gave −44°; with mirror
+  ///   every angle of `signs-v1` at the left vent is ✓.
+  /// - swapEyes: on that `signs-v1` (phone on the left vent, 38°) ARKit's
+  ///   `leftEyeTransform` is 32 mm farther from the camera than the right
+  ///   one, although the driver's left eye is the nearer one; distances do
+  ///   not depend on the mirroring. `eyeBlink_R` rose on "close the left
+  ///   eye", as the same naming predicts.
+  static const device = ArkitAxes(mirror: true, swapEyes: true);
   final bool mirror, swapEyes;
 
   Map<String, Object?> toJson() => {'mirror': mirror, 'swapEyes': swapEyes};

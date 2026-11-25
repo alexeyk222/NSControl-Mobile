@@ -198,6 +198,24 @@ class ArkitRawRecording {
         'Наклон вниз относительно горизонта, °',
         -math.asin(forward.dot(g).clamp(-1.0, 1.0)) * deg,
       );
+      // Which of ARKit's eyes is nearer the camera: with the phone at the
+      // driver's left the driver's left eye is nearer, and the other way
+      // round. Distances do not depend on a mirrored space.
+      final le = face.leftEye, re = face.rightEye;
+      if (le != null && re != null) {
+        Vec3 inCamera(List<double> eye) {
+          final t = column(eye, 3);
+          return position +
+              column(pose, 0) * t.x +
+              column(pose, 1) * t.y +
+              column(pose, 2) * t.z;
+        }
+
+        add(
+          'leftEyeTransform дальше от камеры, чем right, мм',
+          (inCamera(le).length - inCamera(re).length) * 1000,
+        );
+      }
       final l = face.blendshapes['eyeBlink_L'],
           r = face.blendshapes['eyeBlink_R'];
       if (l != null) add('eyeBlink_L', l);
@@ -226,6 +244,12 @@ class ArkitRawRecording {
         '- «Наклон вниз относительно горизонта» ≈ наклон камеры + ось камеры '
         'над горизонтом. Если записанный наклон совпадает с ним, а не с '
         'наклоном к камере, в угол попал наклон телефона.',
+      )
+      ..writeln(
+        '- Глаза: если телефон слева от водителя, ближе к камере его левый '
+        'глаз. Тогда положительная разница «leftEyeTransform дальше» значит, '
+        'что «левый» глаз ARKit — правый глаз водителя, и нужен swapEyes. '
+        'Если телефон справа, всё наоборот.',
       )
       ..writeln(
         '- Знак поворота из одной геометрии не виден: ARKit строит '
