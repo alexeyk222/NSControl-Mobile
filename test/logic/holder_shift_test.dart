@@ -42,7 +42,9 @@ void main() {
     test('a holder tilted 15° for 5 s is a shift', () {
       final h = shift();
       final t = run(h, 0, 20);
-      run(h, t, 6, tilt: 15);
+      // The camera tilts against the head: the head's road-frame pitch moves
+      // with the phone's.
+      run(h, t, 6, tilt: 15, head: (0, 14, 0));
       expect(h.suspected, isTrue);
       expect(h.source, HolderShiftSource.gravity);
       expect(h.sinceUs, greaterThanOrEqualTo(t));
@@ -56,6 +58,32 @@ void main() {
       t = run(h, t, 10);
       run(h, t, 60, tilt: 6);
       expect(h.suspected, isFalse);
+    });
+
+    test('a car on a 10° ramp: gravity tilts, the head stays', () {
+      final h = shift();
+      final t = run(h, 0, 10);
+      run(h, t, 30, tilt: 10);
+      expect(h.suspected, isFalse);
+    });
+
+    test('the head moving against the tilt or no face: not a shift', () {
+      for (final head in [(0.0, -14.0, 0.0), (0.0, 4.0, 0.0), null]) {
+        final h = shift();
+        final t = run(h, 0, 10);
+        run(h, t, 20, tilt: 15, head: head);
+        expect(h.suspected, isFalse, reason: '$head');
+      }
+    });
+
+    test('a ramp first, the holder later: the shift once the head follows', () {
+      final h = shift();
+      var t = run(h, 0, 10);
+      t = run(h, t, 20, tilt: 12);
+      expect(h.suspected, isFalse);
+      t = run(h, t, 6, tilt: 12, head: (0, 11, 0));
+      expect(h.suspected, isTrue);
+      expect(h.source, HolderShiftSource.gravity);
     });
   });
 
