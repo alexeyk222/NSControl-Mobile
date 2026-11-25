@@ -297,4 +297,22 @@ void main() {
     gateway.disconnect();
     expect(gateway.awaitingReadyTooLong, isFalse);
   });
+
+  test('watch background state is forgotten on disconnect', () async {
+    final sent = <Map<String, Object?>>[];
+    final gateway = WearableGateway(
+      nowUs: () => 5000000,
+      send: (m) async => sent.add(m),
+    );
+    await gateway.connect();
+    await gateway.receive({
+      'type': 'ready',
+      'receiver_epoch': 'x',
+      'connection_id': sent.last['connection_id'],
+      'background': 'active',
+    });
+    expect(gateway.watchBackground, 'active');
+    gateway.disconnect();
+    expect(gateway.watchBackground, isNull);
+  });
 }

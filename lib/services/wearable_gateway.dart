@@ -107,6 +107,9 @@ class WearableGateway {
 
   void disconnect() {
     _connected = false;
+    // Unknown until the next `ready`: a watch app that died without saying
+    // `off` must not look like it still runs in the background.
+    _watchBackground = null;
     _receiverEpoch = null;
     _syncId = null;
     _syncedUs = null;
