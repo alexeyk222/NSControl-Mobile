@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../logic/domain.dart';
+import '../services/lab_controller.dart';
 import '../services/trip_controller.dart';
 import '../version.dart';
 import 'components.dart';
+import 'lab_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -11,10 +13,16 @@ class SettingsPage extends StatefulWidget {
     required this.trip,
     required this.themeMode,
     required this.onTheme,
+    this.developerMode = false,
+    this.onDeveloperMode,
+    this.createLab,
   });
   final TripController trip;
   final ThemeMode themeMode;
   final void Function(ThemeMode) onTheme;
+  final bool developerMode;
+  final ValueChanged<bool>? onDeveloperMode;
+  final LabController Function()? createLab;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -254,6 +262,48 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
       ),
+      if (widget.onDeveloperMode != null) ...[
+        const SizedBox(height: 12),
+        SectionCard(
+          title: 'Для разработчика',
+          icon: Icons.science_outlined,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Режим разработчика'),
+                subtitle: const Text(
+                  'Показывает Лабораторию распознавания. На поездку не влияет.',
+                ),
+                value: widget.developerMode,
+                onChanged: widget.onDeveloperMode,
+              ),
+              if (widget.developerMode && widget.createLab != null)
+                AnimatedBuilder(
+                  animation: widget.trip,
+                  builder: (context, _) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.biotech_outlined),
+                    title: const Text('Лаборатория'),
+                    subtitle: Text(
+                      widget.trip.active
+                          ? 'Сначала завершите поездку: камера одна'
+                          : 'Живые значения, поток на Mac, сценарии и запись',
+                    ),
+                    enabled: !widget.trip.active,
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => LabPage(create: widget.createLab!),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
       const SizedBox(height: 12),
       TextButton.icon(
         onPressed: () async {

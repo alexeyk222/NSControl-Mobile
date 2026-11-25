@@ -121,4 +121,26 @@ void main() {
       throwsArgumentError,
     );
   });
+
+  test('pmi-negative-60 is six labelled 10-minute blocks', () {
+    final s = pmiNegative60();
+    final starts = s.cues.where((c) => c.edge == 'start').toList();
+    expect(starts.map((c) => c.step), [
+      'neg_natural',
+      'neg_mirrors',
+      'neg_blind_spot',
+      'neg_intersection',
+      'neg_instruments',
+      'neg_mixed',
+    ]);
+    for (final start in starts) {
+      final end = s.cues.singleWhere(
+        (c) => c.step == start.step && c.edge == 'end',
+      );
+      expect(end.atUs - start.atUs, 600000000);
+    }
+    expect(s.durationUs, inInclusiveRange(3600000000, 3660000000));
+    final prompts = s.cues.where((c) => c.say != null && !c.isLabel).length;
+    expect(prompts, inInclusiveRange(60, 200), reason: 'rare prompts');
+  });
 }

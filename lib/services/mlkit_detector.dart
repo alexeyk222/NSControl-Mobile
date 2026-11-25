@@ -3,6 +3,7 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart'
     as ml;
 import '../logic/domain.dart';
 import 'detector.dart';
+import 'mlkit_signals.dart';
 
 class MlKitDetector implements FaceDetectorPort {
   final _detector = ml.FaceDetector(
@@ -34,22 +35,22 @@ class MlKitDetector implements FaceDetectorPort {
       ),
     );
     final faces = await _detector.processImage(image);
-    return faces
-        .map(
-          (f) => DetectedFace(
-            FaceMeasurement(
-              trackingId: f.trackingId,
-              leftEye: f.leftEyeOpenProbability,
-              rightEye: f.rightEyeOpenProbability,
-              // ML Kit Euler X is positive when the face is looking UP.
-              pitchDown: f.headEulerAngleX == null ? null : -f.headEulerAngleX!,
-              yaw: f.headEulerAngleY,
-              roll: f.headEulerAngleZ,
-            ),
-            f.boundingBox,
-          ),
-        )
-        .toList();
+    return faces.map((f) {
+      final signals = MlKitSignals.from(
+        trackingId: f.trackingId,
+        leftEyeOpen: f.leftEyeOpenProbability,
+        rightEyeOpen: f.rightEyeOpenProbability,
+        eulerX: f.headEulerAngleX,
+        eulerY: f.headEulerAngleY,
+        eulerZ: f.headEulerAngleZ,
+      );
+      // The ТЗ automata keep their input: the same five numbers as before.
+      return DetectedFace(
+        signals.toMeasurement(),
+        f.boundingBox,
+        signals: signals,
+      );
+    }).toList();
   }
 
   @override

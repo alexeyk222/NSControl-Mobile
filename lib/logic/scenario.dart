@@ -49,7 +49,7 @@ class Scenario {
   Iterable<String> get steps =>
       cues.where((c) => c.edge == 'start').map((c) => c.step!).toSet();
 
-  static final all = <Scenario>[benchV1(), signsV1()];
+  static final all = <Scenario>[benchV1(), signsV1(), pmiNegative60()];
   static Scenario byId(String id) => all.firstWhere((s) => s.id == id);
 }
 
@@ -205,6 +205,77 @@ Scenario signsV1() {
   return Scenario(
     id: 'signs-v1',
     title: 'Проверка знаков · 1 мин',
+    cues: b.cues,
+  );
+}
+
+/// Rehearsal of the ПМИ negative hour (А.12, table А.1; КЧ-03, КЧ-05): six
+/// 10-minute blocks, one label per block, rare prompts. No ТЗ event is
+/// expected anywhere; every event is a false alarm.
+Scenario pmiNegative60() {
+  final b = _Builder();
+  const block = 600.0;
+  b.say('Отрицательный час по ПМИ. Шесть блоков по десять минут', 6);
+  void run(String step, String intro, List<String> prompts, double every) {
+    final rep = b._rep(step);
+    final start = b.t;
+    b.label(step, 'start', rep, intro);
+    final end = start + (block * 1000000).round();
+    var i = 0;
+    b.wait(every);
+    while (prompts.isNotEmpty &&
+        b.t + (every * 1000000).round() <= end - 5000000) {
+      b.cues.add(ScenarioCue(atUs: b.t, say: prompts[i++ % prompts.length]));
+      b.wait(every);
+    }
+    b.t = end;
+    b.label(step, 'end', rep, 'Блок завершён');
+    b.wait(3);
+  }
+
+  run('neg_natural', 'Блок один. Естественная поза, обычные моргания', [
+    'Смотрите на дорогу',
+  ], 180);
+  run('neg_mirrors', 'Блок два. Короткие осмотры зеркал с возвратом', [
+    'Левое зеркало',
+    'Правое зеркало',
+  ], 20);
+  run(
+    'neg_blind_spot',
+    'Блок три. Проверка слепой зоны, повороты в обе стороны',
+    ['Через левое плечо', 'Через правое плечо'],
+    25,
+  );
+  run(
+    'neg_intersection',
+    'Блок четыре. Перекрёсток: повторные и длительные повороты',
+    [
+      'Перекрёсток',
+      'Долгий поворот влево',
+      'Перекрёсток',
+      'Долгий поворот вправо',
+    ],
+    30,
+  );
+  run(
+    'neg_instruments',
+    'Блок пять. Короткие взгляды на приборы, не дольше секунды',
+    ['Приборы'],
+    20,
+  );
+  run('neg_mixed', 'Блок шесть. Чередуйте обычную позу и осмотры', [
+    'Левое зеркало',
+    'Приборы',
+    'Правое зеркало',
+    'Перекрёсток',
+    'Салонное зеркало',
+    'Через левое плечо',
+  ], 25);
+  b.say('Час завершён. Спасибо', 3);
+  b.cues.add(ScenarioCue(atUs: b.t));
+  return Scenario(
+    id: 'pmi-negative-60',
+    title: 'ПМИ А.12 · отрицательный час · 60 мин',
     cues: b.cues,
   );
 }

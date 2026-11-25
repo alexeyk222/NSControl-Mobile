@@ -66,6 +66,8 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Лаборатория разработчика показывает числа распознавания в браузере на компьютере в той же сети Wi-Fi. Кадры и видео не передаются.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Камера нужна для локального контроля закрытия глаз и наклона головы. Кадры не сохраняются и не передаются.</string>
 	<key>CFBundleURLTypes</key>
