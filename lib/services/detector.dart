@@ -19,9 +19,13 @@ class VisionFrame {
 }
 
 class DetectedFace {
-  const DetectedFace(this.measurement, this.bounds);
+  const DetectedFace(this.measurement, this.bounds, {this.signals});
   final FaceMeasurement measurement;
   final Rect bounds;
+
+  /// Richer engine-neutral signals (gaze, blendshapes) when the engine has
+  /// them. [measurement] stays the only input of the ТЗ automata.
+  final FaceSignals? signals;
 }
 
 /// Adapters must normalize pitch to positive-down and publish their own
