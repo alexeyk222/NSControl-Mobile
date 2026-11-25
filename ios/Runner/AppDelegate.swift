@@ -27,6 +27,7 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
     private let health = HKHealthStore()
     private let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis)!
     private let alerts = PhoneAlert()
+    private let speech = LabSpeech()
     private var sink: FlutterEventSink?
     private var channel: FlutterMethodChannel!
     private var eventChannel: FlutterEventChannel!
@@ -94,6 +95,15 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
                 result(["status": "requested", "physical_output_verified": false])
             } catch { alerts.stop(); result(["status": "error", "reason": error.localizedDescription]) }
         case "alert.stop": alerts.stop(); result(["status": "stopped"])
+        case "speech.say":
+            speech.say(args["text"] as? String ?? ""); result(["status": "ok"])
+        case "speech.stop": speech.stop(); result(["status": "stopped"])
+        case "device.info":
+            var system = utsname(); uname(&system)
+            let model = withUnsafeBytes(of: &system.machine) { raw in
+                String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            result(["model": model, "os": "iOS \(UIDevice.current.systemVersion)"])
         case "screen.keepAwake": UIApplication.shared.isIdleTimerDisabled = args["enabled"] as? Bool ?? false; result(nil)
         case "sleep.status": sleepStatus(result)
         case "sleep.authorize":
@@ -237,6 +247,40 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
     func sessionDidBecomeInactive(_ session: WCSession) { emitWatchStatus(["status": "disconnected", "connected": false]) }
     func sessionDidDeactivate(_ session: WCSession) { session.activate() }
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { emit(["type": "wearable_message", "message": message]) }
+}
+
+/// Voice prompts of the developer lab scenarios (Russian system voice).
+/// The audio session is taken only while a phrase is spoken and released with
+/// notifyOthersOnDeactivation afterwards, so other audio is not left ducked.
+final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
+    private let synthesizer = AVSpeechSynthesizer()
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
+    func say(_ text: String) {
+        guard !text.isEmpty else { return }
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
+        try? session.setActive(true)
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+        synthesizer.speak(utterance)
+    }
+    func stop() {
+        synthesizer.stopSpeaking(at: .immediate)
+        release()
+    }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { release() }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { release() }
+    private func release() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.synthesizer.isSpeaking else { return }
+            // The lab never runs together with a trip, so no alarm is playing here.
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+    }
 }
 
 final class PhoneAlert {

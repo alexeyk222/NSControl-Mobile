@@ -26,6 +26,7 @@ void main() {
         'eyes_closed_3s',
         'head_down_3s',
         'nod',
+        'distraction_4s',
       ]),
     );
   });
@@ -51,6 +52,7 @@ void main() {
       ('eyes_closed_2s', 2000000),
       ('eyes_closed_3s', 3000000),
       ('head_down_3s', 3000000),
+      ('distraction_4s', 4000000),
     ]) {
       final starts = s.cues.where((c) => c.step == step && c.edge == 'start');
       expect(starts, hasLength(3));
@@ -72,6 +74,7 @@ void main() {
         'sign_roll_right',
         'sign_eyes_left',
         'sign_eyes_down',
+        'sign_wink_left',
       ]),
     );
     expect(Scenario.byId('signs-v1').id, 'signs-v1');
@@ -120,5 +123,27 @@ void main() {
       ),
       throwsArgumentError,
     );
+  });
+
+  test('pmi-negative-60 is six labelled 10-minute blocks', () {
+    final s = pmiNegative60();
+    final starts = s.cues.where((c) => c.edge == 'start').toList();
+    expect(starts.map((c) => c.step), [
+      'neg_natural',
+      'neg_mirrors',
+      'neg_blind_spot',
+      'neg_intersection',
+      'neg_instruments',
+      'neg_mixed',
+    ]);
+    for (final start in starts) {
+      final end = s.cues.singleWhere(
+        (c) => c.step == start.step && c.edge == 'end',
+      );
+      expect(end.atUs - start.atUs, 600000000);
+    }
+    expect(s.durationUs, inInclusiveRange(3600000000, 3660000000));
+    final prompts = s.cues.where((c) => c.say != null && !c.isLabel).length;
+    expect(prompts, inInclusiveRange(60, 200), reason: 'rare prompts');
   });
 }

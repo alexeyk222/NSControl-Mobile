@@ -8,4 +8,5 @@ export 'recommendation.dart';
 export 'fatigue.dart';
 export 'sleep_week.dart';
 export 'attention.dart';
+export 'recording.dart';
 export 'scenario.dart';

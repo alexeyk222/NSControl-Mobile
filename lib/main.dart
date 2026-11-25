@@ -3,15 +3,18 @@ import 'dart:io';
 import 'package:camera_android/camera_android.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:path_provider/path_provider.dart';
 import 'data/trip_repository.dart' hide Row;
 import 'logic/domain.dart';
 import 'services/detector.dart';
+import 'services/lab_controller.dart';
 import 'services/mlkit_detector.dart';
 import 'services/platform_bridge.dart';
 import 'services/sleep_controller.dart';
 import 'services/trip_controller.dart';
 import 'ui/integrations_page.dart';
 import 'ui/journal_page.dart';
+import 'ui/lab_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/trip_page.dart';
 import 'ui/alarm_banner.dart';
@@ -24,6 +27,7 @@ Future<void> main() async {
   var settings = AlgorithmSettings();
   var theme = ThemeMode.system;
   var incomplete = false;
+  var developerMode = false;
   try {
     db = await TripRepository.open();
     await db.recoverInterrupted();
@@ -35,6 +39,7 @@ Future<void> main() async {
     theme =
         ThemeMode.values.where((t) => t.name == storedTheme).firstOrNull ??
         ThemeMode.system;
+    developerMode = await db.getSetting('developer_mode') == true;
   } catch (_) {
     incomplete = true;
   }
@@ -50,7 +55,31 @@ Future<void> main() async {
   trip.journalIncomplete = incomplete || db == null;
   final sleep = SleepController(trip: trip, platform: const PlatformBridge());
   await sleep.load();
-  runApp(NSControlApp(trip: trip, sleep: sleep, initialTheme: theme));
+  Directory? documents;
+  try {
+    documents = await getApplicationDocumentsDirectory();
+  } catch (_) {}
+  final recordings = documents == null
+      ? null
+      : Directory('${documents.path}/recordings');
+  runApp(
+    NSControlApp(
+      trip: trip,
+      sleep: sleep,
+      initialTheme: theme,
+      initialDeveloperMode: developerMode,
+      createLab: recordings == null
+          ? null
+          : () => LabController(
+              options: labEngineOptions(
+                () => registry.create('mlkit_face_detection'),
+              ),
+              platform: const PlatformBridge(),
+              settings: trip.settings,
+              recordingsDirectory: recordings,
+            ),
+    ),
+  );
 }
 
 class NSControlApp extends StatefulWidget {
@@ -59,10 +88,16 @@ class NSControlApp extends StatefulWidget {
     required this.trip,
     required this.sleep,
     this.initialTheme = ThemeMode.system,
+    this.initialDeveloperMode = false,
+    this.createLab,
   });
   final TripController trip;
   final SleepController sleep;
   final ThemeMode initialTheme;
+  final bool initialDeveloperMode;
+
+  /// Builds the hidden developer lab; null when it is unavailable.
+  final LabController Function()? createLab;
   @override
   State<NSControlApp> createState() => _NSControlAppState();
 }
@@ -71,10 +106,12 @@ class _NSControlAppState extends State<NSControlApp>
     with WidgetsBindingObserver {
   int tab = 0;
   late ThemeMode theme;
+  late bool developerMode;
   @override
   void initState() {
     super.initState();
     theme = widget.initialTheme;
+    developerMode = widget.initialDeveloperMode;
     WidgetsBinding.instance.addObserver(this);
   }
 
@@ -201,6 +238,14 @@ class _NSControlAppState extends State<NSControlApp>
                           (db) => db.setSetting('theme', value.name),
                         );
                       },
+                      developerMode: developerMode,
+                      onDeveloperMode: (value) {
+                        setState(() => developerMode = value);
+                        widget.trip.journal(
+                          (db) => db.setSetting('developer_mode', value),
+                        );
+                      },
+                      createLab: widget.createLab,
                     ),
                   },
                 ),
