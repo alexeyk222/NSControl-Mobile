@@ -210,6 +210,23 @@ void main() {
   }
 
   group('heat (FR-DRV-08)', () {
+    setUp(() => trip.announceHeat = true);
+
+    test('silent by default: economy runs, nothing said or shown', () async {
+      trip.announceHeat = false;
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      arkit().onStats(stats('critical'));
+      trip.tick();
+      await settle();
+      expect(platform.spoken.where((t) => t.startsWith('Телефон')), isEmpty);
+      expect(platform.testAlertCalls, 0);
+      expect(trip.heatText, isNull);
+      expect(trip.heat.economy, isTrue);
+      expect(arkit().options.emitEvery, 2);
+    });
+
     test('serious: economy at 15 a second, no preview, said once', () async {
       await trip.start();
       calibrateOn(arkitFace);
@@ -365,6 +382,7 @@ void main() {
   });
 
   test('heat phrases wait until the alarm is over', () async {
+    trip.announceHeat = true;
     await trip.start();
     calibrateOn(arkitFace);
     observe(1, arkitFace);
@@ -433,6 +451,19 @@ void main() {
       expect(trip.phase, TripPhase.observing);
       expect(trip.sessionId, session);
     });
+  });
+
+  test('the screen line stays calm through short losses', () async {
+    await trip.start();
+    calibrateOn(arkitFace);
+    observe(1, arkitFace);
+    expect(trip.watchText, 'Слежу');
+    observe(2, () => null);
+    expect(trip.watchText, 'Слежу');
+    observe(9, () => null);
+    expect(trip.watchText, 'Не вижу вас');
+    observe(.5, arkitFace);
+    expect(trip.watchText, 'Слежу');
   });
 
   test('the trip runs on ARKit at 30 fps by default', () async {

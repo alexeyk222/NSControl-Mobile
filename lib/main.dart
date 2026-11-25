@@ -287,7 +287,11 @@ class _NSControlAppState extends State<NSControlApp>
                 child: ConstrainedBox(
                   constraints: const BoxConstraints(maxWidth: 1120),
                   child: switch (tab) {
-                    0 => TripPage(trip: widget.trip, sleep: widget.sleep),
+                    0 => TripPage(
+                      trip: widget.trip,
+                      sleep: widget.sleep,
+                      developerMode: developerMode,
+                    ),
                     1 => IntegrationsPage(
                       trip: widget.trip,
                       sleep: widget.sleep,

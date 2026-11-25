@@ -3,13 +3,22 @@ import 'package:flutter/material.dart';
 import '../logic/domain.dart';
 import '../services/trip_controller.dart';
 import '../services/sleep_controller.dart';
+import 'calm_alarm.dart';
 import 'components.dart';
 import 'vigilance_card.dart';
 
 class TripPage extends StatelessWidget {
-  const TripPage({super.key, required this.trip, required this.sleep});
+  const TripPage({
+    super.key,
+    required this.trip,
+    required this.sleep,
+    this.developerMode = false,
+  });
   final TripController trip;
   final SleepController sleep;
+
+  /// Shows the channels' technical states (gaps, reasons) on the card.
+  final bool developerMode;
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: Listenable.merge([trip, sleep]),
@@ -50,7 +59,10 @@ class TripPage extends StatelessWidget {
         Notice(trip.alertError!, error: true),
         const SizedBox(height: 12),
       ],
-      if (trip.snapshot?.activeEvents.isNotEmpty ?? false) _warning(context),
+      CalmAlarm(
+        events: trip.snapshot?.activeEvents ?? const [],
+        builder: _warning,
+      ),
       LayoutBuilder(
         builder: (context, box) {
           final camera = _cameraCard(context);
@@ -169,9 +181,9 @@ class TripPage extends StatelessWidget {
     ),
   );
 
-  Widget _warning(BuildContext context) {
-    final events = trip.snapshot!.activeEvents;
+  Widget _warning(BuildContext context, List<ObservationEvent> events) {
     final ids = events.map((e) => e.id).toSet();
+    final unacknowledged = trip.snapshot?.hasUnacknowledgedAlert ?? false;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Container(
@@ -208,11 +220,9 @@ class TripPage extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             FilledButton.tonal(
-              onPressed: trip.snapshot!.hasUnacknowledgedAlert
-                  ? () => trip.acknowledge(ids)
-                  : null,
+              onPressed: unacknowledged ? () => trip.acknowledge(ids) : null,
               child: Text(
-                trip.snapshot!.hasUnacknowledgedAlert
+                unacknowledged
                     ? 'Подтвердить · выключить сигнал'
                     : 'Сигнал подтверждён',
               ),
@@ -225,16 +235,20 @@ class TripPage extends StatelessWidget {
 
   Widget _cameraCard(BuildContext context) {
     final current = trip.snapshot;
-    final label = switch (current?.cameraStatus) {
+    // Outside developer mode the title follows the trip phase only, so
+    // short gaps of the camera do not make it flicker.
+    final label = switch (developerMode ? current?.cameraStatus : null) {
       CameraStatus.warning => 'Предупреждение',
       CameraStatus.limited => 'Наблюдение ограничено',
       CameraStatus.observing => 'Наблюдение',
       _ => switch (trip.phase) {
+        TripPhase.observing when current?.activeEvents.isNotEmpty ?? false =>
+          'Предупреждение',
+        TripPhase.observing => 'Наблюдение',
         TripPhase.idle => 'Камера выключена',
         TripPhase.findingFace => 'Подтверждение лица',
         TripPhase.calibrating => 'Калибровка',
         TripPhase.paused => 'Наблюдение приостановлено',
-        _ => 'Наблюдение недоступно',
       },
     };
     return SectionCard(
@@ -243,10 +257,6 @@ class TripPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (trip.multipleFaces) ...[
-            const Notice('В кадре кто-то ещё. Слежу, когда останетесь одни'),
-            const SizedBox(height: 12),
-          ],
           if (trip.movedText != null) ...[
             Notice(trip.movedText!),
             const SizedBox(height: 12),
@@ -274,7 +284,7 @@ class TripPage extends StatelessWidget {
               )
             else
               Notice(
-                trip.settings.showPreview
+                trip.settings.showPreview && trip.announceHeat
                     ? 'Превью скрыто, чтобы телефон меньше грелся. Анализ продолжается.'
                     : 'Предпросмотр скрыт. Анализ камеры продолжается.',
               )
@@ -353,11 +363,20 @@ class TripPage extends StatelessWidget {
             Notice(trip.calibrationNote!),
             const SizedBox(height: 8),
           ],
-          if (current != null) ...[
+          if (current != null && developerMode) ...[
             _channel(context, 'Глаза', current.eyes),
             const SizedBox(height: 8),
             _channel(context, 'Положение головы', current.head),
             const SizedBox(height: 12),
+          ] else if (trip.watchText case final text?) ...[
+            Text(
+              text,
+              key: const Key('trip-watch'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (current != null) ...[
             TextButton.icon(
               onPressed: () => unawaited(trip.recalibrate()),
               icon: const Icon(Icons.refresh),
