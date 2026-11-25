@@ -424,7 +424,8 @@ class _SettingsPageState extends State<SettingsPage> {
                               : 'Откройте на Mac: '
                                     '${widget.trip.debugUrls.first}\n'
                                     'Разбор поездок: тот же адрес с /review '
-                                    'вместо /.',
+                                    'вместо /. Подключено страниц: '
+                                    '${widget.trip.debugPages}.',
                         ),
                         value: widget.trip.liveDebug,
                         onChanged: (value) async {

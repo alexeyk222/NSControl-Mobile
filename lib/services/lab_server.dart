@@ -245,9 +245,15 @@ class LabServer {
 
   void _accept(WebSocket socket) {
     _clients.add(socket);
-    for (final line in onConnected?.call() ?? const []) {
-      socket.add(jsonEncode(line));
-    }
+    try {
+      for (final line in onConnected?.call() ?? const []) {
+        try {
+          socket.add(jsonEncode(line));
+        } on JsonUnsupportedObjectError {
+          // One odd value (NaN) must not cost the page the whole greeting.
+        }
+      }
+    } catch (_) {}
     socket.listen(
       (message) {
         if (message is! String) return;
@@ -300,7 +306,14 @@ class LabServer {
 
   void broadcast(Map<String, Object?> line) {
     if (_clients.isEmpty) return;
-    final text = jsonEncode(line);
+    final String text;
+    try {
+      text = jsonEncode(line);
+    } on JsonUnsupportedObjectError {
+      // NaN or infinity in a line: the stream skips it, the caller (the
+      // trip's frame processing) must never fail because of the page.
+      return;
+    }
     for (final socket in _clients.toList()) {
       try {
         socket.add(text);

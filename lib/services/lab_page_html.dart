@@ -267,7 +267,7 @@ function onLine(m) {
       renderAlarms(); dirty = true; break;
     }
     case "trip":
-      if (m.phase) tripPhase = m.phase;
+      if (m.phase) { tripPhase = m.phase; showTripPhase(m); }
       if (m.ended) { addFeed("Поездка завершена", "lb"); tripPhase = "idle"; }
       if (m.heat) addFeed(`Нагрев: ${m.heat.thermal}, экономия ${m.heat.economy ? "вкл" : "выкл"}, каждый ${m.heat.emitEvery}-й кадр`);
       break;
@@ -329,6 +329,19 @@ function renderLimits() {
     ["Глаза: автомат / голова", (d.eyes ? (PHASES[d.eyes.phase] || d.eyes.phase) : "—") + " / " + (d.head ? (PHASES[d.head.phase] || d.head.phase) : "—"), tripPhase ? "поездка: " + tripPhase : ""],
   ];
   limitsTable.innerHTML = rows.map((r, i) => i === 0 ? `<tr><th></th><th>${r[1]}</th><th>${r[2]}</th></tr>` : `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="${r[3] ? "over" : ""}">${r[2]}</td></tr>`).join("");
+}
+// Before the automata start (no face confirmed, calibration) the trip sends
+// only its phase: the header says where it is instead of staying blank.
+const TRIP_PHASES = {idle:"Поездка не начата", findingFace:"Ищу лицо: подтвердите лицо на телефоне", calibrating:"Калибровка", observing:"Наблюдение", paused:"Пауза"};
+function showTripPhase(m) {
+  if (m.phase === "observing" && lastDerived) return;
+  const st = document.getElementById("status");
+  let text = m.active === false ? "Поездка не начата: начните её на телефоне" : (TRIP_PHASES[m.phase] || m.phase);
+  if (m.phase === "calibrating" && m.calibration != null) text += ` ${Math.round(m.calibration * 100)} %`;
+  if (m.faces != null && m.active !== false) text += ` · лиц в кадре ${m.faces}`;
+  if (m.error) text += ` · ${m.error}`;
+  st.textContent = text; st.className = "";
+  if (m.phase !== "observing") lastDerived = null;
 }
 function latestAlarm(t) { let best = null; for (const a of alarms) if (a.t <= t + 1 && t - a.t <= 60) best = a; return best; }
 const ALARM_NAMES = {eyes_closed:"глаза закрыты", head_pitch_down:"голова опущена", distraction:"отвлечение"};
