@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "migration_date": "2026-11-25",
+  "source_head": "13d17752be627d07119accb82a40adfcd2927e0a",
+  "entries": [
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_ЕСПД_исправлено_Word.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Documents/ПЗ_NSControl_ЕСПД_исправлено_Word.pdf",
+      "bytes": 603572,
+      "sha256": "3440d796d3476da7baf842a1f336fad7e60dd8b845d6c914fcc1e7e17065b481",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_архитектура(1).docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПЗ_NSControl_архитектура(1).docx",
+      "bytes": 216343,
+      "sha256": "01537bb80cbc48c3f186793859581ba82ccbaab56397de0670366241663d88a6",
+      "also_found_in": [
+        "Downloads/ПЗ_NSControl_архитектура.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_архитектура_версия_1_1(1).docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПЗ_NSControl_архитектура_версия_1_1(1).docx",
+      "bytes": 717520,
+      "sha256": "9ab142a88549c3f352a024a6619c6971bf35f7de2959d15a6ed237ec9a08779d",
+      "also_found_in": [
+        "Downloads/ПЗ_NSControl_архитектура_версия_1_1.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_архитектура_версия_1_1(2).docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПЗ_NSControl_архитектура_версия_1_1(2).docx",
+      "bytes": 4507481,
+      "sha256": "7b45ac7c49f17ec58a92728209c57439f3596427c258198a93fde261ec698d90",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_исправлены_учётные_таблицы.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПЗ_NSControl_исправлены_учётные_таблицы.pdf",
+      "bytes": 603448,
+      "sha256": "aaf94ba582dd297daef7f8e14b928e0a1cceefdd16f55dc86c622a1e69f6fc10",
+      "also_found_in": [
+        "Desktop/ПЗ_NSControl_исправлены_учётные_таблицы.pdf"
+      ]
+    },
+    {
+      "path": "artifacts/documents/additional/ПЗ_NSControl_редакция_3.docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПЗ_NSControl_редакция_3.docx",
+      "bytes": 4448905,
+      "sha256": "43625e1983fdfe842a20790d8e3c0f9d6361f80e1d57c9bf2db85d83757611ec",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/ПМИ_NSControl_редакция_1_0_РЕЛИЗ.docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/ПМИ_NSControl_редакция_1_0_РЕЛИЗ.docx",
+      "bytes": 4296280,
+      "sha256": "5c91fa8afb5b8d7392f5c6de8e7de7d6cac73a596a2f545a5f73a60431c2c9f7",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/Руководство_оператора_NSControl_редакция_1_1.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/Руководство_оператора_NSControl_редакция_1_1.pdf",
+      "bytes": 626420,
+      "sha256": "bebf030617f17040ffc51b712655573f1c47c676b425c5ede9c6743bf9c63ccb",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/Руководство_системного_программиста_NSControl_редакция_1_0.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/Руководство_системного_программиста_NSControl_редакция_1_0.pdf",
+      "bytes": 435563,
+      "sha256": "a596464e15e97ffd184a7d6d4e143f4d1023f8400a1bf9c8260c63b7aca1dcce",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/ТЗ_NSControl_редакция_2_3.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Desktop/ТЗ_NSControl_редакция_2_3.pdf",
+      "bytes": 351736,
+      "sha256": "8cc400b7f1049628c3b4a51350e2d95e213c42c76d70fc98f225bd0033cd8fe3",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/Устав_NSControl_редакция_3_0.pdf",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Desktop/Устав_NSControl_редакция_3_0.pdf",
+      "bytes": 265997,
+      "sha256": "613a4277a4e5ed2a721e60c3cf02c24db32b19594d7fc2c5d11c54fc85b6b245",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/additional/Устав_проекта_NSControl_версия_1_0.docx",
+      "category": "additional_document",
+      "status": "discovered_not_approved",
+      "source": "Downloads/Устав_проекта_NSControl_версия_1_0.docx",
+      "bytes": 31755,
+      "sha256": "72bd8212c54c942085c2c7c5897616a5f352d2e38a63a94a461b3e40ed8e7fae",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/ПЗ.docx",
+      "bytes": 4264959,
+      "sha256": "55d9e36279f96b21964309437ca5bf86719b8a1c86076ab7f6d80d88c1cdd653",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_ЕСПД_исправлено_Word.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_ЕСПД_исправлено_Word.docx",
+      "bytes": 5087997,
+      "sha256": "d0ec60af7dad23be58516c23e869073a64985c408c75d470c36ee62ccf4e657c",
+      "also_found_in": [
+        "Downloads/ПЗ_NSControl_ЕСПД_исправлено_Word.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_ЕСПД_с_содержанием.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_ЕСПД_с_содержанием.docx",
+      "bytes": 4404946,
+      "sha256": "06d786154a22ff61b5caafacab65805fcd96b05bc1e9cd08a4f563e0d46490bf",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_оформление_ЕСПД.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_оформление_ЕСПД.docx",
+      "bytes": 4402618,
+      "sha256": "cefd1899db508df534c25e99d6ace31c5db7146c0333481e1d76729de348d587",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_правки_применены.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_правки_применены.docx",
+      "bytes": 4429882,
+      "sha256": "e712182abb888bc489c186f426dd7c97c3d116ea6a725ff7b040336904c66376",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_редакция_2.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_редакция_2.docx",
+      "bytes": 4443817,
+      "sha256": "b936a30ac075684b6eff9e0ce44da32e56bc318e93e827e067a5c9cfef5e9e1f",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_NSControl_редакция_3.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_NSControl_редакция_3.docx",
+      "bytes": 4395361,
+      "sha256": "8aca10e1b60621c89f1782628017b546016ab44d9e7e2bba918990ec66b5f5d8",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ПЗ_с_предложениями.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ПЗ_с_предложениями.docx",
+      "bytes": 4283222,
+      "sha256": "82ce5cfa7cecfa59503a5b68ffcf120e504da5dac8c9e6daedcb6975c34b9c7c",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ТЗ_NSControl_редакция_2_0.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ТЗ_NSControl_редакция_2_0.docx",
+      "bytes": 4295801,
+      "sha256": "31d0e8c1abf46d9d8c82b0eeb803bb8afe435db1c0495e252858b514afd9a930",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ТЗ_NSControl_редакция_2_1.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ТЗ_NSControl_редакция_2_1.docx",
+      "bytes": 4267634,
+      "sha256": "07421a3137f2b356f41373e2b39857908f9d213a8e514d8fbe5e26b0065d3ffb",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/ТЗ_NSControl_редакция_2_2.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ТЗ_NSControl_редакция_2_2.docx",
+      "bytes": 4301530,
+      "sha256": "5b3a911cec7e321ef05e756edceb8e1ef2f76a5b5aad141264f2c699bb4e81c3",
+      "also_found_in": [
+        "Downloads/ТЗ_NSControl_редакция_2_2.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/history/ТЗ_на_программу_NSControl_версия_1_1.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/ТЗ_на_программу_NSControl_версия_1_1.docx",
+      "bytes": 26873,
+      "sha256": "27d1b9e0708d9c2c632905b87e02c57fd2dd9b3712f71f4fd072ff29affda7ec",
+      "also_found_in": [
+        "Downloads/ТЗ_на_программу_NSControl_версия_1_1.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/history/ТЗ_на_программу_NSControl_версия_1_1_титул.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/ТЗ_на_программу_NSControl_версия_1_1_титул.docx",
+      "bytes": 28698,
+      "sha256": "6d3e59ed6e5ba04a12cc73c439fd0a05fda1b2d2c87cb85f13206dcc5cdd8f0d",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/documents/history/Устав_NSControl_редакция_3_0.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/Устав_NSControl_редакция_3_0.docx",
+      "bytes": 4280573,
+      "sha256": "ddccff383507718653478b7867681ef543d68596a563cc9bdee6bb3f2d543b3b",
+      "also_found_in": [
+        "Downloads/Устав_NSControl_редакция_3_0.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/history/Устав_проекта_NSControl_версия_2_1.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Устав_проекта_NSControl_версия_2_1.docx",
+      "bytes": 20014,
+      "sha256": "474a0947bcb5b4a8038e74452708b99d54144d6992b7db56b00863868f7fd6d0",
+      "also_found_in": [
+        "Downloads/Устав_проекта_NSControl_версия_2_1.docx"
+      ]
+    },
+    {
+      "path": "artifacts/documents/history/Устав_проекта_NSControl_версия_2_1_титул.docx",
+      "category": "document_revision",
+      "status": "historical_not_normative",
+      "source": "original-project/Редакция_2026-10-15/Устав_проекта_NSControl_версия_2_1_титул.docx",
+      "bytes": 21835,
+      "sha256": "fb4a351972c339ed7eb54d7cffa477d9e224962aa803852aae08c8482cce2563",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/previews/sleep_week.png",
+      "category": "ui_preview",
+      "status": "test_render_not_device_evidence",
+      "source": "original-project/build/previews/sleep_week.png",
+      "bytes": 79048,
+      "sha256": "cf008a00e1888262bdf4acf627261ca8ad5bde4a1911adf53e54268e50744d29",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/previews/trip.png",
+      "category": "ui_preview",
+      "status": "test_render_not_device_evidence",
+      "source": "original-project/build/previews/trip.png",
+      "bytes": 85887,
+      "sha256": "4692827edf3497e0e5052e8de8e11a8966096076b366c18faf4cf944c6462164",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/previews/vigilance.png",
+      "category": "ui_preview",
+      "status": "test_render_not_device_evidence",
+      "source": "original-project/build/previews/vigilance.png",
+      "bytes": 106892,
+      "sha256": "801872c8de08b38a70fb7815db9b9ed5ba3df5b725752af94feeb6e22c81d401",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/releases/1.0/NSControl-1.0-source.zip",
+      "category": "source_archive",
+      "status": "historical_1.0_not_current_head",
+      "source": "original-project/dist/NSControl-1.0-source.zip",
+      "bytes": 29257058,
+      "sha256": "7a1b10c4ef18bc76b666c189f59dab333e1f4a4b16fa536df8a441eaee07ea51",
+      "also_found_in": []
+    },
+    {
+      "path": "artifacts/releases/1.0/app-release-arm64.apk",
+      "category": "android_apk",
+      "status": "historical_1.0_debug_signed_bench_release",
+      "source": "NSControl-1.0-source.zip!/artifacts/app-release.apk",
+      "bytes": 31203598,
+      "sha256": "e8441fd5fc7fb6fd23bd14e590efa07a39020378f8a2872cef18479abb084e15",
+      "also_found_in": []
+    },
+    {
+      "path": "ios/Podfile.lock",
+      "category": "dependency_lock",
+      "status": "preserved_from_working_copy",
+      "source": "original-project/ios/Podfile.lock",
+      "bytes": 3484,
+      "sha256": "7b623b9e0385d3a9b0b60623acb2a13a5a68e3f105f60978e7d0bff9cc36cfe6",
+      "also_found_in": []
+    },
+    {
+      "path": "ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+      "category": "dependency_lock",
+      "status": "preserved_from_working_copy",
+      "source": "original-project/ios/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+      "bytes": 341,
+      "sha256": "870b7d0f6ca4124e69f9271bd785c878e9576708becda76c6bfab4ff869c3340",
+      "also_found_in": []
+    },
+    {
+      "path": "ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+      "category": "dependency_lock",
+      "status": "preserved_from_working_copy",
+      "source": "original-project/ios/Runner.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+      "bytes": 341,
+      "sha256": "870b7d0f6ca4124e69f9271bd785c878e9576708becda76c6bfab4ff869c3340",
+      "also_found_in": []
+    },
+    {
+      "path": "Итоговые документы/ПЗ_NSControl_исправлены_учётные_таблицы.docx",
+      "category": "requirements",
+      "status": "normative_reference",
+      "source": "original-project/Итоговые документы/ПЗ_NSControl_исправлены_учётные_таблицы.docx",
+      "bytes": 5089303,
+      "sha256": "dded53b07471e31d294aef56a8387c0a7dfb0fce8a19475aaee1a392f882c1ff",
+      "also_found_in": []
+    },
+    {
+      "path": "Итоговые документы/ТЗ_NSControl_редакция_2_3.docx",
+      "category": "requirements",
+      "status": "normative_reference",
+      "source": "original-project/Итоговые документы/ТЗ_NSControl_редакция_2_3.docx",
+      "bytes": 4302374,
+      "sha256": "dd680a92d00bb3255a56eb883ecf37732bd35dbebefa3dde4693415fa47ae0a3",
+      "also_found_in": []
+    },
+    {
+      "path": "Итоговые документы/Устав_NSControl_редакция_3_1.docx",
+      "category": "requirements",
+      "status": "normative_reference",
+      "source": "original-project/Итоговые документы/Устав_NSControl_редакция_3_1.docx",
+      "bytes": 4270917,
+      "sha256": "f473b6b74976258afd39c1bde34ee17b56eea8038d050fae6d1f204143d34082",
+      "also_found_in": []
+    }
+  ]
+}

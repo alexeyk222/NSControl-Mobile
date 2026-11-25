@@ -1,0 +1,19 @@
+{
+  "date": "2026-11-25",
+  "source_head": "13d17752be627d07119accb82a40adfcd2927e0a",
+  "flutter": "3.47.7",
+  "dart": "3.13.5",
+  "format": "passed",
+  "analysis": "no_issues",
+  "flutter_tests": {
+    "passed": 95,
+    "failed": 0
+  },
+  "python_tests": {
+    "passed": 8,
+    "failed": 0
+  },
+  "native_builds": "not_run_during_migration",
+  "physical_acceptance": "not_claimed",
+  "historical_archive_manifest": "all_hashes_match"
+}
