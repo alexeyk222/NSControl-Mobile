@@ -1,16 +1,20 @@
 import 'dart:async';
-import 'package:camera/camera.dart' show CameraException;
+import 'package:camera/camera.dart' show CameraException, CameraPreview;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show Widget;
 import 'package:uuid/uuid.dart';
 import '../data/trip_repository.dart';
+import '../logic/arkit_geometry.dart' show arkitCapabilities;
 import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
 import '../logic/mount.dart';
 import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
+import 'arkit_engine.dart' show ArkitOptions, ArkitStats;
 import 'camera_service.dart';
 import 'detector.dart';
+import 'face_source.dart';
 import 'lab_recorder.dart';
 import 'platform_bridge.dart';
 import 'wearable_gateway.dart';
@@ -24,7 +28,27 @@ typedef CameraFactory =
       void Function() onChanged,
     );
 
+/// ARKit for the trip: a source started with [options]; [onStats] gets the
+/// once-a-second `device` numbers (thermal state, battery, frame rate).
+typedef ArkitSourceFactory =
+    FaceSource Function(
+      ArkitOptions options,
+      void Function(ArkitStats stats) onStats,
+    );
+
 enum TripPhase { idle, findingFace, calibrating, observing, paused }
+
+/// Face engine of a trip. ARKit is the main one on iPhone (engine decision
+/// 25.11.2026): its eyelids stay reliable to ≥ 55° to the camera, so the
+/// eyes are watched on a vent mount. ML Kit is the developer choice and the
+/// fallback when ARKit is unavailable; on a vent it watches the head only.
+enum TripEngine {
+  arkit('ARKit'),
+  mlkit('ML Kit');
+
+  const TripEngine(this.title);
+  final String title;
+}
 
 class TripController extends ChangeNotifier {
   TripController({
@@ -33,6 +57,8 @@ class TripController extends ChangeNotifier {
     required this.detector,
     AlgorithmSettings? settings,
     CameraFactory? cameraFactory,
+    this.arkitFactory,
+    this.arkitSupported,
   }) : settings = settings ?? AlgorithmSettings() {
     camera =
         (cameraFactory ??
@@ -72,6 +98,38 @@ class TripController extends ChangeNotifier {
   final FaceDetectorPort detector;
   late final CameraService camera;
   late final WearableGateway wearable;
+
+  /// ARKit for the trip (iOS); null where there is none.
+  final ArkitSourceFactory? arkitFactory;
+
+  /// Whether this phone has ARKit Face Tracking (TrueDepth); null: assume
+  /// it has when [arkitFactory] is given.
+  final Future<bool> Function()? arkitSupported;
+
+  /// Engine the next trip asks for (developer choice, ARKit by default).
+  TripEngine engineChoice = TripEngine.arkit;
+
+  /// Engine of the current trip: [engineChoice], or ML Kit when ARKit is
+  /// unavailable or failed to start.
+  TripEngine engineInUse = TripEngine.mlkit;
+
+  /// Why the trip runs on ML Kit although ARKit was asked for.
+  String? engineNote;
+
+  /// ARKit frame rate in the trip: 30, the rate the phone falls back to once
+  /// warm anyway (bench-v1); about 29 analyses a second.
+  static const arkitFps = 30;
+  FaceSource? _arkit;
+  ArkitOptions? arkitOptions;
+  final List<int> _arkitCompletions = [];
+
+  /// Latest `device` line of ARKit (thermal state, battery, frame rate).
+  Map<String, Object?>? lastDevice;
+
+  /// Capabilities of the engine in use.
+  DetectorCapabilities get capabilities => engineInUse == TripEngine.arkit
+      ? arkitCapabilities
+      : detector.capabilities;
   final clock = Stopwatch()..start();
   final _ids = const Uuid();
   AlgorithmSettings settings;
@@ -93,11 +151,22 @@ class TripController extends ChangeNotifier {
   bool get tzReference => profile.isReference;
   MountCalibrationCollector? _mountCollector;
 
-  /// Road pose of the session (mount mode), null for the ТЗ reference.
-  RoadFrame? _road;
+  /// The attention pipeline of the session, the same as in the lab and the
+  /// replay the profile was tuned on: driver continuity (a new tracking id
+  /// after a short loss is still the driver, ФТ-02/03), the eye gate of the
+  /// profile (lids lowered by looking down, a squint), road-relative angles
+  /// and the slow drift of the road pose. The automata get its
+  /// measurements.
+  ZoneAttentionProvider? attention;
+  AttentionState attentionState = AttentionState.unknown;
+
+  /// The driver's face on the last calibration frame, to anchor driver
+  /// continuity at the session start (clock microseconds).
+  FaceSignals? _anchorFace;
+  int? _anchorUs;
 
   /// Slow drift of the road pose, when the profile has it.
-  RoadAdaptation? _adaptation;
+  RoadAdaptation? get roadAdaptation => attention?.pipeline?.roadAdaptation;
 
   /// The profile and settings the automata and the fatigue monitor run on:
   /// the road-frame profile in mount mode, [calibration] itself otherwise.
@@ -238,6 +307,8 @@ class TripController extends ChangeNotifier {
       }),
     );
     onTripStarted?.call();
+    engineInUse = await _chooseEngine();
+    if (generation != _lifecycleGeneration || !active) return;
     await _startRecording();
     phase = TripPhase.findingFace;
     // The watch must learn about the trip before any alert: it starts its
@@ -253,7 +324,108 @@ class TripController extends ChangeNotifier {
     await _safe(() => platform.keepAwake(true));
     if (generation != _lifecycleGeneration || !active || !_foreground) return;
     _notify();
-    await camera.start();
+    await _startCamera();
+  }
+
+  static const arkitUnavailable =
+      'ARKit на этом телефоне недоступен. Работаю на ML Kit: на решётке '
+      'слежу только за головой.';
+
+  Future<TripEngine> _chooseEngine() async {
+    engineNote = null;
+    if (engineChoice != TripEngine.arkit || arkitFactory == null) {
+      return TripEngine.mlkit;
+    }
+    var supported = false;
+    try {
+      supported = await (arkitSupported?.call() ?? Future.value(true)).timeout(
+        const Duration(seconds: 2),
+      );
+    } catch (_) {}
+    if (!supported) engineNote = arkitUnavailable;
+    return supported ? TripEngine.arkit : TripEngine.mlkit;
+  }
+
+  /// ARKit options of the trip: 30 fps, the native preview only when the
+  /// screen shows it.
+  ArkitOptions _arkitOptionsNow() =>
+      ArkitOptions(fps: arkitFps, preview: settings.showPreview);
+
+  bool get _cameraRunning => engineInUse == TripEngine.arkit
+      ? _arkit?.running ?? false
+      : camera.running;
+
+  /// Starts the engine of the trip. When ARKit fails to start, the trip goes
+  /// on with ML Kit (a new calibration, because the engines' numbers differ).
+  Future<void> _startCamera() async {
+    if (engineInUse != TripEngine.arkit) return camera.start();
+    if (_arkit != null) return;
+    final options = _arkitOptionsNow();
+    final source = arkitFactory!(options, _onArkitStats);
+    _arkit = source;
+    arkitOptions = options;
+    try {
+      await source.start(
+        nowUs: () => clock.elapsedMicroseconds,
+        onResult: _onArkitResult,
+        onError: _cameraError,
+        onChanged: _notify,
+      );
+    } catch (e) {
+      if (!identical(_arkit, source)) return;
+      _arkit = null;
+      arkitOptions = null;
+      unawaited(_safe(source.dispose));
+      engineInUse = TripEngine.mlkit;
+      engineNote =
+          'ARKit не запустился. Работаю на ML Kit: на решётке '
+          'слежу только за головой.';
+      if (phase == TripPhase.calibrating || calibration != null) {
+        await recalibrate(reason: engineNote);
+      }
+      if (active && _foreground) await camera.start();
+    }
+    _notify();
+  }
+
+  Future<void> _stopCamera() async {
+    final arkit = _arkit;
+    _arkit = null;
+    arkitOptions = null;
+    if (arkit != null) await arkit.dispose();
+    if (engineInUse != TripEngine.arkit || camera.running) await camera.stop();
+  }
+
+  void _onArkitResult(FaceResult result) {
+    if (result.engineId != arkitCapabilities.id) return;
+    _arkitCompletions.add(result.completedUs);
+    final old = clock.elapsedMicroseconds - 120000000;
+    while (_arkitCompletions.isNotEmpty && _arkitCompletions.first < old) {
+      _arkitCompletions.removeAt(0);
+    }
+    _onFaces(result.faces, result.capturedUs, result.completedUs);
+  }
+
+  /// A `device` line of ARKit: kept for the screen and the recording.
+  void _onArkitStats(ArkitStats stats) {
+    final line = stats.toJson();
+    lastDevice = line;
+    if (recording) _record({...line, 'atUs': _recUs(stats.atUs)});
+  }
+
+  /// Completed analyses of the engine in use with completion time in
+  /// [fromUs, toUs) on [clock] (КЧ-05: at least 600 in every 60 s).
+  int completedBetween(int fromUs, int toUs) => engineInUse == TripEngine.arkit
+      ? _arkitCompletions.where((t) => t >= fromUs && t < toUs).length
+      : camera.pipeline.completedBetween(fromUs, toUs);
+
+  /// Live preview of the engine in use, never recorded; null when there is
+  /// none yet.
+  Widget? preview() {
+    if (engineInUse == TripEngine.arkit) return _arkit?.preview();
+    final controller = camera.controller;
+    if (controller == null || !controller.value.isInitialized) return null;
+    return CameraPreview(controller);
   }
 
   void confirmFace(int trackingId) {
@@ -267,18 +439,20 @@ class TripController extends ChangeNotifier {
     }
     error = null;
     calibrationNote = null;
+    _anchorFace = null;
+    _anchorUs = null;
     _calibrationStart = clock.elapsedMicroseconds;
     if (!mountRelative) {
       _collector = CalibrationCollector(
         trackingId: trackingId,
-        detector: profile.detector(detector.capabilities),
+        detector: profile.detector(capabilities),
         hiddenEyes: settings.hiddenEyes,
         startedUs: _calibrationStart,
       );
     } else {
       _mountCollector = MountCalibrationCollector(
         trackingId: trackingId,
-        detector: profile.detector(detector.capabilities),
+        detector: profile.detector(capabilities),
         hiddenEyes: settings.hiddenEyes,
         startedUs: _calibrationStart,
       );
@@ -314,38 +488,50 @@ class TripController extends ChangeNotifier {
   void _onFaces(List<DetectedFace> result, int captured, int completed) {
     if (!active || !_foreground) return;
     faces = result;
-    final road = _road, profile = calibration;
-    final measurements = road != null && profile != null
-        ? [
-            for (final f in result)
-              mountMeasurement(
-                _signalsOf(f),
-                road: road,
-                calibration: profile,
-                adaptation: _adaptation,
-              ),
-          ]
-        : result.map((f) => f.measurement).toList();
     _recordFrame(result, captured, completed);
     if (phase == TripPhase.calibrating) {
-      _collector?.add(capturedUs: captured, faces: measurements);
-      _mountCollector?.add(
+      _collector?.add(
         capturedUs: captured,
-        faces: result.map(_signalsOf).toList(),
+        faces: result.map((f) => f.measurement).toList(),
       );
-    } else if (phase == TripPhase.observing && sessionId != null) {
+      final signals = result.map(_signalsOf).toList();
+      _mountCollector?.add(capturedUs: captured, faces: signals);
+      if (signals.length == 1) {
+        _anchorFace = signals.single;
+        _anchorUs = captured;
+      }
+    } else if (phase == TripPhase.observing &&
+        sessionId != null &&
+        engine != null) {
+      final pipeline = attention;
+      final at = captured - sessionBaseUs;
+      // Every face, in the engine's order: the pipeline keeps the driver
+      // across tracking-id changes, gates lowered lids and pauses on a
+      // second face (ФТ-02) exactly as the lab and the replay do.
+      if (pipeline != null) {
+        attentionState = pipeline.updateFaces(
+          result.map(_signalsOf).toList(),
+          at,
+        );
+      }
+      final measurements =
+          pipeline?.lastMeasurements ??
+          result.map((f) => f.measurement).toList();
+      final engine = this.engine!;
       _apply(
-        engine!.process(
+        engine.process(
           sessionId: sessionId!,
-          capturedUs: captured - sessionBaseUs,
+          capturedUs: at,
           completedUs: completed - sessionBaseUs,
           faces: measurements,
         ),
       );
-      _feedFatigue(measurements, captured - sessionBaseUs);
-      _adapt(result, captured);
+      _feedFatigue(measurements, at);
+      pipeline
+        ?..tzSignActive = tzSignActive(engine.snapshot)
+        ..eyesEventActive = engine.snapshot.eyes.activeEvent != null;
       _recordDerived(completed);
-      if (engine!.snapshot.requiresRecalibration) {
+      if (engine.snapshot.requiresRecalibration) {
         unawaited(
           recalibrate(
             reason:
@@ -355,23 +541,6 @@ class TripController extends ChangeNotifier {
       }
     }
     _throttledNotify();
-  }
-
-  /// The road pose follows a slow drift of the driver's posture: only the
-  /// calibrated driver, only while no ТЗ sign is active, only near the road
-  /// pose (RoadAdaptation keeps ±14° of yaw and ±7° of pitch, so a lowered
-  /// head never pulls it).
-  void _adapt(List<DetectedFace> result, int captured) {
-    final adaptation = _adaptation, road = _road, engine = this.engine;
-    if (adaptation == null || road == null || engine == null) return;
-    if (tzSignActive(engine.snapshot)) return;
-    final id = calibration?.trackingId;
-    final driver = result.length == 1
-        ? result.single
-        : result.where((f) => f.measurement.trackingId == id).firstOrNull;
-    if (driver == null) return;
-    final head = road.head(_signalsOf(driver));
-    if (head != null) adaptation.observe(captured, adaptation.apply(head));
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
@@ -516,7 +685,9 @@ class TripController extends ChangeNotifier {
     if (phase == TripPhase.calibrating &&
         now - _calibrationStart >= 10000000 &&
         !_calibrationFinishing) {
-      final pending = camera.pipeline.inFlightCapturedUs;
+      final pending = engineInUse == TripEngine.mlkit
+          ? camera.pipeline.inFlightCapturedUs
+          : null;
       if (pending == null ||
           pending > _calibrationStart + 10000000 ||
           now - pending > 300000) {
@@ -535,13 +706,12 @@ class TripController extends ChangeNotifier {
         _lastCheckpointUs = sessionNowUs;
         while (sessionNowUs >= (completedPerMinute.length + 1) * 60000000) {
           final start = sessionBaseUs + completedPerMinute.length * 60000000;
-          completedPerMinute.add(
-            camera.pipeline.completedBetween(start, start + 60000000),
-          );
+          completedPerMinute.add(completedBetween(start, start + 60000000));
         }
         final id = sessionId!, atUs = sessionNowUs;
         final diagnostics = <String, Object?>{
           'completed_per_minute': List.of(completedPerMinute),
+          'engine': capabilities.id,
           'build_mode': kReleaseMode
               ? 'release'
               : kProfileMode
@@ -563,12 +733,12 @@ class TripController extends ChangeNotifier {
     }
     if (active &&
         _foreground &&
-        !camera.running &&
+        !_cameraRunning &&
         !cameraPermissionBlocked &&
         !_cameraFailureBusy &&
         now - _lastReconnectUs >= 2000000) {
       _lastReconnectUs = now;
-      unawaited(camera.start());
+      unawaited(_startCamera());
     }
     if (wearable.connected && now - _lastWatchSyncUs >= 10000000) {
       _lastWatchSyncUs = now;
@@ -628,15 +798,22 @@ class TripController extends ChangeNotifier {
     sessionBaseUs = clock.elapsedMicroseconds;
     sessionStartedAt = DateTime.now().toUtc();
     final profile = calibration!;
-    // Mount mode: the measurements carry road-frame angles, so the automata
-    // get the road-frame profile (neutral 0); eyes hidden by the mount turn
-    // the eye channel off like the ТЗ "hidden eyes" setting.
-    _road = mountRelative ? RoadFrame.fromProfile(profile) : null;
-    final rate = this.profile.attention.roadAdaptDegPerMin;
-    _adaptation = mountRelative && rate != null
-        ? RoadAdaptation(degPerMin: rate)
-        : null;
-    engineCalibration = mountRelative ? roadProfile(profile) : profile;
+    // The pipeline of the profile. Mount mode: the measurements carry
+    // road-frame angles, so the automata get the road-frame profile
+    // (neutral 0); eyes hidden by the mount turn the eye channel off like
+    // the ТЗ "hidden eyes" setting.
+    final pipeline = ZoneAttentionProvider(settings: this.profile.attention)
+      ..reset(profile);
+    attention = pipeline;
+    attentionState = AttentionState.unknown;
+    final anchor = _anchorFace, seen = _anchorUs;
+    if (anchor != null && seen != null) {
+      // Where the driver was last seen, so a loss right after the start of
+      // the session is judged by geometry (ПЗ: the selected face keeps its
+      // profile).
+      pipeline.anchorDriver(anchor, seen - sessionBaseUs);
+    }
+    engineCalibration = pipeline.engineCalibration;
     _engineSettings = this.profile.session(
       settings,
       hiddenEyes: engineCalibration!.hiddenEyes,
@@ -658,8 +835,8 @@ class TripController extends ChangeNotifier {
         'detectionProfile': this.profile.toJson(),
       },
       'calibration_json': calibration!.toJson(),
-      'detector_id': detector.capabilities.id,
-      'detector_version': detector.capabilities.version,
+      'detector_id': capabilities.id,
+      'detector_version': capabilities.version,
       'algorithm_version': ObservationEngine.algorithmVersion,
     };
     _write((db) => db.insertSession(row));
@@ -825,8 +1002,8 @@ class TripController extends ChangeNotifier {
     sessionId = null;
     _collector = null;
     _mountCollector = null;
-    _road = null;
-    _adaptation = null;
+    attention = null;
+    attentionState = AttentionState.unknown;
     _fatigueMonitor = null;
     _audioRequested = false;
     _syncAudio(false);
@@ -863,7 +1040,7 @@ class TripController extends ChangeNotifier {
     await _stopRecording();
     tripId = null;
     faces = [];
-    await camera.stop();
+    await _stopCamera();
     await _safe(() => platform.keepAwake(false));
     _write(
       (db) => db.updateTrip(id, {
@@ -889,7 +1066,7 @@ class TripController extends ChangeNotifier {
       faces = [];
       phase = TripPhase.paused;
       await _endSession(EventEndReason.cameraStopped);
-      await camera.stop();
+      await _stopCamera();
       if (generation != _lifecycleGeneration) return;
       await _safe(() => platform.keepAwake(false));
     } else {
@@ -897,7 +1074,7 @@ class TripController extends ChangeNotifier {
       error = 'Подтвердите лицо после возврата и повторите калибровку.';
       await _safe(() => platform.keepAwake(true));
       if (generation != _lifecycleGeneration || !active || !_foreground) return;
-      if (!cameraPermissionBlocked) await camera.start();
+      if (!cameraPermissionBlocked) await _startCamera();
     }
     _notify();
   }
@@ -905,12 +1082,15 @@ class TripController extends ChangeNotifier {
   void _cameraError(Object e) {
     faces = [];
     cameraPermissionBlocked =
-        e is CameraException &&
-        [
-          'CameraAccessDenied',
-          'CameraAccessDeniedWithoutPrompt',
-          'CameraAccessRestricted',
-        ].contains(e.code);
+        (e is CameraException &&
+            [
+              'CameraAccessDenied',
+              'CameraAccessDeniedWithoutPrompt',
+              'CameraAccessRestricted',
+            ].contains(e.code)) ||
+        // ArkitEngine reports `camera_unauthorized` with this text.
+        (engineInUse == TripEngine.arkit &&
+            e.toString().contains('Нет доступа к камере'));
     error = cameraPermissionBlocked
         ? 'Доступ к камере не разрешён. Включите его в настройках приложения и нажмите «Повторить запуск».'
         : 'Наблюдение недоступно: $e';
@@ -922,7 +1102,7 @@ class TripController extends ChangeNotifier {
           phase = _foreground ? TripPhase.findingFace : TripPhase.paused;
           await _endSession(EventEndReason.cameraStopped);
         }
-        await camera.stop();
+        await _stopCamera();
       } finally {
         _cameraFailureBusy = false;
         _notify();
@@ -945,7 +1125,7 @@ class TripController extends ChangeNotifier {
     cameraPermissionBlocked = false;
     error = null;
     _lastReconnectUs = clock.elapsedMicroseconds;
-    await camera.start();
+    await _startCamera();
   }
 
   Future<void> openSettings() async {
@@ -1192,22 +1372,18 @@ class TripController extends ChangeNotifier {
       RecordingSchema.meta(
         recordingId: id,
         app: appVersion,
-        engines: [detector.capabilities.id],
+        engines: [capabilities.id],
         startedAt: started,
         device: device['model'] as String?,
         os: device['os'] as String?,
         extra: {
           'source': 'trip',
           'tripId': tripId,
-          'attention': 'trip',
-          // What the trip uses of the profile's attention: road-relative
-          // angles and the drift of the road pose (no eye gate, no zones).
-          'attentionSettings': AttentionSettings(
-            mountRelative: mountRelative,
-            roadAdaptDegPerMin: mountRelative
-                ? profile.attention.roadAdaptDegPerMin
-                : null,
-          ).toJson(),
+          // The trip runs the profile's attention pipeline as the lab does.
+          'attention': ZoneAttentionProvider(settings: profile.attention).id,
+          'attentionSettings': profile.attention.toJson(),
+          'tripEngine': engineInUse.name,
+          if (engineNote != null) 'engineNote': engineNote,
           'tzReference': tzReference,
           'detectionProfile': profile.toJson(),
           'mount': {'position': mountPosition},
@@ -1231,19 +1407,13 @@ class TripController extends ChangeNotifier {
   void _recordCalibration(int now) {
     final profile = calibration;
     if (!recording || profile == null) return;
-    final zones = ZoneMap.fromCalibration(profile);
+    final zones =
+        attention?.pipeline?.zones ?? ZoneMap.fromCalibration(profile);
     _record({
       ...RecordingSchema.calibration(
         atUs: _recUs(now),
         profile: profile,
-        zones:
-            (mountRelative
-                    ? zones.withMount(
-                        roadHeadRoll: profile.neutralRoll,
-                        engineId: profile.detector.id,
-                      )
-                    : zones)
-                .toJson(),
+        zones: zones.toJson(),
       ),
       'sessionOffsetUs': _recUs(sessionBaseUs),
     });
@@ -1260,7 +1430,7 @@ class TripController extends ChangeNotifier {
               result.first;
     _record({
       ...RecordingSchema.frame(
-        engine: detector.capabilities.id,
+        engine: capabilities.id,
         capturedUs: _recUs(captured),
         completedUs: _recUs(completed),
         faceCount: result.length,
@@ -1285,11 +1455,15 @@ class TripController extends ChangeNotifier {
     _record(
       RecordingSchema.derived(
         atUs: _recUs(completed),
-        zone: GazeZone.unknown,
+        zone: attentionState.zone,
         eyes: current.eyes,
         head: current.head,
         fatigue: fatigue,
-        extra: {'sessionOffsetUs': _recUs(sessionBaseUs)},
+        extra: {
+          'sessionOffsetUs': _recUs(sessionBaseUs),
+          if (attentionState.details.isNotEmpty)
+            'attention': attentionState.details,
+        },
       ),
     );
   }
@@ -1302,6 +1476,9 @@ class TripController extends ChangeNotifier {
     unawaited(_platformEvents?.cancel());
     camera.pipeline.end();
     unawaited(camera.stop());
+    final arkit = _arkit;
+    _arkit = null;
+    if (arkit != null) unawaited(_safe(arkit.dispose));
     unawaited(_safe(() => platform.stopAlert()));
     unawaited(_safe(() => platform.keepAwake(false)));
     super.dispose();
