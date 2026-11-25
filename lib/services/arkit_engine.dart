@@ -554,8 +554,9 @@ class ArkitFaceSource implements FaceSource {
       ),
       nowUs: nowUs,
       onResult: (result, raw) {
-        onResult(result);
+        // Raw first, so a recorder can put it into the frame line of result.
         onRaw?.call(result, raw);
+        onResult(result);
         if (!knownDisplay && engine.display != null) {
           knownDisplay = true;
           onChanged();

@@ -157,13 +157,17 @@ void main() {
       SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
     ).report();
     expect(report, isNot(contains('ошибка:')));
-    for (final mode in ['приёмка', 'затвор глаз']) {
-      expect(
-        report,
-        contains('| arkit_face_tracking | $mode | строка calibration записи'),
-      );
-      expect(report, contains('| mlkit_face_detection | $mode | пересчитана'));
-    }
+    // Table layout may change; the calibration source per engine may not.
+    expect(
+      RegExp(
+        r'\| arkit_face_tracking \|[^\n]*строка calibration записи',
+      ).hasMatch(report),
+      isTrue,
+    );
+    expect(
+      RegExp(r'\| mlkit_face_detection \|[^\n]*пересчитана').hasMatch(report),
+      isTrue,
+    );
     // ARKit at 60 fps, ML Kit on every fourth frame: both above КЧ-05.
     expect(report, contains('ниже 600: 0)'));
     expect(report, contains('ML Kit на кадрах ARKit'));

@@ -401,6 +401,11 @@ class EngineComparison {
         '${_f(_quantile(latency, .95), 0)} | ${_pct(noFace, frames.length)} |',
       );
     }
+    b.writeln();
+    b.writeln(
+      '- Минимум за окно 60 с — предварительная оценка: на приёмке КЧ-05 '
+      'меряется на часовом прогоне release без отладчика.',
+    );
     if (devices.isEmpty) {
       b.writeln();
       b.writeln('- Строк device нет: нагрев и заряд не записаны.');

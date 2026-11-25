@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
+import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
 import '../services/detector.dart';
 import '../services/face_source.dart';
@@ -283,17 +284,55 @@ class _Controls extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text('Движок: ${lab.option.title}'),
           ),
+        if (lab.attentionSettings case final settings?)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: true, label: Text('Приёмка')),
+                ButtonSegment(value: false, label: Text('Лаборатория')),
+              ],
+              selected: {settings.isAcceptance},
+              onSelectionChanged: lab.recording
+                  ? null
+                  : (value) => lab.setAttentionSettings(
+                      value.single
+                          ? AttentionSettings.acceptance()
+                          : AttentionSettings.lab,
+                    ),
+            ),
+          ),
         Wrap(
           spacing: 8,
           runSpacing: 8,
           children: [
             OutlinedButton.icon(
-              onPressed: lab.phase == LabPhase.stopped || lab.scenario != null
+              onPressed:
+                  lab.phase == LabPhase.stopped ||
+                      lab.scenario != null ||
+                      lab.calibratingMirrors
                   ? null
                   : lab.calibrate,
               icon: const Icon(Icons.center_focus_strong_outlined),
               label: const Text('Калибровка'),
             ),
+            if (lab.zoneProvider != null)
+              OutlinedButton.icon(
+                onPressed:
+                    lab.calibration == null ||
+                        lab.zones == null ||
+                        lab.scenario != null ||
+                        lab.calibratingMirrors ||
+                        lab.phase != LabPhase.observing
+                    ? null
+                    : lab.calibrateMirrors,
+                icon: const Icon(Icons.flip_outlined),
+                label: Text(
+                  lab.zones?.mirrorsCalibrated ?? false
+                      ? 'Зеркала ✓'
+                      : 'Зеркала',
+                ),
+              ),
             FilledButton.icon(
               onPressed: lab.scenario != null
                   ? null
@@ -428,7 +467,10 @@ class _Numbers extends StatelessWidget {
             'Анализов/с ${lab.analysesPerSecond.round()} · задержка конвейера '
             '${lab.lastLatencyUs == null ? '—' : '${(lab.lastLatencyUs! / 1000).round()} мс'}',
           ),
-          Text('Зона: ${LabController.zoneNames[lab.attentionState.zone]}'),
+          Text(
+            'Зона: ${LabController.zoneNames[lab.attentionState.zone]}'
+            '${lab.driverDecision == null ? '' : ' · водитель: ${LabController.driverNames[lab.driverDecision] ?? lab.driverDecision}'}',
+          ),
           Text('Автомат глаз: ${channel(snap?.eyes)}'),
           Text('Автомат головы: ${channel(snap?.head)}'),
           if (lab.calibration != null)

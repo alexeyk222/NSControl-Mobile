@@ -370,6 +370,58 @@ void main() {
     });
   });
 
+  group('several faces in a frame', () {
+    const mlKit = 'mlkit_face_detection';
+    final text = SyntheticScenario(SyntheticStyle.mlKit).toJsonl();
+
+    /// A passenger next to the driver for 0.5 s at 60 s.
+    String withPassenger({required bool others}) => [
+      for (final l in const LineSplitter().convert(text))
+        () {
+          final json = jsonDecode(l) as Map<String, dynamic>;
+          final at = json['capturedUs'] as int? ?? 0;
+          if (json['type'] != 'frame' ||
+              json['signals'] == null ||
+              at < 60000000 ||
+              at > 60500000) {
+            return l;
+          }
+          return jsonEncode({
+            ...json,
+            'faceCount': 2,
+            if (others)
+              'others': [
+                {
+                  'engine': mlKit,
+                  'trackingId': 99,
+                  'tracked': true,
+                  'headYawLeft': 30.0,
+                  'headPitchDown': 0.0,
+                  'headRollRight': 0.0,
+                  'eyeOpenLeft': .9,
+                  'eyeOpenRight': .9,
+                  'box': {'left': .75, 'top': .2, 'width': .2, 'height': .3},
+                },
+              ],
+          });
+        }(),
+    ].join('\n');
+
+    test('recorded other faces suspend observation as in the app', () {
+      final recording = Recording.parse(withPassenger(others: true));
+      expect(recording.frames.where((f) => f.others.isNotEmpty), isNotEmpty);
+      final r = ReplayRunner(recording).run(const ReplayOptions(engine: mlKit));
+      expect(r.pausedAtUs, inInclusiveRange(60000000, 60500000));
+    });
+
+    test('without others the frame is a frame without the driver', () {
+      final r = ReplayRunner(
+        Recording.parse(withPassenger(others: false)),
+      ).run(const ReplayOptions(engine: mlKit));
+      expect(r.pausedAtUs, isNull);
+    });
+  });
+
   test('unknown lines are skipped, a newer schema is refused', () {
     final r = Recording.parse(
       [
