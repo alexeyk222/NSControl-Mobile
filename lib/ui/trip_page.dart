@@ -160,7 +160,9 @@ class TripPage extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (trip.debugUrls.isNotEmpty)
-          SelectableText('Mac: ${trip.debugUrls.first}'),
+          SelectableText(
+            'Mac: ${trip.debugUrls.first} · страниц: ${trip.debugPages}',
+          ),
         if (trip.recording)
           Text(
             'Запись ${trip.recordingId}'

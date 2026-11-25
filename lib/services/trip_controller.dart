@@ -1151,6 +1151,7 @@ class TripController extends ChangeNotifier {
   void _tick() {
     if (_disposed) return;
     final now = clock.elapsedMicroseconds;
+    _debugStatus(now);
     if (active && phase != TripPhase.paused) {
       if (drive.active(now)) tripBreaks++;
     }
@@ -1999,13 +2000,41 @@ class TripController extends ChangeNotifier {
     ?_calibrationLine,
     ?lastDevice == null ? null : {...lastDevice!, 'atUs': 0},
     ..._history,
-    {
-      'type': 'trip',
-      'atUs': _recUs(clock.elapsedMicroseconds),
-      'phase': phase.name,
-      'active': active,
-    },
+    _tripStatus(clock.elapsedMicroseconds),
   ];
+
+  int _lastDebugStatusUs = 0;
+
+  /// Live pages connected now (shown on the phone).
+  int debugPages = 0;
+
+  /// Once a second to the live pages: where the trip is (no face yet,
+  /// calibration, observation), so a page is never blank before the
+  /// automata start.
+  void _debugStatus(int now) {
+    final server = debugServer;
+    final pages = server?.clients ?? 0;
+    if (pages != debugPages) {
+      debugPages = pages;
+      _notify();
+    }
+    if (server == null || pages == 0) return;
+    if (now - _lastDebugStatusUs < 1000000) return;
+    _lastDebugStatusUs = now;
+    server.broadcast(_tripStatus(now));
+  }
+
+  Map<String, Object?> _tripStatus(int now) => {
+    'type': 'trip',
+    'atUs': _recUs(now),
+    'active': active,
+    'phase': phase.name,
+    'faces': faces.length,
+    'engine': engineInUse.name,
+    'calibration': calibrationProgress,
+    if (error != null) 'error': error,
+    if (calibrationNote != null) 'note': calibrationNote,
+  };
 
   /// Keeps event, mark and trip lines for a page that connects later.
   void _remember(Map<String, Object?> line) {
