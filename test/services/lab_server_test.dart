@@ -55,6 +55,21 @@ void main() {
     expect(server.urls.every((u) => u.endsWith('?k=k1')), isTrue);
   });
 
+  test('addresses: Wi-Fi first, no 464XLAT or link-local, no duplicates', () {
+    expect(
+      LabServer.reachableAddresses([
+        ('lo0', '127.0.0.1'),
+        ('pdp_ip0', '192.0.0.6'),
+        ('pdp_ip1', '192.0.0.6'),
+        ('en2', '169.254.10.2'),
+        ('bridge100', '172.20.10.1'),
+        ('en0', '192.168.0.35'),
+        ('en0', '192.168.0.35'),
+      ]),
+      ['192.168.0.35', '172.20.10.1', '127.0.0.1'],
+    );
+  });
+
   test('websocket gets the greeting, broadcasts and pongs', () async {
     expect(
       () => WebSocket.connect('ws://127.0.0.1:${server.boundPort}/ws?k=bad'),

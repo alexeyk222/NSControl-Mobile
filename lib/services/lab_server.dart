@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'lab_page_html.dart';
 import 'review_page_html.dart';
 
@@ -77,23 +78,38 @@ class LabServer {
       final interfaces = await NetworkInterface.list(
         type: InternetAddressType.IPv4,
       );
-      // Wi-Fi first, then the phone's own hotspot (bridge100 on iOS, the
-      // Mac joins it in the car), loopback last.
-      int rank(NetworkInterface i) => i.name == 'en0'
-          ? 0
-          : i.name.startsWith('bridge')
-          ? 1
-          : i.name.startsWith('lo')
-          ? 3
-          : 2;
-      interfaces.sort((a, b) => rank(a).compareTo(rank(b)));
-      return [
+      return reachableAddresses([
         for (final i in interfaces)
-          for (final a in i.addresses) a.address,
-      ];
+          for (final a in i.addresses) (i.name, a.address),
+      ]);
     } catch (_) {
       return [];
     }
+  }
+
+  /// Orders (interface, address) pairs for the page: Wi-Fi first, then the
+  /// phone's own hotspot (bridge100 on iOS, the Mac joins it in the car),
+  /// loopback last. Drops addresses a Mac cannot open: 192.0.0.0/24 (the
+  /// cellular 464XLAT interfaces, often listed twice) and link-local
+  /// 169.254.0.0/16. Each address appears once.
+  @visibleForTesting
+  static List<String> reachableAddresses(List<(String, String)> pairs) {
+    int rank(String name) => name == 'en0'
+        ? 0
+        : name.startsWith('bridge')
+        ? 1
+        : name.startsWith('lo')
+        ? 3
+        : 2;
+    final sorted = [...pairs]..sort((a, b) => rank(a.$1).compareTo(rank(b.$1)));
+    final seen = <String>{};
+    return [
+      for (final (_, address) in sorted)
+        if (!address.startsWith('192.0.0.') &&
+            !address.startsWith('169.254.') &&
+            seen.add(address))
+          address,
+    ];
   }
 
   List<String> get urls => [
