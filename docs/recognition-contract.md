@@ -67,6 +67,7 @@
 | `glasses`, `dark` | очки; приглушённый свет | по основному шагу |
 | `sign_head_left`, `sign_head_down`, `sign_roll_right` | повернуть голову влево, опустить, наклонить к правому плечу (сценарий `signs-v1`) | нет; проверка знаков `headYawLeft`, `headPitchDown`, `headRollRight` |
 | `sign_eyes_left`, `sign_eyes_down` | голова прямо, глаза влево, глаза вниз (`signs-v1`) | нет; проверка знаков `eyeGazeLeft`, `eyeGazeDown` |
+| `sign_wink_left` | закрыть левый глаз на 2 с, правый открыт (`signs-v1`) | нет (по ФТ-04 нужны оба глаза); проверка стороны `eyeOpenLeft`: у ML Kit `leftEyeOpenProbability`, у ARKit `eyeBlinkLeft` и `leftEyeTransform` |
 | `distraction_4s` | 4 с смотреть на телефон или магнитолу, голова и глаза вниз-вправо, как обычно | `distraction` при включённом расширении; по ТЗ нет; `head_pitch_down` допустим, если голова опущена больше 20°, и не считается ложным |
 | `neg_natural`, `neg_mirrors`, `neg_blind_spot`, `neg_intersection`, `neg_instruments`, `neg_mixed` | блоки по 10 мин отрицательного часа ПМИ (А.12, таблица А.1), сценарий `pmi-negative-60` | нет; любое событие — ложное (КЧ-03) |
 
