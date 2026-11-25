@@ -585,6 +585,7 @@ class TripController extends ChangeNotifier {
                 : 'Продолжительный наклон головы — проверьте состояние',
             occurredUs: sessionBaseUs + event.thresholdUs,
             event: true,
+            kind: event.type == EventType.eyesClosed ? 'eyes' : 'head',
             recommendation: event.type == EventType.eyesClosed
                 ? recommendationText
                 : null,
@@ -820,6 +821,7 @@ class TripController extends ChangeNotifier {
       reason: 'Проверка вибрации',
       occurredUs: clock.elapsedMicroseconds,
       event: false,
+      kind: 'test',
     );
     return true;
   }
@@ -907,7 +909,7 @@ class TripController extends ChangeNotifier {
     return switch (detail['status']) {
       'connected' => 'Часы на связи',
       'disconnected' => 'Часы не на связи. Откройте NSControl на часах',
-      'unpaired' => 'Apple Watch не сопряжены. Для Garmin выберите часы ниже',
+      'unpaired' => 'Apple Watch не сопряжены с этим iPhone',
       'app_not_installed' => 'Приложение NSControl не установлено на часах',
       'connecting' => 'Подключение…',
       'unavailable' => 'Обмен с часами недоступен на этом устройстве',

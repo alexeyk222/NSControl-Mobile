@@ -207,6 +207,7 @@ class WearableGateway {
     required int occurredUs,
     required bool event,
     String? recommendation,
+    String? kind,
   }) async {
     final age = nowUs() - occurredUs;
     if (!synchronized || age < 0 || age >= 2000000) return;
@@ -214,6 +215,7 @@ class WearableGateway {
       ..._envelope('alert'),
       if (event) 'event_id': id else 'recommendation_id': id,
       'reason': reason,
+      'alarm': ?kind,
       'recommendation': ?recommendation,
       'occurred_us': occurredUs,
       'ttl_ms': 2000,

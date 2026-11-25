@@ -18,15 +18,31 @@ struct NSControlWatchApp: App {
     }
 }
 
+/// One screen per state, docs/ux/watch.md §3 (W-01…W-09).
 struct RootView: View {
     @ObservedObject var link: WatchLink
 
     var body: some View {
         Group {
-            switch link.phase {
-            case .alarm: AlarmView(link: link)
-            case .notice: NoticeView(link: link)
-            default: StatusView(link: link)
+            switch link.screen {
+            case .alarm(let title, let reason):
+                // W-06: tap anywhere.
+                FullScreen(color: .red, icon: "exclamationmark.triangle.fill", title: title,
+                           subtitle: reason, footer: "Коснитесь — я в порядке", action: link.acknowledgeAlarm)
+            case .advice(let title, let reason):
+                // W-07
+                FullScreen(color: .orange, icon: "cup.and.saucer.fill", title: title,
+                           subtitle: reason, footer: nil, action: link.dismiss)
+            case .test:
+                // W-08
+                FullScreen(color: .blue, icon: "applewatch.radiowaves.left.and.right", title: "Проверка вибрации",
+                           subtitle: "Почувствовали? Ответьте на iPhone", footer: nil, action: link.dismiss)
+            case .summary(let minutes, let alarms):
+                // W-09
+                FullScreen(color: .gray, icon: "flag.fill", title: Self.duration(minutes),
+                           subtitle: "Тревог: \(alarms)", footer: nil, action: link.dismiss)
+            default:
+                StatusView(link: link)
             }
         }
         .onAppear {
@@ -34,60 +50,67 @@ struct RootView: View {
             if link.workout.needsAuthorization { link.enableBackground() }
         }
     }
+
+    static func duration(_ minutes: Int) -> String {
+        minutes >= 60 ? "\(minutes / 60) ч \(minutes % 60) мин" : "\(minutes) мин"
+    }
 }
 
-/// Full-screen alarm. One big target: the driver answers without looking for it.
-struct AlarmView: View {
-    @ObservedObject var link: WatchLink
+/// Coloured full-screen state; the whole screen is one tap target.
+struct FullScreen: View {
+    let color: Color
+    let icon: String
+    let title: String
+    let subtitle: String
+    let footer: String?
+    let action: () -> Void
+
     var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").font(.title2)
-            Text(link.title).font(.title3).bold()
-            Text(link.detail).font(.footnote).multilineTextAlignment(.center).lineLimit(4)
-            Spacer(minLength: 2)
-            Button(action: link.acknowledgeAlarm) {
-                Text("Я в порядке").font(.headline).frame(maxWidth: .infinity)
+        VStack(spacing: 6) {
+            Image(systemName: icon).font(.title2)
+            Text(title).font(.title2).bold().multilineTextAlignment(.center).minimumScaleFactor(0.6)
+            if !subtitle.isEmpty {
+                Text(subtitle).font(.footnote).multilineTextAlignment(.center).lineLimit(3)
             }
-            .tint(.white)
-            .foregroundStyle(.red)
+            if let footer {
+                Spacer(minLength: 2)
+                Text(footer).font(.footnote).bold().multilineTextAlignment(.center)
+            }
         }
         .padding(.horizontal, 6)
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.red.ignoresSafeArea())
+        .background(color.ignoresSafeArea())
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
     }
 }
 
-struct NoticeView: View {
-    @ObservedObject var link: WatchLink
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "cup.and.saucer.fill").font(.title2).foregroundStyle(.orange)
-            Text(link.title).font(.headline)
-            Text(link.detail).font(.footnote).multilineTextAlignment(.center)
-        }
-        .padding(.horizontal, 6)
-    }
-}
-
+/// W-01…W-05: calm state, nothing to press during a trip.
 struct StatusView: View {
     @ObservedObject var link: WatchLink
 
-    private var color: Color {
-        switch link.phase {
-        case .observing: return .green
-        case .limited: return .orange
-        case .noLink: return .gray
-        default: return .blue
+    private var look: (color: Color, icon: String, title: String, subtitle: String?) {
+        switch link.screen {
+        case .noLink: return (.gray, "iphone.slash", "Откройте NSControl на iPhone", nil)
+        case .watching: return (.green, "eye.fill", "Слежу", elapsed)
+        case .unseen(let headOnly):
+            return (.yellow, "eye.slash.fill", headOnly ? "Только голова" : "Телефон не видит вас", elapsed)
+        case .paused: return (.gray, "pause.fill", "Пауза", elapsed)
+        default: return (.blue, "car.fill", "Готов к поездке", "Начните поездку на iPhone")
         }
     }
 
-    private var icon: String {
-        switch link.phase {
-        case .observing: return "eye.fill"
-        case .limited: return "eye.slash.fill"
-        case .noLink: return "iphone.slash"
-        default: return "car.fill"
+    /// "1:12 в пути"
+    private var elapsed: String? {
+        guard let minutes = link.driveMinutes else { return nil }
+        return String(format: "%d:%02d в пути", minutes / 60, minutes % 60)
+    }
+
+    private var idle: Bool {
+        switch link.screen {
+        case .noLink, .ready: return true
+        default: return false
         }
     }
 
@@ -95,22 +118,19 @@ struct StatusView: View {
         ScrollView {
             VStack(spacing: 8) {
                 ZStack {
-                    Circle().stroke(color.opacity(0.35), lineWidth: 6)
-                    Image(systemName: icon).font(.title2).foregroundStyle(color)
+                    Circle().stroke(look.color.opacity(0.4), lineWidth: 6)
+                    Image(systemName: look.icon).font(.title2).foregroundStyle(look.color)
                 }
                 .frame(width: 58, height: 58)
-                Text(link.title).font(.headline).multilineTextAlignment(.center)
-                Text(link.detail).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                if let minutes = link.driveMinutes, link.phase == .observing || link.phase == .limited {
-                    Text("В пути \(minutes) мин").font(.footnote)
-                }
-                if let text = link.recommendation {
-                    Text(text).font(.footnote).foregroundStyle(.orange).multilineTextAlignment(.center)
+                Text(look.title).font(.headline).multilineTextAlignment(.center)
+                if let subtitle = look.subtitle {
+                    Text(subtitle).font(.footnote).foregroundStyle(.secondary)
                 }
                 backgroundRow
-                Button("Проверить вибрацию", action: link.testVibration)
-                    .font(.footnote)
-                Text("NSControl 1.0 • 2").font(.caption2).foregroundStyle(.secondary)
+                if idle {
+                    Button("Проверить вибрацию", action: link.testVibration).font(.footnote)
+                    Text("NSControl 1.0 • 2").font(.caption2).foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 4)
         }
@@ -119,9 +139,6 @@ struct StatusView: View {
     /// Screen-off alerts need the background session; say plainly when it is missing.
     @ViewBuilder private var backgroundRow: some View {
         switch link.background {
-        case .active:
-            Label("Работает при погасшем экране", systemImage: "checkmark.circle.fill")
-                .font(.caption2).foregroundStyle(.green)
         case .denied:
             VStack(spacing: 4) {
                 Text("Без разрешения часы молчат, когда экран погас")
@@ -129,9 +146,9 @@ struct StatusView: View {
                 Button("Разрешить", action: link.enableBackground).font(.footnote)
             }
         case .failed, .unavailable:
-            Text("Фоновый режим не запустился. Держите приложение открытым")
+            Text("Держите приложение открытым: фоновый режим не запустился")
                 .font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
-        case .off, .starting:
+        case .active, .off, .starting:
             EmptyView()
         }
     }

@@ -1,24 +1,25 @@
 import Foundation
 
-/// Haptic strength requested by the alarm loop. The watch app maps it to a
+/// Haptic requested by the alarm loop. The watch app maps it to a
 /// `WKHapticType`; this file stays Foundation-only for the command-line tests.
 enum AlarmPulse: Equatable {
-    case normal
-    case strong
+    case alarm        // .notification
+    case alarmRepeat  // .retry
+    case soft         // .directionUp
 }
 
-/// Timing of the repeated watch alarm. One place to tune after measurements:
-/// the ТЗ only fixes the first pulse (≤ 2.0 s after the threshold), not the rest.
+/// Watch signal patterns, docs/ux/watch.md §4. One place to tune after
+/// measurements: the ТЗ only fixes the first pulse (≤ 2.0 s after the threshold).
 enum AlarmPattern {
-    /// Pause between pulses at the start of a camera event.
-    static let intervalMs: Double = 1_000
-    /// After this long without an answer the pulses get stronger and denser.
-    static let escalateAfterMs: Double = 6_000
-    static let escalatedIntervalMs: Double = 700
+    static let intervalMs: Double = 800
+    /// No reaction for this long: pulses get denser.
+    static let escalateAfterMs: Double = 5_000
+    static let escalatedIntervalMs: Double = 400
+    /// After this long the loop slows down to a reminder pulse.
+    static let reminderAfterMs: Double = 30_000
+    static let reminderIntervalMs: Double = 3_000
     /// Hard stop, so a lost "event ended" message cannot buzz forever.
-    static let maxDurationMs: Double = 60_000
-    /// A recommendation or a test is a short burst, not a loop.
-    static let noticePulses = 3
+    static let maxDurationMs: Double = 5 * 60_000
     static let noticeIntervalMs: Double = 600
 }
 
@@ -28,15 +29,21 @@ enum AlarmPattern {
 /// Repeats only continue a signal that was already accepted, and stop as soon
 /// as the phone says the event is over, the user answers, or the link drops.
 final class AlarmLoop {
-    enum Kind { case event, notice }
+    enum Kind: Equatable {
+        /// Camera event: repeats until it ends, is cancelled or answered.
+        case event
+        /// Short series (advice, test, mild "на дорогу"); `pulses` includes the first.
+        case notice(pulses: Int, pulse: AlarmPulse)
+    }
 
     private(set) var target: String?
-    private(set) var kind: Kind = .notice
+    private(set) var kind: Kind = .event
     private var startedMs: Double = 0
     private var lastPulseMs: Double = 0
     private var pulses = 0
 
     var active: Bool { target != nil }
+    var isEvent: Bool { active && kind == .event }
 
     /// Call right after the first (gated) haptic was played.
     func start(target: String, kind: Kind, nowMs: Double) {
@@ -45,6 +52,7 @@ final class AlarmLoop {
         startedMs = nowMs
         lastPulseMs = nowMs
         pulses = 1
+        if case .notice(let total, _) = kind, total <= 1 { self.target = nil }
     }
 
     func stop() { target = nil; pulses = 0 }
@@ -66,19 +74,20 @@ final class AlarmLoop {
         if nowMs < lastPulseMs { stop(); return nil }  // clock reset
         let elapsed = nowMs - startedMs
         switch kind {
-        case .notice:
-            guard pulses < AlarmPattern.noticePulses else { stop(); return nil }
+        case .notice(let total, let pulse):
             guard nowMs - lastPulseMs >= AlarmPattern.noticeIntervalMs else { return nil }
             pulses += 1; lastPulseMs = nowMs
-            if pulses >= AlarmPattern.noticePulses { target = nil }
-            return .normal
+            if pulses >= total { target = nil }
+            return pulse
         case .event:
             guard elapsed < AlarmPattern.maxDurationMs else { stop(); return nil }
-            let escalated = elapsed >= AlarmPattern.escalateAfterMs
-            let interval = escalated ? AlarmPattern.escalatedIntervalMs : AlarmPattern.intervalMs
+            let interval = elapsed >= AlarmPattern.reminderAfterMs ? AlarmPattern.reminderIntervalMs
+                : elapsed >= AlarmPattern.escalateAfterMs ? AlarmPattern.escalatedIntervalMs
+                : AlarmPattern.intervalMs
             guard nowMs - lastPulseMs >= interval else { return nil }
             pulses += 1; lastPulseMs = nowMs
-            return escalated ? .strong : .normal
+            // .notification, then .retry, alternating.
+            return pulses % 2 == 0 ? .alarmRepeat : .alarm
         }
     }
 }
@@ -99,4 +108,22 @@ final class LinkWatchdog {
         warned = true
         return true
     }
+}
+
+/// Trip summary shown on W-09, counted on the watch itself.
+struct TripTally {
+    private(set) var startedMs: Double?
+    private(set) var alarms = 0
+
+    mutating func update(tripActive: Bool, nowMs: Double) -> (minutes: Int, alarms: Int)? {
+        if tripActive {
+            if startedMs == nil { startedMs = nowMs; alarms = 0 }
+            return nil
+        }
+        guard let start = startedMs else { return nil }
+        startedMs = nil
+        return (Int(((nowMs - start) / 60_000).rounded()), alarms)
+    }
+
+    mutating func alarm() { if startedMs != nil { alarms += 1 } }
 }
