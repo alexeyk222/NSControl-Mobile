@@ -68,6 +68,22 @@ class DriverContinuity {
 
   ContinuityDecision get decision => _decision;
 
+  /// Sets where and when the driver was last seen before observation starts:
+  /// the last calibration frame (or the median box and distance of the
+  /// calibration). Without it a face lost between the end of calibration and
+  /// the first observed frame comes back with a new ML Kit id and is taken
+  /// for another face. The first face after the start is then checked
+  /// against this reference by the same rules as after any loss.
+  void anchor(int atUs, {FaceBox? box, double? distanceM}) {
+    _lastSeenUs = atUs;
+    _lost = false;
+    _leftFrame = false;
+    _referenceBox = box;
+    _lastBox = box;
+    _referenceDistance = distanceM;
+    _lastDistance = distanceM;
+  }
+
   /// Returns [faces] with the calibrated id restored where the face is the
   /// driver; everything else is passed on as is.
   List<FaceSignals> resolve(int atUs, List<FaceSignals> faces) {

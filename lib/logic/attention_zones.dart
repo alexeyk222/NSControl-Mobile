@@ -922,6 +922,11 @@ class AttentionPipeline {
 
   AttentionDecision attention = AttentionDecision.unknown;
 
+  /// The driver's face as last seen during calibration, at [atUs]; see
+  /// [DriverContinuity.anchor].
+  void anchorDriver(FaceSignals face, int atUs) =>
+      continuity.anchor(atUs, box: face.box, distanceM: face.distanceM);
+
   /// [tzSignActive]: a ТЗ automaton had a sign or an event on the previous
   /// frame (`ChannelPhase.signPresent` or later); distraction then waits.
   /// [eyesEventActive]: the eyes channel had an active event on the previous
@@ -1073,6 +1078,12 @@ class ZoneAttentionProvider implements AttentionStateProvider {
             settings: settings,
           );
   }
+
+  /// Call right after [reset] with the last calibration frame of the driver
+  /// (or a face with the median box and distance of the calibration) and its
+  /// time, so that a face lost right after the start is still the driver.
+  void anchorDriver(FaceSignals face, int atUs) =>
+      _pipeline?.anchorDriver(face, atUs);
 
   @override
   AttentionState update(FaceSignals? signals, int atUs) =>

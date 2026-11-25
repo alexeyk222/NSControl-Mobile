@@ -197,6 +197,49 @@ void main() {
     });
   });
 
+  group('reference from calibration', () {
+    test('a face lost right after calibration comes back restored', () {
+      final provider = ZoneAttentionProvider()..reset(profile);
+      provider.anchorDriver(face(1), 10000000);
+      provider.updateFaces([], 10066667);
+      provider.updateFaces([], 12000000); // 2 s without a face
+      provider.updateFaces([face(2, cx: .52)], 12066667);
+      expect(
+        provider.pipeline!.continuity.decision,
+        ContinuityDecision.restored,
+      );
+      expect(provider.lastMeasurement?.trackingId, 1);
+    });
+
+    test('without the reference the same start stops observation', () {
+      final c = DriverContinuity(trackingId: 1);
+      c.resolve(10066667, []);
+      c.resolve(12066667, [face(2, cx: .52)]);
+      expect(c.decision, ContinuityDecision.different);
+    });
+
+    test('the reference does not take back a face elsewhere or too late', () {
+      for (final (us, other) in [
+        (12000000, face(2, cx: .85)),
+        (16000000, face(2)),
+      ]) {
+        final c = DriverContinuity(trackingId: 1)
+          ..anchor(10000000, box: face(1).box);
+        c.resolve(10066667, []);
+        c.resolve(us, [other]);
+        expect(c.decision, ContinuityDecision.different);
+      }
+    });
+
+    test('a reference at the frame edge counts as leaving the frame', () {
+      final c = DriverContinuity(trackingId: 1)
+        ..anchor(10000000, box: face(1, cx: .15).box);
+      c.resolve(10066667, []);
+      c.resolve(11000000, [face(2, cx: .15)]);
+      expect(c.decision, ContinuityDecision.different);
+    });
+  });
+
   test('the decision is in the attention state', () {
     final p = AttentionPipeline(calibration: profile);
     expect(p.process(1000, [face(1)]).state.toJson()['driver'], 'same');
