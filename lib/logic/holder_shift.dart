@@ -21,6 +21,7 @@ class HolderShiftSettings {
   const HolderShiftSettings({
     this.gravityDeg = 8,
     this.gravityHoldUs = 5000000,
+    this.gravityHeadShare = .5,
     this.poseDeg = 12,
     this.poseSpreadDeg = 3,
     this.eyesInHeadDeg = 6,
@@ -33,6 +34,17 @@ class HolderShiftSettings {
   /// vent holder moved 5° in a minute; a desk bench stays within 0.5°.
   final double gravityDeg;
   final int gravityHoldUs;
+
+  /// The head must follow the tilt: over the last [gravityHoldUs] its median
+  /// pose in the road frame has moved along the tilt (pitch with pitch, roll
+  /// with roll) by at least this share of it. A turned holder turns the
+  /// camera against the head; a car on a ramp (10–20 %, 6–11°), a long bend
+  /// or braking tilts gravity but leaves the head where it was in the road
+  /// frame. Without the driver's face gravity alone does not decide. Signs
+  /// from session 1: a sag of the holder in signs-v1 000944 moved gravity
+  /// roll by −7° and head roll by −8°; a handheld trial (235744) moved
+  /// gravity and head pitch together.
+  final double gravityHeadShare;
 
   /// Pose path (a turn of the holder around the vertical, which gravity
   /// does not see): the median head yaw at least this far from the road
@@ -49,6 +61,7 @@ class HolderShiftSettings {
   Map<String, Object?> toJson() => {
     'gravityDeg': gravityDeg,
     'gravityHoldUs': gravityHoldUs,
+    'gravityHeadShare': gravityHeadShare,
     'poseDeg': poseDeg,
     'poseSpreadDeg': poseSpreadDeg,
     'eyesInHeadDeg': eyesInHeadDeg,
@@ -63,6 +76,7 @@ class HolderShiftSettings {
     return HolderShiftSettings(
       gravityDeg: n('gravityDeg', d.gravityDeg),
       gravityHoldUs: i('gravityHoldUs', d.gravityHoldUs),
+      gravityHeadShare: n('gravityHeadShare', d.gravityHeadShare),
       poseDeg: n('poseDeg', d.poseDeg),
       poseSpreadDeg: n('poseSpreadDeg', d.poseSpreadDeg),
       eyesInHeadDeg: n('eyesInHeadDeg', d.eyesInHeadDeg),
@@ -125,10 +139,19 @@ class HolderShift {
     bool sign = false,
   }) {
     if (suspected) return;
+    final usable = head != null && eyesOpen && !sign;
+    _poses.add(_Pose(atUs, usable ? head : null, usable ? eyesInHead : null));
+    final keep = math.max(settings.poseHoldUs, settings.gravityHoldUs);
+    while (atUs - _poses.first.atUs > keep) {
+      _poses.removeAt(0);
+    }
     _observeGravity(atUs, gravityUp);
     if (suspected) return;
-    _observePose(atUs, head, eyesInHead, eyesOpen: eyesOpen, sign: sign);
+    _observePose(atUs);
   }
+
+  /// The frames of the window since [fromUs].
+  Iterable<_Pose> _since(int fromUs) => _poses.where((p) => p.atUs >= fromUs);
 
   void _observeGravity(int atUs, List<double>? up) {
     final reference = _gravity;
@@ -149,41 +172,52 @@ class HolderShift {
     if (tilt > settings.gravityDeg) {
       final since = _tiltSinceUs ??= atUs;
       if (atUs - since >= settings.gravityHoldUs) {
-        sinceUs = since;
-        source = HolderShiftSource.gravity;
         var roll = _roll(g) - _roll(reference);
         if (roll > 180) roll -= 360;
         if (roll < -180) roll += 360;
-        offset = (0, _pitch(g) - _pitch(reference), roll);
+        final pitch = _pitch(g) - _pitch(reference);
+        if (_headFollows(atUs, pitch, roll)) {
+          sinceUs = since;
+          source = HolderShiftSource.gravity;
+          offset = (0, pitch, roll);
+        }
       }
     } else if (tilt < settings.gravityDeg * .75) {
       _tiltSinceUs = null;
     }
   }
 
-  void _observePose(
-    int atUs,
-    (double, double, double)? head,
-    (double, double)? eyes, {
-    required bool eyesOpen,
-    required bool sign,
-  }) {
-    final usable = head != null && eyesOpen && !sign;
-    _poses.add(_Pose(atUs, usable ? head : null, usable ? eyes : null));
+  /// Whether the head moved along the phone's tilt ([pitch], [roll]) over
+  /// the last hold of the gravity path, by [gravityHeadShare] of it.
+  bool _headFollows(int atUs, double pitch, double roll) {
+    final frames = _since(atUs - settings.gravityHoldUs).toList();
+    final heads = [
+      for (final p in frames)
+        if (p.head != null) p.head!,
+    ];
+    if (heads.isEmpty || heads.length < frames.length / 2) return false;
+    final tilt = math.sqrt(pitch * pitch + roll * roll);
+    if (tilt < 1e-6) return false;
+    final along =
+        (median(heads.map((h) => h.$2)) * pitch +
+            median(heads.map((h) => h.$3)) * roll) /
+        tilt;
+    return along >= settings.gravityHeadShare * tilt;
+  }
+
+  void _observePose(int atUs) {
     final hold = settings.poseHoldUs;
-    while (_poses.isNotEmpty && atUs - _poses.first.atUs > hold) {
-      _poses.removeAt(0);
-    }
-    if (atUs - _poses.first.atUs < hold * .95) return;
+    final window = _since(atUs - hold).toList();
+    if (atUs - window.first.atUs < hold * .95) return;
     // The window statistics twice a second are enough for a 15 s hold.
     final checked = _checkedUs;
     if (checked != null && atUs - checked < 500000) return;
     _checkedUs = atUs;
     final heads = [
-      for (final p in _poses)
+      for (final p in window)
         if (p.head != null) p.head!,
     ];
-    if (heads.length < settings.poseShare * _poses.length) return;
+    if (heads.length < settings.poseShare * window.length) return;
     final yaws = heads.map((h) => h.$1), pitches = heads.map((h) => h.$2);
     final yaw = median(yaws), pitch = median(pitches);
     // Only a turn around the vertical: gravity sees a tilt of the holder,
@@ -198,12 +232,12 @@ class HolderShift {
           (h) => (h.$1 - yaw).abs() <= band && (h.$2 - pitch).abs() <= band,
         )
         .length;
-    if (steady < settings.poseShare * _poses.length) return;
+    if (steady < settings.poseShare * window.length) return;
     // With gaze: a driver who turned to look somewhere moves the eyes in the
     // head too (the eyes lead); a turned camera leaves them where they were.
     final reference = _eyes;
     final gaze = [
-      for (final p in _poses)
+      for (final p in window)
         if (p.eyes != null) p.eyes!,
     ];
     if (reference != null && gaze.length >= heads.length / 2) {
@@ -211,7 +245,7 @@ class HolderShift {
           down = median(gaze.map((e) => e.$2)) - reference.$2;
       if (math.max(left.abs(), down.abs()) > settings.eyesInHeadDeg) return;
     }
-    sinceUs = _poses.first.atUs;
+    sinceUs = window.first.atUs;
     source = HolderShiftSource.pose;
     offset = (yaw, pitch, median(heads.map((h) => h.$3)));
   }
