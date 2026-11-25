@@ -94,7 +94,12 @@ class Recording {
     required this.labels,
     required this.recordedEvents,
     required this.skippedLines,
+    this.derivedUs = const [],
   });
+
+  /// Times of the app's `derived` lines (a trip writes them only while an
+  /// observation session runs), sorted.
+  final List<int> derivedUs;
 
   final Map<String, dynamic> meta;
   final List<RecordedCalibration> calibrations;
@@ -113,6 +118,9 @@ class Recording {
 
   String get id => (meta['recordingId'] as String?) ?? 'без идентификатора';
 
+  /// A trip recording (calibrates again after pauses).
+  bool get isTrip => meta['source'] == 'trip';
+
   List<String> get engines {
     final seen = <String>{};
     return [
@@ -127,6 +135,7 @@ class Recording {
     final frames = <RecordedFrame>[];
     final labels = <RecordedLabel>[];
     final events = <Map<String, dynamic>>[];
+    final derived = <int>[];
     var skipped = 0;
     for (final raw in const LineSplitter().convert(text)) {
       final line = raw.trim();
@@ -196,6 +205,8 @@ class Recording {
             );
           case 'event':
             events.add(json);
+          case 'derived':
+            if (json['atUs'] case final int at) derived.add(at);
           default:
             // Known lines the replay does not use (`derived`, `device`) are
             // not counted; unknown types are.
@@ -215,6 +226,7 @@ class Recording {
       labels: labels,
       recordedEvents: events,
       skippedLines: skipped,
+      derivedUs: derived..sort(),
     );
   }
 }
@@ -443,10 +455,16 @@ class ReplayResult {
     this.restoredFrames = 0,
     this.pausedAtUs,
     this.holderShift,
+    this.recalibratedUs = const [],
   });
 
-  /// The holder-shift sign over the run (first suspicion only).
+  /// The holder-shift sign over the run: the first suspicion of any
+  /// calibration, or the last calibration's sign when none.
   final HolderShift? holderShift;
+
+  /// Where the replay switched to a later calibration line of the engine
+  /// (a trip calibrating again), recording clock.
+  final List<int> recalibratedUs;
 
   /// Frames whose face got the calibrated id back after a loss (ФТ-02/03).
   final int restoredFrames;
@@ -493,44 +511,96 @@ class ReplayRunner {
     final (calibrated, source, calibrationEndUs, calibrationLine, note) =
         _calibration(frames, options);
     final rule = options.profile;
-    final profile = rule == null || calibrated.hiddenEyes
-        ? calibrated
+    CalibrationProfile withRule(CalibrationProfile c) =>
+        rule == null || c.hiddenEyes
+        ? c
         : () {
             final (share, cap) = rule.eyeRule(options.engine);
-            return calibrated.withEyeRule(share: share, cap: cap);
+            return c.withEyeRule(share: share, cap: cap);
           }();
-    final zones = _zones(profile, calibrationLine, frames, calibrationEndUs);
-    // The same entry point as the lab: reset, anchor, updateFaces with
-    // every face of the frame, lastMeasurements into the automaton.
-    final provider = ZoneAttentionProvider(
-      settings: options.settings,
-      zones: zones,
-    )..reset(profile);
-    final pipeline = provider.pipeline!;
-    // Where the driver was at the end of calibration, as the app does it.
-    for (final f in frames.reversed) {
-      if (f.capturedUs > calibrationEndUs) continue;
-      if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
-        provider.anchorDriver(f.signals!, f.capturedUs);
+    final first = withRule(calibrated);
+    // A trip calibrates again after a pause, a return from the background or
+    // a holder shift (a new `calibration` line): each one starts a new
+    // session of the automata on its own calibration, as the trip does.
+    // Only trips: a lab recording keeps the calibration the scenario ran on.
+    final later = options.recalibrate || !recording.isTrip
+        ? <RecordedCalibration>[]
+        : [
+            for (final c in recording.calibrations)
+              if (c.engineId == options.engine &&
+                  c.profile != null &&
+                  c.atUs > calibrationEndUs)
+                c,
+          ];
+    later.sort((a, b) => a.atUs.compareTo(b.atUs));
+    // Where the observation on the old calibration stopped before each new
+    // one. The trip writes `derived` lines only while a session runs: after a
+    // pause or a return from the background they stop while the trip finds
+    // the face and calibrates; a holder-shift re-calibration collects its
+    // window while the old session goes on. Without `derived` lines the
+    // calibration window (10 s) is taken as unobserved.
+    final stoppedUs = [
+      for (final c in later)
+        recording.derivedUs.lastWhere(
+          (d) => d < c.atUs,
+          orElse: () => c.atUs - calibrationUs,
+        ),
+    ];
+    var profile = first;
+    late ZoneAttentionProvider provider;
+    late AttentionPipeline pipeline;
+    late AlgorithmSettings settings;
+    late CalibrationProfile engineProfile;
+    late ObservationEngine engine;
+    late FatigueMonitor fatigue;
+    late HolderShift holder;
+    final holders = <HolderShift>[];
+    void start(
+      CalibrationProfile calibration,
+      RecordedCalibration? line,
+      int endUs,
+      int session,
+    ) {
+      profile = calibration;
+      final zones = _zones(profile, line, frames, endUs);
+      // The same entry point as the lab: reset, anchor, updateFaces with
+      // every face of the frame, lastMeasurements into the automaton.
+      provider = ZoneAttentionProvider(settings: options.settings, zones: zones)
+        ..reset(profile);
+      pipeline = provider.pipeline!;
+      // Where the driver was at the end of calibration, as the app does it.
+      for (final f in frames.reversed) {
+        if (f.capturedUs > endUs) continue;
+        if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
+          provider.anchorDriver(f.signals!, f.capturedUs);
+        }
+        break;
       }
-      break;
+      settings =
+          options.profile?.algorithm(hiddenEyes: profile.hiddenEyes) ??
+          AlgorithmSettings(hiddenEyes: profile.hiddenEyes);
+      // Road-frame profile (neutral 0) with mountRelative, as in the lab.
+      engineProfile = pipeline.engineCalibration;
+      engine = ObservationEngine(
+        sessionId: session == 0 ? 'replay' : 'replay-${session + 1}',
+        calibration: engineProfile,
+        settings: settings,
+      );
+      fatigue = FatigueMonitor(
+        eyeThreshold: profile.eyeThreshold,
+        nodThreshold: settings.pitchThreshold * .6,
+        eyesEventUs: settings.eyesClosedUs,
+        headEventUs: settings.headDownUs,
+      );
+      holder = _holder(
+        frames,
+        endUs,
+        options.profile?.holderShift ?? const HolderShiftSettings(),
+      );
+      holders.add(holder);
     }
-    final settings =
-        options.profile?.algorithm(hiddenEyes: profile.hiddenEyes) ??
-        AlgorithmSettings(hiddenEyes: profile.hiddenEyes);
-    // Road-frame profile (neutral 0) with mountRelative, as in the lab.
-    final engineProfile = pipeline.engineCalibration;
-    final engine = ObservationEngine(
-      sessionId: 'replay',
-      calibration: engineProfile,
-      settings: settings,
-    );
-    final fatigue = FatigueMonitor(
-      eyeThreshold: profile.eyeThreshold,
-      nodThreshold: settings.pitchThreshold * .6,
-      eyesEventUs: settings.eyesClosedUs,
-      headEventUs: settings.headDownUs,
-    );
+
+    start(first, calibrationLine, calibrationEndUs, 0);
     final events = <ReplayEvent>[];
     final open = <String, int>{};
     final episodes = [
@@ -542,7 +612,7 @@ class ReplayRunner {
             e.step,
             options.settings,
           ))
-            if (!profile.hiddenEyes || t != ScenarioExpectations.eyesClosed) t,
+            if (!first.hiddenEyes || t != ScenarioExpectations.eyesClosed) t,
         }),
     ];
     var ambiguous = 0, rejected = 0, observed = 0;
@@ -562,13 +632,30 @@ class ReplayRunner {
       if (r != null) (r.glances[key] ??= []).add(endUs - startUs);
     }
 
-    final holder = _holder(
-      frames,
-      calibrationEndUs,
-      options.profile?.holderShift ?? const HolderShiftSettings(),
-    );
+    final switchedUs = <int>[];
+    var next = 0;
     for (final frame in frames) {
       if (frame.capturedUs <= calibrationEndUs) continue;
+      if (next < later.length && frame.capturedUs > stoppedUs[next]) {
+        // The trip is collecting the next calibration: no observation.
+        if (runZone != null) glance(runZone.code, runStartUs!, lastUs!);
+        if (offStartUs != null) {
+          glance(EpisodeResult.offRoad, offStartUs, lastUs!);
+        }
+        runZone = null;
+        offStartUs = null;
+        if (frame.capturedUs <= later[next].atUs) continue;
+        final line = later[next++];
+        final (used, _, _) = _fromLine(line, line.profile!, options);
+        start(withRule(used), line, line.atUs, switchedUs.length + 1);
+        switchedUs.add(line.atUs);
+        tzSign = false;
+        eyesEvent = false;
+        // A line the frame already passed (two calibrations in a row).
+        while (next < later.length && later[next].atUs < frame.capturedUs) {
+          next++;
+        }
+      }
       firstUs ??= frame.capturedUs;
       lastUs = frame.capturedUs;
       observed++;
@@ -612,7 +699,7 @@ class ReplayRunner {
         offStartUs = null;
       }
       final update = engine.process(
-        sessionId: 'replay',
+        sessionId: engine.sessionId,
         capturedUs: frame.capturedUs,
         completedUs: frame.completedUs,
         faces: attention.measurements,
@@ -691,7 +778,7 @@ class ReplayRunner {
     final scores = _score(episodes, events, outside, settings, options);
     return ReplayResult(
       options: options,
-      profile: profile,
+      profile: first,
       calibrationSource: source,
       calibrationNote: note,
       episodes: episodes,
@@ -705,7 +792,9 @@ class ReplayRunner {
       observedUs: (lastUs ?? 0) - (firstUs ?? 0),
       restoredFrames: restored,
       pausedAtUs: pausedAtUs,
-      holderShift: holder,
+      holderShift:
+          holders.where((h) => h.suspected).firstOrNull ?? holders.last,
+      recalibratedUs: switchedUs,
     );
   }
 
@@ -782,6 +871,8 @@ class ReplayRunner {
     // The calibration the scenario ran on: the last one before the first
     // label (a recalibration later in the recording does not move the start),
     // preferably of this engine.
+    // A trip starts from its first calibration and switches to each later
+    // one (see [run]); its review labels are spread over the drive.
     final scenarioUs = recording.labels.isEmpty
         ? null
         : recording.labels.first.atUs;
@@ -792,7 +883,7 @@ class ReplayRunner {
         first ??= c;
         if (scenarioUs == null || c.atUs <= scenarioUs) before = c;
       }
-      return before ?? first;
+      return recording.isTrip ? first : before ?? first;
     }
 
     final line = pick((c) => c.engineId == options.engine) ?? pick((c) => true);
@@ -800,59 +891,7 @@ class ReplayRunner {
     if (!options.recalibrate &&
         profile != null &&
         line!.engineId == options.engine) {
-      var used = profile;
-      var source = 'строка calibration записи';
-      // Side mount: a lab build before the mount calibration raised the ML
-      // Kit eye limit to pass the calibration; a measured limit
-      // (`eyeYawLimit`) or a detection profile may set another. The recorded
-      // neutral pose stays; the eyes follow the limit in effect, as the
-      // mount calibration does.
-      final mlKitBase = options.eyeYawLimit == null
-          ? DetectorCapabilities.mlKit
-          : DetectorCapabilities(
-              id: DetectorCapabilities.mlKit.id,
-              version: DetectorCapabilities.mlKit.version,
-              eyeYawLimit: options.eyeYawLimit!,
-            );
-      final base = profile.detector.id == DetectorCapabilities.mlKit.id
-          ? mlKitBase
-          : profile.detector;
-      final target = options.profile?.detector(base) ?? base;
-      if (options.settings.mountRelative &&
-          profile.detector.eyeYawLimit != target.eyeYawLimit) {
-        final hidden =
-            profile.hiddenEyes || profile.neutralYaw.abs() > target.eyeYawLimit;
-        used = CalibrationProfile(
-          trackingId: profile.trackingId,
-          detector: target,
-          hiddenEyes: hidden,
-          neutralPitch: profile.neutralPitch,
-          neutralYaw: profile.neutralYaw,
-          neutralRoll: profile.neutralRoll,
-          leftEyeMedian: hidden ? null : profile.leftEyeMedian,
-          rightEyeMedian: hidden ? null : profile.rightEyeMedian,
-          eyeThreshold: hidden ? null : profile.eyeThreshold,
-          eyeShare: profile.eyeShare,
-          eyeCap: profile.eyeCap,
-        );
-        source +=
-            '; предел глаз ${profile.detector.eyeYawLimit.round()}° '
-            'заменён на ${target.eyeYawLimit.round()}°'
-            '${options.profile != null
-                ? ' по профилю ${options.profile!.id}'
-                : options.eyeYawLimit == null
-                ? ' по ТЗ'
-                : ' (замер)'}';
-      }
-      String? note;
-      if (options.settings.mountRelative &&
-          used.hiddenEyes &&
-          used.neutralYaw.abs() > used.detector.eyeYawLimit) {
-        note = MountCalibrationCollector.eyesNote(
-          used.neutralYaw,
-          used.detector.eyeYawLimit,
-        );
-      }
+      final (used, source, note) = _fromLine(line, profile, options);
       return (used, source, line.atUs, line, note);
     }
     // Recompute from the frames of this engine: the 10 s before the recorded
@@ -979,6 +1018,69 @@ class ReplayRunner {
         ? line
         : null;
     return (calibrated, source, endUs, own, note);
+  }
+
+  /// The calibration of a recorded [line] of this engine, with the eye limit
+  /// in effect.
+  (CalibrationProfile, String, String?) _fromLine(
+    RecordedCalibration line,
+    CalibrationProfile profile,
+    ReplayOptions options,
+  ) {
+    var used = profile;
+    var source = 'строка calibration записи';
+    // Side mount: a lab build before the mount calibration raised the ML
+    // Kit eye limit to pass the calibration; a measured limit
+    // (`eyeYawLimit`) or a detection profile may set another. The recorded
+    // neutral pose stays; the eyes follow the limit in effect, as the
+    // mount calibration does.
+    final mlKitBase = options.eyeYawLimit == null
+        ? DetectorCapabilities.mlKit
+        : DetectorCapabilities(
+            id: DetectorCapabilities.mlKit.id,
+            version: DetectorCapabilities.mlKit.version,
+            eyeYawLimit: options.eyeYawLimit!,
+          );
+    final base = profile.detector.id == DetectorCapabilities.mlKit.id
+        ? mlKitBase
+        : profile.detector;
+    final target = options.profile?.detector(base) ?? base;
+    if (options.settings.mountRelative &&
+        profile.detector.eyeYawLimit != target.eyeYawLimit) {
+      final hidden =
+          profile.hiddenEyes || profile.neutralYaw.abs() > target.eyeYawLimit;
+      used = CalibrationProfile(
+        trackingId: profile.trackingId,
+        detector: target,
+        hiddenEyes: hidden,
+        neutralPitch: profile.neutralPitch,
+        neutralYaw: profile.neutralYaw,
+        neutralRoll: profile.neutralRoll,
+        leftEyeMedian: hidden ? null : profile.leftEyeMedian,
+        rightEyeMedian: hidden ? null : profile.rightEyeMedian,
+        eyeThreshold: hidden ? null : profile.eyeThreshold,
+        eyeShare: profile.eyeShare,
+        eyeCap: profile.eyeCap,
+      );
+      source +=
+          '; предел глаз ${profile.detector.eyeYawLimit.round()}° '
+          'заменён на ${target.eyeYawLimit.round()}°'
+          '${options.profile != null
+              ? ' по профилю ${options.profile!.id}'
+              : options.eyeYawLimit == null
+              ? ' по ТЗ'
+              : ' (замер)'}';
+    }
+    String? note;
+    if (options.settings.mountRelative &&
+        used.hiddenEyes &&
+        used.neutralYaw.abs() > used.detector.eyeYawLimit) {
+      note = MountCalibrationCollector.eyesNote(
+        used.neutralYaw,
+        used.detector.eyeYawLimit,
+      );
+    }
+    return (used, source, note);
   }
 
   static FaceSignals _withTrackingId(FaceSignals s, int id) =>
@@ -1228,6 +1330,15 @@ String replayReport(Recording recording, List<ReplayResult> results) {
       'предел глаз ${_deg(r.profile.detector.eyeYawLimit)}.',
     );
     if (r.calibrationNote != null) b.writeln('- ${r.calibrationNote}');
+    if (r.recalibratedUs.isNotEmpty) {
+      b.writeln(
+        '- Новые калибровки поездки: '
+        '${r.recalibratedUs.map((us) => '${_s(us)} с').join(', ')}. '
+        'Прогон переходил на каждую: автоматы, зоны, усталость и признак '
+        'сдвига держателя начинали заново, кадры, пока поездка искала лицо '
+        'и калибровалась, не наблюдались. Калибровка выше — первая.',
+      );
+    }
     if (r.profile.hiddenEyes) {
       b.writeln(
         '- Глаза не оцениваются: шаги eyes_closed_* не ждут события и не '
