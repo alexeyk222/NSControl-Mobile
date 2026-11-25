@@ -624,6 +624,18 @@ List<LabEngineOption> arkitLabEngineOptions({
     engineIds: [arkitCapabilities.id],
     create: () => ArkitFaceSource(onRaw: onRaw, onStats: onStats),
   ),
+  // Heat runs: 30 fps from the start instead of the default 60, which the
+  // phone throttles to 30 anyway once it is hot (bench-v1 20261126-001948).
+  LabEngineOption(
+    id: 'arkit_30',
+    title: 'ARKit 30 к/с',
+    engineIds: [arkitCapabilities.id],
+    create: () => ArkitFaceSource(
+      options: const ArkitOptions(fps: 30),
+      onRaw: onRaw,
+      onStats: onStats,
+    ),
+  ),
   LabEngineOption(
     id: 'arkit_mlkit',
     title: 'ARKit + ML Kit на тех же кадрах',
