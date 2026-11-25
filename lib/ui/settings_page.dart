@@ -302,6 +302,63 @@ class _SettingsPageState extends State<SettingsPage> {
                           },
                   ),
                 ),
+              if (widget.developerMode && widget.trip.recorder != null)
+                AnimatedBuilder(
+                  animation: widget.trip,
+                  builder: (context, _) => Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Записывать поездку'),
+                        subtitle: const Text(
+                          'Числа распознавания в файл JSONL рядом с записями '
+                          'Лаборатории, для разбора. Без изображений. '
+                          'Со следующей поездки.',
+                        ),
+                        value: widget.trip.recordTrips,
+                        onChanged: widget.trip.active
+                            ? null
+                            : (value) {
+                                widget.trip.recordTrips = value;
+                                widget.trip.journal(
+                                  (db) =>
+                                      db.setSetting('trip_recording', value),
+                                );
+                                setState(() {});
+                              },
+                      ),
+                      if (widget.trip.recordTrips)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: Wrap(
+                            spacing: 8,
+                            children: [
+                              for (final (id, title) in const [
+                                ('front', 'Прямо'),
+                                ('vent_left', 'Решётка слева'),
+                                ('vent_right', 'Решётка справа'),
+                              ])
+                                ChoiceChip(
+                                  label: Text(title),
+                                  selected: widget.trip.mountPosition == id,
+                                  onSelected: widget.trip.active
+                                      ? null
+                                      : (_) {
+                                          widget.trip.mountPosition = id;
+                                          widget.trip.journal(
+                                            (db) =>
+                                                db.setSetting('trip_mount', id),
+                                          );
+                                          setState(() {});
+                                        },
+                                ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               if (widget.developerMode && widget.createLab != null)
                 AnimatedBuilder(
                   animation: widget.trip,
