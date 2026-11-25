@@ -16,6 +16,46 @@ class IntegrationsPage extends StatefulWidget {
 
 class _IntegrationsPageState extends State<IntegrationsPage> {
   bool connecting = false;
+
+  /// «Проверка вибрации» (W-08): the watch buzzes once, the phone asks whether
+  /// it was felt. Only the person can confirm a physical vibration.
+  Future<void> _testWatch() async {
+    final sent = await widget.trip.testWatch();
+    if (!mounted) return;
+    if (!sent) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Часы не на связи')));
+      return;
+    }
+    final felt = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Почувствовали вибрацию?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Нет'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Да'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || felt == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          felt
+              ? 'Часы готовы'
+              : 'Проверьте, что NSControl открыт на часах и режим «Не беспокоить» выключен',
+        ),
+      ),
+    );
+  }
+
   Future<void> connect([String? id]) async {
     setState(() => connecting = true);
     await widget.trip.connectWearable(deviceId: id);
@@ -45,7 +85,19 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                       ? 'Обмен временем установлен'
                       : 'Вибрация требует актуального обмена с приложением часов',
                 ),
+                if (widget.trip.watchBackgroundText case final text?) ...[
+                  const SizedBox(height: 8),
+                  Text(text),
+                ],
                 const SizedBox(height: 12),
+                if (widget.trip.wearable.synchronized) ...[
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(_testWatch()),
+                    icon: const Icon(Icons.vibration),
+                    label: const Text('Проверить вибрацию часов'),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 FilledButton.tonalIcon(
                   onPressed: connecting ? null : () => unawaited(connect()),
                   icon: const Icon(Icons.bluetooth_searching),
@@ -71,7 +123,7 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                 ),
                 const SizedBox(height: 12),
                 const Text(
-                  'Откройте NSControl на Apple Watch SE или Garmin fēnix 7X. Ответ приложения часов подтверждает приём команды, а не физическую вибрацию. На Garmin кнопка START подтверждает тревогу; часы раз в минуту передают пульс, Body Battery и стресс.',
+                  'Откройте NSControl на Apple Watch. Во время поездки часы работают и при погасшем экране. Касание экрана часов во время тревоги выключает и звук телефона.',
                 ),
               ],
             ),

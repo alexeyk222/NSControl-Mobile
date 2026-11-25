@@ -242,6 +242,36 @@ class RoadFrame {
       Rotation3.anglesOf(_inverse.apply(Rotation3.direction(left, down)));
 }
 
+/// One face for the ТЗ automata on a side mount: head angles relative to
+/// the road pose ([RoadFrame.head]); the eyes only while the camera sees the
+/// face within the engine's eye limit (the far eye leaves the view). Engines
+/// without face ids (one face only) inherit the calibrated id. Used by the
+/// lab pipeline and by the trip.
+FaceMeasurement mountMeasurement(
+  FaceSignals f, {
+  required RoadFrame road,
+  required CalibrationProfile calibration,
+  bool withEyes = true,
+  RoadAdaptation? adaptation,
+}) {
+  final m = f.toMeasurement();
+  final view = f.headYawLeft;
+  final eyes =
+      withEyes &&
+      view != null &&
+      view.abs() <= calibration.detector.eyeYawLimit;
+  final raw = road.head(f);
+  final head = raw == null ? null : (adaptation?.apply(raw) ?? raw);
+  return FaceMeasurement(
+    trackingId: m.trackingId ?? calibration.trackingId,
+    leftEye: eyes ? m.leftEye : null,
+    rightEye: eyes ? m.rightEye : null,
+    pitchDown: head?.$2,
+    yaw: head?.$1,
+    roll: head?.$3,
+  );
+}
+
 /// The profile for `ObservationEngine` when the pipeline feeds road-frame
 /// angles: neutral angles 0 (the road), the same eyes, and no eye view limit
 /// of its own, because the pipeline already withholds the eyes when the face

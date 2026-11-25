@@ -11,6 +11,7 @@ class WearableGateway {
     this.onDelivery,
     this.onVitals,
     this.onUserAck,
+    this.onWatchState,
   });
   final int Function() nowUs;
   final Future<void> Function(WatchMessage) send;
@@ -21,6 +22,14 @@ class WearableGateway {
 
   /// The user pressed "accept" on the watch for the listed event ids.
   final void Function(List<String> eventIds)? onUserAck;
+
+  /// Apple Watch background mode changed (`active`, `off`, `denied`, ...).
+  final void Function(String background)? onWatchState;
+
+  /// Whether the watch app keeps running with its screen off
+  /// (`active` = workout session running). Null until the watch reports it.
+  String? get watchBackground => _watchBackground;
+  String? _watchBackground;
   final _ids = const Uuid();
   String? _connectionId;
   String? _receiverEpoch;
@@ -122,6 +131,7 @@ class WearableGateway {
       final epoch = message['receiver_epoch'];
       if (epoch is! String || epoch.isEmpty) return;
       _receiverEpoch = epoch;
+      _setBackground(message['background']);
       _syncedUs = null;
       _syncId = null;
       await snapshot();
@@ -173,6 +183,8 @@ class WearableGateway {
     } else if (message['type'] == 'vitals') {
       final vitals = WearableVitals.fromMessage(message, nowUs());
       if (vitals != null) onVitals?.call(vitals);
+    } else if (message['type'] == 'watch_state') {
+      _setBackground(message['background']);
     } else if (message['type'] == 'user_ack') {
       final ids = message['event_ids'];
       // Only events the phone currently reports as active can be acknowledged.
@@ -183,12 +195,19 @@ class WearableGateway {
     }
   }
 
+  void _setBackground(Object? value) {
+    if (value is! String || value.isEmpty || value == _watchBackground) return;
+    _watchBackground = value;
+    onWatchState?.call(value);
+  }
+
   Future<void> alert({
     required String id,
     required String reason,
     required int occurredUs,
     required bool event,
     String? recommendation,
+    String? kind,
   }) async {
     final age = nowUs() - occurredUs;
     if (!synchronized || age < 0 || age >= 2000000) return;
@@ -196,6 +215,7 @@ class WearableGateway {
       ..._envelope('alert'),
       if (event) 'event_id': id else 'recommendation_id': id,
       'reason': reason,
+      'alarm': ?kind,
       'recommendation': ?recommendation,
       'occurred_us': occurredUs,
       'ttl_ms': 2000,

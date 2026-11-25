@@ -48,6 +48,9 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         eventChannel = FlutterEventChannel(name: "nscontrol/events", binaryMessenger: messenger)
         eventChannel.setStreamHandler(self)
         channel.setMethodCallHandler { [weak self] call, result in self?.handle(call, result: result) }
+        // The trip speaks its calibration prompts on the same audio session
+        // the alarm takes and releases: the next phrase re-activates it.
+        alerts.onSessionChanged = { [weak self] in self?.speech.sessionTaken() }
         garmin = GarminBridge { [weak self] event in self?.emit(event) }
         watch?.delegate = self; watch?.activate()
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.willResignActiveNotification,
@@ -124,6 +127,20 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
                 garmin.connect(id: id) { value in self.finish(result, value) }
             } else {
                 transport = "watch_connectivity"; watch?.activate(); result(wearableStatus())
+            }
+        case "wearable.prepare":
+            // Trip start: launch the watch app into its background (workout) session,
+            // so alerts keep working after the watch screen turns off.
+            guard transport == "watch_connectivity", let watch, watch.activationState == .activated,
+                  watch.isPaired, watch.isWatchAppInstalled, HKHealthStore.isHealthDataAvailable() else {
+                result(["status": "unavailable"]); return
+            }
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .other
+            configuration.locationType = .unknown
+            health.startWatchApp(with: configuration) { success, error in
+                self.finish(result, success ? ["status": "launched"]
+                    : ["status": "error", "reason": error?.localizedDescription ?? "startWatchApp failed"])
             }
         case "wearable.send":
             guard let message = args["message"] as? [String: Any] else { result(["status": "error", "reason": "Missing message"]); return }
@@ -280,12 +297,17 @@ final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
         synthesizer.stopSpeaking(at: .immediate)
         guard active else { return }
         active = false
-        // The lab never runs together with a trip, so no alarm is playing here.
+        // Only the lab calls stop; it never runs together with a trip, so no
+        // alarm is playing here.
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
+    /// The phone alarm changed the shared audio session (category or active
+    /// state); the next phrase sets it up again.
+    func sessionTaken() { active = false }
 }
 
 final class PhoneAlert {
+    var onSessionChanged: (() -> Void)?
     private var player: AVAudioPlayer?
     private var vibration: Timer?
     private var testStop: DispatchWorkItem?
@@ -293,6 +315,7 @@ final class PhoneAlert {
         guard volume.isFinite && volume >= 0 && volume <= 1 else { throw NSError(domain: "NSControl", code: 1, userInfo: [NSLocalizedDescriptionKey: "Volume must be in 0…1"]) }
         stop()
         let session = AVAudioSession.sharedInstance()
+        onSessionChanged?()
         try session.setCategory(.playback, mode: .default, options: [.duckOthers]); try session.setActive(true)
         let audio = try AVAudioPlayer(data: Self.wave())
         audio.numberOfLoops = -1; audio.volume = volume; audio.prepareToPlay()
@@ -311,6 +334,7 @@ final class PhoneAlert {
         testStop?.cancel(); testStop = nil; vibration?.invalidate(); vibration = nil
         player?.stop(); player = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        onSessionChanged?()
     }
     private static func wave() -> Data {
         var data = Data()

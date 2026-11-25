@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/data/trip_repository.dart';
 import 'package:nscontrol/logic/domain.dart';
 import 'package:nscontrol/services/camera_service.dart';
+import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/services/detector.dart';
+import 'package:nscontrol/services/lab_recorder.dart';
+import 'package:nscontrol/services/mlkit_signals.dart';
 import 'package:nscontrol/services/platform_bridge.dart';
 import 'package:nscontrol/services/trip_controller.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
@@ -29,11 +33,20 @@ class ControllerTestPlatform extends PlatformBridge {
   Completer<void>? pendingAlert;
   @override
   Stream<Map<String, Object?>> get events => const Stream.empty();
+  final calls = <(String, Map<String, Object?>?)>[];
   @override
   Future<Map<String, Object?>> call(
     String method, [
     Map<String, Object?>? arguments,
-  ]) async => {'status': 'ok'};
+  ]) async {
+    calls.add((method, arguments));
+    return {'status': 'ok'};
+  }
+
+  List<String> get spoken => [
+    for (final (m, a) in calls)
+      if (m == 'speech.say') a!['text'] as String,
+  ];
   @override
   Future<void> alert({required double volume, required bool vibrate}) async {
     alertCalls++;
@@ -93,6 +106,29 @@ class ControllerTestCamera extends CameraService {
     stops++;
     pipeline.end();
   }
+}
+
+/// An ML Kit face: [yaw] is the view angle of the camera (a vent mount
+/// turned to the driver), [pitch] a nod down.
+DetectedFace mlKitFace({
+  double yaw = 0,
+  double pitch = 0,
+  double eyes = .9,
+  int id = 7,
+}) {
+  final s = MlKitSignals.from(
+    trackingId: id,
+    leftEyeOpen: eyes,
+    rightEyeOpen: eyes,
+    eulerX: -pitch,
+    eulerY: yaw,
+    eulerZ: 0,
+  );
+  return DetectedFace(
+    s.toMeasurement(),
+    const Rect.fromLTWH(0, 0, 100, 100),
+    signals: s,
+  );
 }
 
 CalibrationProfile testProfile() => CalibrationProfile(
@@ -547,5 +583,118 @@ void main() {
       }),
       'Приложение NSControl не установлено на часах',
     );
+  });
+  group('trip calibration', () {
+    /// Calibrates on [make] frames for 10.2 s and finishes the window.
+    void calibrateOn(DetectedFace Function() make) {
+      trip.clock.stop();
+      final base = trip.clock.elapsedMicroseconds;
+      camera.onFaces([make()], base, base);
+      trip.confirmFace(7);
+      final start = trip.calibrationStartUs;
+      for (var t = start; t <= start + 10200000; t += 33000) {
+        camera.onFaces([make()], t, t + 20000);
+      }
+      trip.finishCalibration(start + 10300000);
+    }
+
+    /// Frames of the observing session for [seconds].
+    void observe(double seconds, DetectedFace Function() make) {
+      final base = trip.sessionBaseUs;
+      final from = (trip.snapshot?.head.lastUsableUs ?? 0) + 33000;
+      for (var t = from; t <= from + (seconds * 1000000).round(); t += 33000) {
+        camera.onFaces([make()], base + t, base + t + 20000);
+      }
+    }
+
+    test('passes on a vent mount at 38°, head only, said once', () {
+      calibrateOn(() => mlKitFace(yaw: 38));
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.calibration!.neutralYaw, closeTo(38, 1e-6));
+      expect(trip.calibration!.hiddenEyes, isTrue);
+      // The automata run on road-relative angles.
+      expect(trip.engineCalibration!.neutralYaw, 0);
+      expect(trip.engine!.calibration.neutralYaw, 0);
+      expect(trip.calibrationNote, contains('глаза не оцениваются'));
+      expect(platform.spoken, [
+        'Смотрите на дорогу, как обычно',
+        'Глаза под таким углом не видно, слежу за головой',
+      ]);
+      // Closed eyes beyond the eye limit raise nothing; a nod relative to
+      // the road does.
+      observe(3, () => mlKitFace(yaw: 38, eyes: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNull);
+      expect(trip.snapshot!.eyes.available, isFalse);
+      expect(trip.snapshot!.head.activeEvent, isNull);
+      observe(2.5, () => mlKitFace(yaw: 38, pitch: 40));
+      expect(trip.snapshot!.head.activeEvent, isNotNull);
+    });
+
+    test('in front the eyes stay with the ТЗ thresholds', () {
+      calibrateOn(() => mlKitFace(yaw: 2));
+      expect(trip.calibration!.hiddenEyes, isFalse);
+      expect(trip.calibrationNote, isNull);
+      expect(platform.spoken, ['Смотрите на дорогу, как обычно']);
+      observe(2, () => mlKitFace(yaw: 2, eyes: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+    });
+
+    test('records the trip to JSONL when the option is on', () async {
+      final dir = await Directory.systemTemp.createTemp('trip');
+      addTearDown(() => dir.delete(recursive: true));
+      await trip.finish();
+      trip
+        ..recorder = LabRecorder(dir)
+        ..recordTrips = true
+        ..mountPosition = 'vent_left';
+      await trip.start();
+      expect(trip.recording, isTrue);
+      calibrateOn(() => mlKitFace(yaw: 38));
+      observe(1, () => mlKitFace(yaw: 38));
+      observe(2.5, () => mlKitFace(yaw: 38, pitch: 40));
+      expect(trip.snapshot!.head.activeEvent, isNotNull);
+      observe(1.5, () => mlKitFace(yaw: 38));
+      expect(trip.snapshot!.head.activeEvent, isNull);
+      await trip.finish();
+      expect(trip.recording, isFalse);
+
+      final files = await LabRecorder(dir).list();
+      expect(files.single.path, contains('nscontrol-trip-'));
+      final text = await files.single.readAsString();
+      final reader = RecordingReader.parse(text);
+      expect(reader.meta['source'], 'trip');
+      expect(reader.meta['mount'], {'position': 'vent_left'});
+      expect(reader.meta['attentionSettings']['mountRelative'], isTrue);
+      expect(reader.meta['engines'], ['mlkit_face_detection']);
+      final calibration = reader.ofType('calibration').single;
+      expect(calibration['zones']['mountRelative'], isTrue);
+      expect(calibration['sessionOffsetUs'], isA<int>());
+      expect(reader.ofType('frame').length, greaterThan(300));
+      expect(reader.ofType('derived'), isNotEmpty);
+      expect(reader.ofType('label'), isEmpty);
+      final events = reader.ofType('event').toList();
+      expect(events.first['event']['type'], 'head_pitch_down');
+      expect(events.map((e) => e['change']), contains('ended'));
+      // The replay reads it like a lab recording.
+      final recording = Recording.parse(text);
+      expect(
+        recording.calibrations.single.profile!.neutralYaw,
+        closeTo(38, 1e-6),
+      );
+    });
+
+    test('«ТЗ 2.2 (эталон)» keeps the strict calibration', () {
+      trip.tzReference = true;
+      calibrateOn(() => mlKitFace(yaw: 38));
+      expect(trip.phase, TripPhase.findingFace);
+      expect(trip.error, isNotNull);
+      expect(platform.spoken, isEmpty);
+
+      calibrateOn(() => mlKitFace(yaw: 2));
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.engine!.calibration.neutralYaw, closeTo(2, 1e-6));
+      observe(2, () => mlKitFace(yaw: 2, eyes: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+    });
   });
 }

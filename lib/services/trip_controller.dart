@@ -4,9 +4,12 @@ import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import '../data/trip_repository.dart';
 import '../logic/domain.dart';
+import '../logic/attention_zones.dart';
+import '../logic/mount.dart';
 import '../version.dart';
 import 'camera_service.dart';
 import 'detector.dart';
+import 'lab_recorder.dart';
 import 'platform_bridge.dart';
 import 'wearable_gateway.dart';
 
@@ -50,6 +53,7 @@ class TripController extends ChangeNotifier {
       onDelivery: _delivery,
       onVitals: _onVitals,
       onUserAck: (ids) => acknowledge(ids.toSet(), fromWatch: true),
+      onWatchState: (_) => _notify(),
     );
     _timer = Timer.periodic(const Duration(milliseconds: 50), (_) => _tick());
     _platformEvents = platform.events.listen(
@@ -72,6 +76,39 @@ class TripController extends ChangeNotifier {
   CalibrationProfile? calibration;
   CalibrationCollector? _collector;
   ObservationEngine? engine;
+
+  /// Developer option «ТЗ 2.2 (эталон)»: the strict ТЗ calibration (head
+  /// turned to the camera within the engine's eye limit) and camera-frame
+  /// angles. Off by default: the trip calibrates on any mount the way the
+  /// lab does for a side mount (attention-method.md § 9) — the road pose is
+  /// whatever the driver looks at while driving, head angles are taken
+  /// relative to it (`R_cal⁻¹ · R`), the eyes only within the engine's view.
+  bool tzReference = false;
+  MountCalibrationCollector? _mountCollector;
+
+  /// Road pose of the session (mount mode), null for the ТЗ reference.
+  RoadFrame? _road;
+
+  /// The profile and settings the automata and the fatigue monitor run on:
+  /// the road-frame profile in mount mode, [calibration] itself otherwise.
+  CalibrationProfile? engineCalibration;
+  AlgorithmSettings? _engineSettings;
+
+  /// Shown under the trip status after a calibration with a restriction
+  /// (FR-CAL-06: eyes out of the engine's view, head only).
+  String? calibrationNote;
+
+  /// Developer option «Записывать поездку»: the trip goes to a JSONL file
+  /// (schema 1, the lab's lines without prompts and labels) in the same
+  /// folder as the lab recordings, for offline analysis. Numbers only.
+  LabRecorder? recorder;
+  bool recordTrips = false;
+
+  /// Where the phone is mounted, for `meta.mount` (as in the lab).
+  String mountPosition = 'front';
+  String? recordingId;
+  int _recordBaseUs = 0, _lastDerivedUs = 0;
+  bool get recording => recorder?.active ?? false;
   TripPhase phase = TripPhase.idle;
   String? tripId, sessionId, lastFinishedTrip;
   String? error, alertError;
@@ -118,7 +155,11 @@ class TripController extends ChangeNotifier {
       (clock.elapsedMicroseconds - sessionBaseUs).clamp(0, 1 << 62);
   double get calibrationProgress =>
       ((clock.elapsedMicroseconds - _calibrationStart) / 10000000).clamp(0, 1);
-  int get calibrationSamples => _collector?.usableFrames ?? 0;
+  int get calibrationSamples =>
+      _collector?.usableFrames ?? _mountCollector?.processedFrames ?? 0;
+
+  /// Mount mode: the calibration and the automata use road-relative angles.
+  bool get mountRelative => !tzReference;
   Future<void> get pendingWrites => _writes;
   Duration get drivingTime =>
       Duration(microseconds: drive.continuousUs(clock.elapsedMicroseconds));
@@ -187,7 +228,18 @@ class TripController extends ChangeNotifier {
       }),
     );
     onTripStarted?.call();
+    await _startRecording();
     phase = TripPhase.findingFace;
+    // The watch must learn about the trip before any alert: it starts its
+    // background session on a non-idle snapshot or on the launch below.
+    _pushWatchState();
+    unawaited(() async {
+      try {
+        await platform.call('wearable.prepare');
+      } catch (_) {
+        // Android/Garmin have no launch step; the watch status says the rest.
+      }
+    }());
     await _safe(() => platform.keepAwake(true));
     if (generation != _lifecycleGeneration || !active || !_foreground) return;
     _notify();
@@ -204,23 +256,68 @@ class TripController extends ChangeNotifier {
       return;
     }
     error = null;
+    calibrationNote = null;
     _calibrationStart = clock.elapsedMicroseconds;
-    _collector = CalibrationCollector(
-      trackingId: trackingId,
-      detector: detector.capabilities,
-      hiddenEyes: settings.hiddenEyes,
-      startedUs: _calibrationStart,
-    );
+    if (tzReference) {
+      _collector = CalibrationCollector(
+        trackingId: trackingId,
+        detector: detector.capabilities,
+        hiddenEyes: settings.hiddenEyes,
+        startedUs: _calibrationStart,
+      );
+    } else {
+      _mountCollector = MountCalibrationCollector(
+        trackingId: trackingId,
+        detector: detector.capabilities,
+        hiddenEyes: settings.hiddenEyes,
+        startedUs: _calibrationStart,
+      );
+      _say('Смотрите на дорогу, как обычно'); // FR-CAL-04
+    }
     phase = TripPhase.calibrating;
     _notify();
   }
 
+  @visibleForTesting
+  int get calibrationStartUs => _calibrationStart;
+
+  /// Voice prompt of the calibration; best effort, never an alert error.
+  void _say(String text) => unawaited(() async {
+    try {
+      await platform.call('speech.say', {'text': text});
+    } catch (_) {}
+  }());
+
+  /// The face's engine numbers; the ML Kit adapter always sets them.
+  static FaceSignals _signalsOf(DetectedFace f) =>
+      f.signals ??
+      FaceSignals(
+        engineId: '',
+        trackingId: f.measurement.trackingId,
+        headYawLeft: f.measurement.yaw,
+        headPitchDown: f.measurement.pitchDown,
+        headRollRight: f.measurement.roll,
+        eyeOpenLeft: f.measurement.leftEye,
+        eyeOpenRight: f.measurement.rightEye,
+      );
+
   void _onFaces(List<DetectedFace> result, int captured, int completed) {
     if (!active || !_foreground) return;
     faces = result;
-    final measurements = result.map((f) => f.measurement).toList();
+    final road = _road, profile = calibration;
+    final measurements = road != null && profile != null
+        ? [
+            for (final f in result)
+              mountMeasurement(_signalsOf(f), road: road, calibration: profile),
+          ]
+        : result.map((f) => f.measurement).toList();
+    _recordFrame(result, captured, completed);
     if (phase == TripPhase.calibrating) {
       _collector?.add(capturedUs: captured, faces: measurements);
+      _mountCollector?.add(
+        capturedUs: captured,
+        faces: result.map(_signalsOf).toList(),
+      );
     } else if (phase == TripPhase.observing && sessionId != null) {
       _apply(
         engine!.process(
@@ -231,6 +328,7 @@ class TripController extends ChangeNotifier {
         ),
       );
       _feedFatigue(measurements, captured - sessionBaseUs);
+      _recordDerived(completed);
       if (engine!.snapshot.requiresRecalibration) {
         unawaited(
           recalibrate(
@@ -244,7 +342,8 @@ class TripController extends ChangeNotifier {
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
-    final monitor = _fatigueMonitor, profile = calibration;
+    final monitor = _fatigueMonitor, profile = engineCalibration ?? calibration;
+    final settings = _engineSettings ?? this.settings;
     if (monitor == null || profile == null) return;
     final face =
         measured.length == 1 && measured.single.trackingId == profile.trackingId
@@ -310,7 +409,9 @@ class TripController extends ChangeNotifier {
   }
 
   FatigueMonitor _newFatigueMonitor() => FatigueMonitor(
-    eyeThreshold: settings.hiddenEyes ? null : calibration!.eyeThreshold,
+    eyeThreshold: (_engineSettings ?? settings).hiddenEyes
+        ? null
+        : calibration!.eyeThreshold,
     nodThreshold: settings.pitchThreshold * .6,
     eyesEventUs: settings.eyesClosedUs,
     headEventUs: settings.headDownUs,
@@ -390,6 +491,7 @@ class TripController extends ChangeNotifier {
             pending <= _calibrationStart + 10000000 &&
             now - pending > 300000) {
           _collector?.add(capturedUs: pending, faces: []);
+          _mountCollector?.add(capturedUs: pending, faces: []);
         }
         _finishCalibration(now);
       }
@@ -442,11 +544,26 @@ class TripController extends ChangeNotifier {
     if (phase == TripPhase.calibrating) _throttledNotify();
   }
 
+  /// Finishes the calibration window at [now]; the controller tick calls it
+  /// 10 s after the start. Exposed for tests.
+  @visibleForTesting
+  void finishCalibration(int now) => _finishCalibration(now);
+
   void _finishCalibration(int now) {
     _calibrationFinishing = true;
     try {
-      final result = _collector!.finish(nowUs: now);
+      final CalibrationResult result;
+      final mount = _mountCollector;
+      String? note;
+      if (mount != null) {
+        final r = mount.finish(nowUs: now);
+        result = r.result;
+        note = r.note;
+      } else {
+        result = _collector!.finish(nowUs: now);
+      }
       _collector = null;
+      _mountCollector = null;
       if (result.profile == null) {
         phase = TripPhase.findingFace;
         error = result.issues.join('\n');
@@ -454,7 +571,13 @@ class TripController extends ChangeNotifier {
         calibration = result.profile;
         final saved = calibration!.toJson();
         _write((db) => db.setSetting('calibration', saved));
+        if (note != null) {
+          // FR-CAL-06: a false eye alarm is worse than no eye tracking.
+          calibrationNote = note;
+          _say('Глаза под таким углом не видно, слежу за головой');
+        }
         _newSession();
+        _recordCalibration(now);
       }
     } catch (e) {
       phase = TripPhase.findingFace;
@@ -471,10 +594,20 @@ class TripController extends ChangeNotifier {
     sessionId = _ids.v4();
     sessionBaseUs = clock.elapsedMicroseconds;
     sessionStartedAt = DateTime.now().toUtc();
+    final profile = calibration!;
+    // Mount mode: the measurements carry road-frame angles, so the automata
+    // get the road-frame profile (neutral 0); eyes hidden by the mount turn
+    // the eye channel off like the ТЗ "hidden eyes" setting.
+    _road = mountRelative ? RoadFrame.fromProfile(profile) : null;
+    engineCalibration = mountRelative ? roadProfile(profile) : profile;
+    _engineSettings = AlgorithmSettings.fromJson({
+      ...settings.toJson(),
+      'hiddenEyes': settings.hiddenEyes || engineCalibration!.hiddenEyes,
+    });
     engine = ObservationEngine(
       sessionId: sessionId!,
-      calibration: calibration!,
-      settings: settings,
+      calibration: engineCalibration!,
+      settings: _engineSettings!,
     );
     _fatigueMonitor = _newFatigueMonitor();
     fatigue = FatigueSnapshot.empty;
@@ -482,7 +615,10 @@ class TripController extends ChangeNotifier {
       'id': sessionId,
       'trip_id': tripId,
       'started_at': sessionStartedAt!.toIso8601String(),
-      'settings_json': settings.toJson(),
+      'settings_json': {
+        ..._engineSettings!.toJson(),
+        if (mountRelative) 'mountRelative': true,
+      },
       'calibration_json': calibration!.toJson(),
       'detector_id': detector.capabilities.id,
       'detector_version': detector.capabilities.version,
@@ -499,7 +635,7 @@ class TripController extends ChangeNotifier {
         'at_us': 0,
         'state': 'unavailable',
         'available': 0,
-        'reason': channel == 'eyes' && settings.hiddenEyes
+        'reason': channel == 'eyes' && _engineSettings!.hiddenEyes
             ? 'hidden_eyes'
             : 'warming_up',
       };
@@ -521,6 +657,24 @@ class TripController extends ChangeNotifier {
     if (_audioRequested != shouldSound || update.started.isNotEmpty) {
       _audioRequested = shouldSound;
       _syncAudio(shouldSound);
+    }
+    if (recording) {
+      for (final (change, events) in [
+        ('started', update.started),
+        ('ended', update.ended),
+        ('acknowledged', update.acknowledged),
+      ]) {
+        for (final e in events) {
+          _record({
+            ...RecordingSchema.event(
+              change: change,
+              event: e,
+              atUs: _recUs(clock.elapsedMicroseconds),
+            ),
+            'sessionOffsetUs': _recUs(sessionBaseUs),
+          });
+        }
+      }
     }
     for (final event in [
       ...update.started,
@@ -574,6 +728,7 @@ class TripController extends ChangeNotifier {
                 : 'Продолжительный наклон головы — проверьте состояние',
             occurredUs: sessionBaseUs + event.thresholdUs,
             event: true,
+            kind: event.type == EventType.eyesClosed ? 'eyes' : 'head',
             recommendation: event.type == EventType.eyesClosed
                 ? recommendationText
                 : null,
@@ -631,6 +786,8 @@ class TripController extends ChangeNotifier {
     engine = null;
     sessionId = null;
     _collector = null;
+    _mountCollector = null;
+    _road = null;
     _fatigueMonitor = null;
     _audioRequested = false;
     _syncAudio(false);
@@ -664,6 +821,7 @@ class TripController extends ChangeNotifier {
     final id = tripId!;
     phase = TripPhase.idle;
     await _endSession(EventEndReason.tripEnded);
+    await _stopRecording();
     tripId = null;
     faces = [];
     await camera.stop();
@@ -800,6 +958,32 @@ class TripController extends ChangeNotifier {
     unawaited(wearable.snapshot());
   }
 
+  /// Sends a short test burst to the watch through the live protocol, so the
+  /// first pulse goes through the same TTL check as a real alert.
+  Future<bool> testWatch() async {
+    if (!wearable.synchronized) return false;
+    await wearable.alert(
+      id: 'test-${_ids.v4()}',
+      reason: 'Проверка вибрации',
+      occurredUs: clock.elapsedMicroseconds,
+      event: false,
+      kind: 'test',
+    );
+    return true;
+  }
+
+  /// Plain-language state of screen-off alerts on Apple Watch.
+  String? get watchBackgroundText => switch (wearable.watchBackground) {
+    'active' => 'Часы предупредят и при погасшем экране',
+    'starting' => 'Часы включают фоновый режим…',
+    'denied' =>
+      'Откройте NSControl на часах и разрешите тренировку, иначе при погасшем экране часы промолчат',
+    'failed' || 'unavailable' =>
+      'Фоновый режим часов не запустился. Держите приложение на часах открытым',
+    'off' => active ? 'Фоновый режим часов выключен' : null,
+    _ => null,
+  };
+
   void updateRecommendation(String text) {
     recommendationText = text;
     _pushWatchState();
@@ -871,7 +1055,7 @@ class TripController extends ChangeNotifier {
     return switch (detail['status']) {
       'connected' => 'Часы на связи',
       'disconnected' => 'Часы не на связи. Откройте NSControl на часах',
-      'unpaired' => 'Apple Watch не сопряжены. Для Garmin выберите часы ниже',
+      'unpaired' => 'Apple Watch не сопряжены с этим iPhone',
       'app_not_installed' => 'Приложение NSControl не установлено на часах',
       'connecting' => 'Подключение…',
       'unavailable' => 'Обмен с часами недоступен на этом устройстве',
@@ -934,9 +1118,141 @@ class TripController extends ChangeNotifier {
     _write((db) => db.upsertDelivery(row));
   }
 
+  // ---- recording (developer option) ----------------------------------------
+
+  int _recUs(int absUs) => absUs - _recordBaseUs;
+  void _record(Map<String, Object?> line) => recorder?.write(line);
+
+  static String _stamp(DateTime t) {
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${t.year}${two(t.month)}${two(t.day)}-'
+        '${two(t.hour)}${two(t.minute)}${two(t.second)}';
+  }
+
+  Future<void> _startRecording() async {
+    final target = recorder;
+    if (!recordTrips || target == null) return;
+    final started = DateTime.now();
+    final id = 'trip-${_stamp(started)}';
+    try {
+      await target.start(id);
+    } catch (e) {
+      alertError = 'Запись поездки не началась: $e';
+      return;
+    }
+    recordingId = id;
+    _recordBaseUs = clock.elapsedMicroseconds;
+    _lastDerivedUs = 0;
+    Map<String, Object?> device = const {};
+    try {
+      device = await platform
+          .call('device.info')
+          .timeout(const Duration(milliseconds: 500));
+    } catch (_) {}
+    _record(
+      RecordingSchema.meta(
+        recordingId: id,
+        app: appVersion,
+        engines: [detector.capabilities.id],
+        startedAt: started,
+        device: device['model'] as String?,
+        os: device['os'] as String?,
+        extra: {
+          'source': 'trip',
+          'tripId': tripId,
+          'attention': 'trip',
+          'attentionSettings': AttentionSettings(
+            mountRelative: mountRelative,
+          ).toJson(),
+          'tzReference': tzReference,
+          'mount': {'position': mountPosition},
+          'algorithm': ObservationEngine.algorithmVersion,
+          'settings': settings.toJson(),
+        },
+      ),
+    );
+  }
+
+  Future<void> _stopRecording() async {
+    final target = recorder;
+    if (target == null || !target.active) return;
+    await target.stop();
+    recordingId = null;
+  }
+
+  /// The trip's calibration with the zones the replay needs: road-relative
+  /// with `mountRelative`. `sessionOffsetUs` converts the automata times of
+  /// the session (events) to the recording clock.
+  void _recordCalibration(int now) {
+    final profile = calibration;
+    if (!recording || profile == null) return;
+    final zones = ZoneMap.fromCalibration(profile);
+    _record({
+      ...RecordingSchema.calibration(
+        atUs: _recUs(now),
+        profile: profile,
+        zones:
+            (mountRelative
+                    ? zones.withMount(
+                        roadHeadRoll: profile.neutralRoll,
+                        engineId: profile.detector.id,
+                      )
+                    : zones)
+                .toJson(),
+      ),
+      'sessionOffsetUs': _recUs(sessionBaseUs),
+    });
+  }
+
+  void _recordFrame(List<DetectedFace> result, int captured, int completed) {
+    if (!recording) return;
+    final id = calibration?.trackingId;
+    final driver = result.isEmpty
+        ? null
+        : result
+                  .where((f) => id != null && f.measurement.trackingId == id)
+                  .firstOrNull ??
+              result.first;
+    _record({
+      ...RecordingSchema.frame(
+        engine: detector.capabilities.id,
+        capturedUs: _recUs(captured),
+        completedUs: _recUs(completed),
+        faceCount: result.length,
+        signals: driver == null ? null : _signalsOf(driver),
+      ),
+      if (result.length > 1)
+        'others': [
+          for (final f in result)
+            if (!identical(f, driver)) _signalsOf(f).toJson(),
+        ],
+    });
+  }
+
+  /// 10 per second, as in the lab.
+  void _recordDerived(int completed) {
+    final current = engine?.snapshot;
+    if (!recording || current == null) return;
+    if (completed - _lastDerivedUs < 100000 && completed >= _lastDerivedUs) {
+      return;
+    }
+    _lastDerivedUs = completed;
+    _record(
+      RecordingSchema.derived(
+        atUs: _recUs(completed),
+        zone: GazeZone.unknown,
+        eyes: current.eyes,
+        head: current.head,
+        fatigue: fatigue,
+        extra: {'sessionOffsetUs': _recUs(sessionBaseUs)},
+      ),
+    );
+  }
+
   @override
   void dispose() {
     _disposed = true;
+    unawaited(recorder?.stop());
     _timer?.cancel();
     unawaited(_platformEvents?.cancel());
     camera.pipeline.end();

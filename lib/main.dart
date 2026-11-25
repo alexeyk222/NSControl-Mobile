@@ -10,6 +10,7 @@ import 'logic/domain.dart';
 import 'services/detector.dart';
 import 'services/arkit_engine.dart';
 import 'services/lab_controller.dart';
+import 'services/lab_recorder.dart';
 import 'services/mlkit_detector.dart';
 import 'services/platform_bridge.dart';
 import 'services/sleep_controller.dart';
@@ -30,6 +31,8 @@ Future<void> main() async {
   var theme = ThemeMode.system;
   var incomplete = false;
   var developerMode = false;
+  var tzReference = false, recordTrips = false;
+  String? tripMount;
   try {
     db = await TripRepository.open();
     await db.recoverInterrupted();
@@ -42,18 +45,26 @@ Future<void> main() async {
         ThemeMode.values.where((t) => t.name == storedTheme).firstOrNull ??
         ThemeMode.system;
     developerMode = await db.getSetting('developer_mode') == true;
+    tzReference = await db.getSetting('trip_tz_reference') == true;
+    recordTrips = await db.getSetting('trip_recording') == true;
+    final mount = await db.getSetting('trip_mount');
+    if (mount is String) tripMount = mount;
   } catch (_) {
     incomplete = true;
   }
   final registry = DetectorRegistry({
     'mlkit_face_detection': MlKitDetector.new,
   });
-  final trip = TripController(
-    repository: db,
-    platform: const PlatformBridge(),
-    detector: registry.create('mlkit_face_detection'),
-    settings: settings,
-  );
+  final trip =
+      TripController(
+          repository: db,
+          platform: const PlatformBridge(),
+          detector: registry.create('mlkit_face_detection'),
+          settings: settings,
+        )
+        ..tzReference = tzReference
+        ..recordTrips = recordTrips
+        ..mountPosition = tripMount ?? 'front';
   trip.journalIncomplete = incomplete || db == null;
   final sleep = SleepController(trip: trip, platform: const PlatformBridge());
   await sleep.load();
@@ -64,6 +75,7 @@ Future<void> main() async {
   final recordings = documents == null
       ? null
       : Directory('${documents.path}/recordings');
+  if (recordings != null) trip.recorder = LabRecorder(recordings);
   runApp(
     NSControlApp(
       trip: trip,
