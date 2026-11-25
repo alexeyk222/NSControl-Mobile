@@ -360,6 +360,9 @@ class TripController extends ChangeNotifier {
     // background session on a non-idle snapshot or on the launch below.
     _pushWatchState();
     unawaited(() async {
+      // Launch only when the watch app is not already running in the
+      // background: no extra system work while the camera is starting.
+      if (wearable.watchBackground == 'active') return;
       try {
         await platform.call('wearable.prepare');
       } catch (_) {
@@ -1022,7 +1025,7 @@ class TripController extends ChangeNotifier {
     // One failed or timed-out send drops the handshake, and no new status
     // event arrives while the watch stays reachable: retry it here.
     if (_watchReachable &&
-        !wearable.connected &&
+        (!wearable.connected || wearable.awaitingReadyTooLong) &&
         now - _lastWatchConnectUs >= 5000000) {
       _lastWatchConnectUs = now;
       unawaited(wearable.connect());
