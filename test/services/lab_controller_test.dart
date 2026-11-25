@@ -396,9 +396,18 @@ void main() {
       final end = now + (seconds * 1000000).round();
       while (now < end) {
         now += 33000;
+        // During the mirror calibration the driver looks at the prompt.
+        final p = lab.prompt ?? '';
+        final yaw = p.contains('левое')
+            ? 38.0
+            : p.contains('правое')
+            ? -52.0
+            : p.contains('салонное')
+            ? -26.0
+            : 0.0;
         for (final (engine, f) in [
-          ('arkit_face_tracking', face()),
-          ('mlkit_face_detection', face(yaw: 8, pitch: 3, id: 7)),
+          ('arkit_face_tracking', face(yaw: yaw)),
+          ('mlkit_face_detection', face(yaw: yaw + 8, pitch: 3, id: 7)),
         ]) {
           compare.onResult!(
             FaceResult(
@@ -423,18 +432,36 @@ void main() {
     expect(ml!.$1.trackingId, 7);
     expect(ml.$1.neutralYaw - lab.calibration!.neutralYaw, closeTo(8, 1e-6));
     both(1);
+    // Mirrors: every engine gets its own regions from the same windows.
+    lab.calibrateMirrors();
+    both(20);
+    expect(lab.calibratingMirrors, isFalse);
     final file = await lab.stopRecording();
     final text = await file!.readAsString();
     final lines = RecordingReader.parse(text).ofType('calibration').toList();
     expect(lines.map((l) => l['engine']), [
       'arkit_face_tracking',
       'mlkit_face_detection',
+      'arkit_face_tracking',
+      'mlkit_face_detection',
     ]);
-    expect(lines.first['atUs'], lines.last['atUs']);
-    expect(lines.last['profile']['detector']['id'], 'mlkit_face_detection');
-    expect(lines.last['zones'], isNotNull);
+    expect(lines[0]['atUs'], lines[1]['atUs']);
+    expect(lines[1]['profile']['detector']['id'], 'mlkit_face_detection');
+    expect(lines[1]['zones'], isNotNull);
+    final mirrors = ZoneMap.fromJson(
+      (lines.last['zones'] as Map).cast<String, dynamic>(),
+    );
+    expect(mirrors.mirrorsCalibrated, isTrue);
+    expect(lab.otherCalibrations['mlkit_face_detection']!.$2, isNotNull);
+    final left = mirrors.headRegions.firstWhere(
+      (r) => r.zone == GazeZone.mirrorLeft,
+    );
+    // ML Kit's own glance, relative to its own road pose.
+    expect(left.left, closeTo(38, 3));
     final recording = Recording.parse(text);
     expect(recording.calibrations.map((c) => c.engineId), [
+      'arkit_face_tracking',
+      'mlkit_face_detection',
       'arkit_face_tracking',
       'mlkit_face_detection',
     ]);
