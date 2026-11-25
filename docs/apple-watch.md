@@ -45,7 +45,7 @@ open NSControlWatch.xcodeproj   # Signing: та же Personal Team, что у Ru
 3. Поставить приложение часов напрямую с Mac: Xcode → схема NSControlWatch → устройство Apple Watch → Run, или `xcrun devicectl device install app --device <UDID часов> <путь>/NSControlWatch.app`. Подпись та же Personal Team, что у Runner, bundle ID `org.nscontrol.nscontrol.watchkitapp`, `WKCompanionAppBundleIdentifier = org.nscontrol.nscontrol`.
 4. Открыть NSControl на часах, затем на iPhone. В «Сон и часы» должно появиться «Часы на связи» и «Обмен временем установлен».
 
-Именно так Xcode ставит часы при обычной разработке, и WatchConnectivity признаёт такую копию компаньоном по совпадающему bundle ID и команде. Если после шага 4 iPhone всё равно пишет «Приложение NSControl не установлено на часах», это ограничение бесплатного профиля для пары. Тогда нужен платный Apple Developer Program, обходного пути нет. Срок действия бесплатного профиля 7 дней на обоих устройствах, после этого переустановить оба приложения.
+Проверено 25.11.2026 на iPhone 11 + Apple Watch SE (watchOS 10.6.2) с Personal Team: после прямой установки часы на связи, и вибрация от действий телефона доходит. WatchConnectivity признаёт такую копию компаньоном по совпадающему bundle ID и команде, платный аккаунт для стенда не нужен. Срок действия бесплатного профиля 7 дней на обоих устройствах, после этого переустановить оба приложения.
 
 Для поставки (МК-01) приложение часов должно лежать внутри Runner.app (Embed Watch Content). Ставить его через приложение Watch можно только с платной подписью.
 
