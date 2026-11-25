@@ -43,6 +43,7 @@ class MlKitDetector implements FaceDetectorPort {
         eulerX: f.headEulerAngleX,
         eulerY: f.headEulerAngleY,
         eulerZ: f.headEulerAngleZ,
+        mirrored: frame.mirrored,
         box: MlKitSignals.boxOf(
           left: f.boundingBox.left,
           top: f.boundingBox.top,
@@ -51,6 +52,7 @@ class MlKitDetector implements FaceDetectorPort {
           imageWidth: frame.width,
           imageHeight: frame.height,
           rotation: frame.rotation,
+          mirrored: frame.mirrored,
         ),
       );
       // The ТЗ automata keep their input: the same five numbers as before.

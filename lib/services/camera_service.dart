@@ -138,7 +138,10 @@ class CameraService {
             _description!.sensorOrientation,
             controller!.value.deviceOrientation,
           )
-        : _description!.sensorOrientation;
+        // iOS: camera_avfoundation sets the video connection to the device
+        // orientation, so the frames arrive upright, and the ML Kit plugin
+        // builds an `.up` image from the bytes anyway. No turn is left.
+        : 0;
     frameWidth = image.width;
     frameHeight = image.height;
     frameRotation = rotation;
@@ -151,6 +154,8 @@ class CameraService {
           rotation: rotation,
           format: format,
           bytesPerRow: image.planes.single.bytesPerRow,
+          // The plugin mirrors the front camera on iOS (isVideoMirrored).
+          mirrored: Platform.isIOS,
         ),
         captured,
       ),

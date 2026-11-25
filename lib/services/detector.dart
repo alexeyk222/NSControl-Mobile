@@ -12,10 +12,15 @@ class VisionFrame {
     required this.rotation,
     required this.format,
     required this.bytesPerRow,
+    this.mirrored = false,
   });
   final Uint8List bytes;
   final int width, height, rotation, bytesPerRow;
   final PixelFormat format;
+
+  /// The pixels are already mirrored (iOS front camera: the camera plugin
+  /// sets `isVideoMirrored`). Adapters then undo the mirror in their signals.
+  final bool mirrored;
 }
 
 class DetectedFace {

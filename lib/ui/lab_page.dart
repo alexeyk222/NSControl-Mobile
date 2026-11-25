@@ -220,12 +220,22 @@ class _FacePainter extends CustomPainter {
     final sx = size.width / imageSize.width,
         sy = size.height / imageSize.height;
     for (final face in faces) {
-      var rect = Rect.fromLTRB(
-        face.bounds.left * sx,
-        face.bounds.top * sy,
-        face.bounds.right * sx,
-        face.bounds.bottom * sy,
-      );
+      // The contract box is normalized and unmirrored, whatever the engine's
+      // pixels were; raw bounds are a fallback for engines without it.
+      final box = face.signals?.box;
+      var rect = box != null
+          ? Rect.fromLTWH(
+              box.left * size.width,
+              box.top * size.height,
+              box.width * size.width,
+              box.height * size.height,
+            )
+          : Rect.fromLTRB(
+              face.bounds.left * sx,
+              face.bounds.top * sy,
+              face.bounds.right * sx,
+              face.bounds.bottom * sy,
+            );
       if (mirrored) {
         rect = Rect.fromLTRB(
           size.width - rect.right,

@@ -60,4 +60,35 @@ void main() {
       isNull,
     );
   });
+
+  test('a mirrored frame (iOS front camera) is turned back', () {
+    final s = MlKitSignals.from(
+      trackingId: 1,
+      leftEyeOpen: .1,
+      rightEyeOpen: .9,
+      eulerX: -10,
+      eulerY: -34,
+      eulerZ: 5,
+      mirrored: true,
+    );
+    // signs-v1 on iPhone 11: head to the driver's left gave Euler Y −34°.
+    expect(s.headYawLeft, 34);
+    expect(s.headPitchDown, 10);
+    expect(s.headRollRight, -5);
+    expect(s.eyeOpenLeft, .9);
+    expect(s.eyeOpenRight, .1);
+    final box = MlKitSignals.boxOf(
+      left: 48,
+      top: 64,
+      width: 240,
+      height: 320,
+      imageWidth: 480,
+      imageHeight: 640,
+      rotation: 0,
+      mirrored: true,
+    )!;
+    expect(box.left, closeTo(.4, 1e-9));
+    expect(box.top, .1);
+    expect(box.width, .5);
+  });
 }
