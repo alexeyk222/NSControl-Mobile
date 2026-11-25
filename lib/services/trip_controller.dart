@@ -10,6 +10,7 @@ import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
 import '../logic/mount.dart';
 import '../logic/replay.dart' show tzSignActive;
+import '../logic/thermal.dart';
 import '../version.dart';
 import 'arkit_engine.dart' show ArkitOptions, ArkitStats;
 import 'camera_service.dart';
@@ -125,6 +126,21 @@ class TripController extends ChangeNotifier {
 
   /// Latest `device` line of ARKit (thermal state, battery, frame rate).
   Map<String, Object?>? lastDevice;
+
+  /// Reaction to the phone's heat (FR-DRV-08), reset at each trip start.
+  HeatPolicy heat = HeatPolicy();
+  bool _arkitRestarting = false, _arkitRestartWanted = false;
+
+  /// The preview is on the screen: the user's option, off in economy.
+  bool get showPreview => settings.showPreview && heat.previewAllowed;
+
+  /// Heat state for the trip screen (docs/ux/copy.md `trip.heat.*`), null
+  /// when the phone is not hot.
+  String? get heatText => !active || !heat.economy
+      ? null
+      : heat.critical
+      ? 'Телефон перегрелся. Уберите от горячего обдува или солнца'
+      : 'Телефон нагрелся, экономлю';
 
   /// Capabilities of the engine in use.
   DetectorCapabilities get capabilities => engineInUse == TripEngine.arkit
@@ -299,6 +315,8 @@ class TripController extends ChangeNotifier {
     drive.reset();
     drive.active(clock.elapsedMicroseconds);
     fatigue = FatigueSnapshot.empty;
+    heat = HeatPolicy();
+    _arkitRestartWanted = false;
     final id = tripId!;
     _write(
       (db) => db.insertTrip({
@@ -347,9 +365,12 @@ class TripController extends ChangeNotifier {
   }
 
   /// ARKit options of the trip: 30 fps, the native preview only when the
-  /// screen shows it.
-  ArkitOptions _arkitOptionsNow() =>
-      ArkitOptions(fps: arkitFps, preview: settings.showPreview);
+  /// screen shows it, every n-th frame in economy (at least 10 a second).
+  ArkitOptions _arkitOptionsNow() => ArkitOptions(
+    fps: arkitFps,
+    preview: showPreview,
+    emitEvery: heat.emitEvery(arkitFps),
+  );
 
   bool get _cameraRunning => engineInUse == TripEngine.arkit
       ? _arkit?.running ?? false
@@ -406,11 +427,87 @@ class TripController extends ChangeNotifier {
     _onFaces(result.faces, result.capturedUs, result.completedUs);
   }
 
-  /// A `device` line of ARKit: kept for the screen and the recording.
+  /// A `device` line of ARKit: kept for the screen and the recording, and
+  /// the heat reaction (FR-DRV-08).
   void _onArkitStats(ArkitStats stats) {
     final line = stats.toJson();
     lastDevice = line;
     if (recording) _record({...line, 'atUs': _recUs(stats.atUs)});
+    if (!active) return;
+    final wasEconomy = heat.economy, wasReduced = heat.rateReduced;
+    final decision = heat.update(
+      atUs: stats.atUs,
+      thermal: stats.thermal,
+      sent: stats.sent,
+    );
+    if (decision.sayEconomy) {
+      _say('Телефон нагрелся. Продолжаю в экономном режиме');
+    }
+    if (decision.warnCritical) {
+      // Not the alarm: a short tone and a light vibration, never on top of
+      // an alarm that sounds (docs/ux/states.md S-12).
+      if (!_audioRequested) {
+        unawaited(
+          _safe(
+            () =>
+                platform.testAlert(volume: settings.volume * .6, vibrate: true),
+          ),
+        );
+      }
+      _say('Телефон перегрелся. Уберите его от горячего воздуха');
+    }
+    if (wasEconomy != heat.economy || wasReduced != heat.rateReduced) {
+      if (recording) {
+        _record({
+          'type': 'trip',
+          'atUs': _recUs(stats.atUs),
+          'heat': {
+            'thermal': heat.thermal,
+            'economy': heat.economy,
+            'emitEvery': heat.emitEvery(arkitFps),
+            'floorHit': heat.floorHit,
+          },
+        });
+      }
+      _notify();
+    }
+    _wantArkitOptions();
+  }
+
+  /// Asks for an ARKit restart when the wanted options differ from the
+  /// running ones; the tick does it at a quiet moment.
+  void _wantArkitOptions() {
+    final running = arkitOptions;
+    if (running == null || engineInUse != TripEngine.arkit) return;
+    final next = _arkitOptionsNow();
+    _arkitRestartWanted =
+        next.emitEvery != running.emitEvery || next.preview != running.preview;
+  }
+
+  /// A restart drops ARKit for a moment, so not during the calibration and
+  /// not while an automaton has a sign or an event.
+  bool get _quietForRestart {
+    if (phase == TripPhase.calibrating) return false;
+    final current = snapshot;
+    return current == null ||
+        (!tzSignActive(current) && current.activeEvents.isEmpty);
+  }
+
+  Future<void> _restartArkit() async {
+    _arkitRestartWanted = false;
+    _arkitRestarting = true;
+    try {
+      final old = _arkit;
+      _arkit = null;
+      arkitOptions = null;
+      if (old != null) await old.dispose();
+      heat.restarted();
+      if (active && _foreground && engineInUse == TripEngine.arkit) {
+        await _startCamera();
+      }
+    } finally {
+      _arkitRestarting = false;
+    }
   }
 
   /// Completed analyses of the engine in use with completion time in
@@ -662,6 +759,9 @@ class TripController extends ChangeNotifier {
     _notify();
   }
 
+  @visibleForTesting
+  void tick() => _tick();
+
   void _tick() {
     if (_disposed) return;
     final now = clock.elapsedMicroseconds;
@@ -736,9 +836,18 @@ class TripController extends ChangeNotifier {
         !_cameraRunning &&
         !cameraPermissionBlocked &&
         !_cameraFailureBusy &&
+        !_arkitRestarting &&
         now - _lastReconnectUs >= 2000000) {
       _lastReconnectUs = now;
       unawaited(_startCamera());
+    }
+    if (_arkitRestartWanted &&
+        !_arkitRestarting &&
+        active &&
+        _foreground &&
+        _arkit != null &&
+        _quietForRestart) {
+      unawaited(_restartArkit());
     }
     if (wearable.connected && now - _lastWatchSyncUs >= 10000000) {
       _lastWatchSyncUs = now;
@@ -1022,6 +1131,7 @@ class TripController extends ChangeNotifier {
 
   Future<void> changeSettings(AlgorithmSettings next) async {
     settings = next;
+    _wantArkitOptions();
     _write((db) => db.setSetting('algorithm', next.toJson()));
     if (active) {
       await recalibrate(

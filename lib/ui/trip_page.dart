@@ -201,8 +201,12 @@ class TripPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (trip.heatText != null) ...[
+            Notice(trip.heatText!),
+            const SizedBox(height: 12),
+          ],
           if (trip.preview() case final preview?)
-            if (trip.settings.showPreview)
+            if (trip.showPreview)
               ClipRRect(
                 borderRadius: BorderRadius.circular(16),
                 child: SizedBox(
@@ -219,7 +223,11 @@ class TripPage extends StatelessWidget {
                 ),
               )
             else
-              const Notice('Предпросмотр скрыт. Анализ камеры продолжается.')
+              Notice(
+                trip.settings.showPreview
+                    ? 'Превью скрыто, чтобы телефон меньше грелся. Анализ продолжается.'
+                    : 'Предпросмотр скрыт. Анализ камеры продолжается.',
+              )
           else
             Container(
               height: 170,
