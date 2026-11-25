@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../logic/domain.dart';
 import '../services/trip_controller.dart';
 import '../services/sleep_controller.dart';
+import 'calm_alarm.dart';
 import 'components.dart';
 import 'vigilance_card.dart';
 
@@ -58,7 +59,10 @@ class TripPage extends StatelessWidget {
         Notice(trip.alertError!, error: true),
         const SizedBox(height: 12),
       ],
-      if (trip.snapshot?.activeEvents.isNotEmpty ?? false) _warning(context),
+      CalmAlarm(
+        events: trip.snapshot?.activeEvents ?? const [],
+        builder: _warning,
+      ),
       LayoutBuilder(
         builder: (context, box) {
           final camera = _cameraCard(context);
@@ -177,9 +181,9 @@ class TripPage extends StatelessWidget {
     ),
   );
 
-  Widget _warning(BuildContext context) {
-    final events = trip.snapshot!.activeEvents;
+  Widget _warning(BuildContext context, List<ObservationEvent> events) {
     final ids = events.map((e) => e.id).toSet();
+    final unacknowledged = trip.snapshot?.hasUnacknowledgedAlert ?? false;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: Container(
@@ -216,11 +220,9 @@ class TripPage extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             FilledButton.tonal(
-              onPressed: trip.snapshot!.hasUnacknowledgedAlert
-                  ? () => trip.acknowledge(ids)
-                  : null,
+              onPressed: unacknowledged ? () => trip.acknowledge(ids) : null,
               child: Text(
-                trip.snapshot!.hasUnacknowledgedAlert
+                unacknowledged
                     ? 'Подтвердить · выключить сигнал'
                     : 'Сигнал подтверждён',
               ),
