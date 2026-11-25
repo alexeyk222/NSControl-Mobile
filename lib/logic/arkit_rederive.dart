@@ -50,11 +50,28 @@ class ArkitRawRecording {
 
   /// The recording with every ARKit frame's signals recomputed from `raw`
   /// with [axes]; the recorded box is kept (the display size it needs is not
-  /// in `raw`). Other lines are unchanged.
+  /// in `raw`). The ARKit calibration line is converted to the new axes:
+  /// mirroring negates every left/right quantity and swapping exchanges the
+  /// eyes, both exactly. Other lines are unchanged.
   String rederive(ArkitAxes axes) {
+    var recorded = ArkitAxes.standard;
+    for (final line in lines) {
+      if (!line.contains('"axes"')) continue;
+      final json = jsonDecode(line) as Map<String, dynamic>;
+      if (_isArkitFrame(json) && (json['raw'] as Map)['axes'] is Map) {
+        recorded = ArkitAxes.fromJson(
+          Map<String, dynamic>.from((json['raw'] as Map)['axes'] as Map),
+        );
+        break;
+      }
+    }
     final out = StringBuffer();
     for (final line in lines) {
       final json = jsonDecode(line) as Map<String, dynamic>;
+      if (json['type'] == 'calibration') {
+        out.writeln(jsonEncode(_calibration(json, recorded, axes)));
+        continue;
+      }
       if (!_isArkitFrame(json)) {
         out.writeln(line);
         continue;
@@ -75,6 +92,45 @@ class ArkitRawRecording {
       out.writeln(jsonEncode(json));
     }
     return out.toString();
+  }
+
+  static Map<String, dynamic> _calibration(
+    Map<String, dynamic> json,
+    ArkitAxes recorded,
+    ArkitAxes axes,
+  ) {
+    final profile = json['profile'];
+    if (profile is! Map ||
+        (profile['detector'] as Map?)?['id'] != arkitCapabilities.id) {
+      return json;
+    }
+    final mirror = recorded.mirror != axes.mirror;
+    final swap = recorded.swapEyes != axes.swapEyes;
+    num? neg(Object? v) => v is num ? -v : null;
+    final p = Map<String, dynamic>.from(profile);
+    if (mirror) {
+      for (final key in ['neutralYaw', 'neutralRoll']) {
+        if (p[key] is num) p[key] = neg(p[key]);
+      }
+    }
+    if (swap) {
+      final l = p['leftEyeMedian'];
+      p['leftEyeMedian'] = p['rightEyeMedian'];
+      p['rightEyeMedian'] = l;
+    }
+    final result = {...json, 'profile': p};
+    final road = (json['zones'] as Map?)?['road'];
+    if (mirror && road is Map) {
+      result['zones'] = {
+        ...(json['zones'] as Map),
+        'road': {
+          ...road,
+          for (final key in ['headLeft', 'gazeLeft'])
+            if (road[key] is num) key: neg(road[key]),
+        },
+      };
+    }
+    return result;
   }
 
   /// Markdown with medians over tracked ARKit frames.
