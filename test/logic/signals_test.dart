@@ -15,6 +15,7 @@ void main() {
     eyeOpenLeft: .9,
     eyeOpenRight: .85,
     distanceM: .55,
+    box: FaceBox(left: .3, top: .2, width: .35, height: .45),
     blendshapes: {Blendshape.eyeBlinkLeft: .1, Blendshape.jawOpen: .02},
   );
 
@@ -63,6 +64,13 @@ void main() {
       throwsFormatException,
     );
     expect(() => FaceSignals.fromJson({'engine': ''}), throwsFormatException);
+    expect(
+      () => FaceSignals.fromJson({
+        'engine': 'x',
+        'box': {'left': .1, 'top': .1, 'width': 0, 'height': .2},
+      }),
+      throwsFormatException,
+    );
   });
 
   test('zones keep stable codes', () {

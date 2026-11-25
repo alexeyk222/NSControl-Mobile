@@ -9,6 +9,7 @@ class FatigueSnapshot {
     required this.eyeCoverage,
     required this.longBlinks,
     required this.nods,
+    this.yawns = 0,
     this.perclos,
     this.blinksPerMinute,
     this.meanBlinkMs,
@@ -36,11 +37,16 @@ class FatigueSnapshot {
   /// Share of the last 60 s covered by usable eye measurements.
   final double eyeCoverage;
 
+  /// Yawns (jawOpen held open) within the last 5 minutes. Information only:
+  /// it does not change [level], because ТЗ rules do not use yawns.
+  final int yawns;
+
   List<String> get signs => [
     if ((perclos ?? 0) >= FatigueMonitor.perclosModerate)
       'Глаза закрыты ${((perclos ?? 0) * 100).round()} % времени за минуту',
     if (longBlinks > 0) 'Долгие моргания за 5 мин: $longBlinks',
     if (nods > 0) 'Кратковременные кивки за 5 мин: $nods',
+    if (yawns > 0) 'Зевки за 5 мин: $yawns',
   ];
 
   Map<String, Object?> toJson() => {
@@ -50,6 +56,7 @@ class FatigueSnapshot {
     'mean_blink_ms': meanBlinkMs,
     'long_blinks_5m': longBlinks,
     'nods_5m': nods,
+    'yawns_5m': yawns,
     'eye_coverage': eyeCoverage,
   };
 }
@@ -77,6 +84,11 @@ class FatigueMonitor {
   static const perclosModerate = .08;
   static const perclosHigh = .15;
 
+  /// A yawn: jawOpen at or above [yawnJawOpen] for at least [minYawnUs].
+  /// Speech and laughter open the jaw less or for shorter.
+  static const yawnJawOpen = .5;
+  static const minYawnUs = 1000000;
+
   /// Closure threshold T from calibration; null in hidden-eyes mode.
   final double? eyeThreshold;
 
@@ -86,8 +98,8 @@ class FatigueMonitor {
 
   final List<_Sample> _eyes = [];
   final List<int> _blinkDurations = [], _blinkEnds = [];
-  final List<int> _longBlinks = [], _nods = [];
-  int? _closedSince, _nodSince;
+  final List<int> _longBlinks = [], _nods = [], _yawns = [];
+  int? _closedSince, _nodSince, _yawnSince;
   // In hidden-eyes mode only head trends exist; report "low" once the head
   // channel has been observed instead of staying unknown forever.
   bool _headSeen = false;
@@ -128,6 +140,19 @@ class FatigueMonitor {
 
   void headUnavailable() => _nodSince = null;
 
+  /// Mouth opening from the `jawOpen` blendshape (ARKit). Engines without it
+  /// never call this, and the yawn count stays 0.
+  void addMouth(int atUs, double jawOpen) {
+    if (jawOpen >= yawnJawOpen) {
+      _yawnSince ??= atUs;
+    } else if (_yawnSince != null) {
+      if (atUs - _yawnSince! >= minYawnUs) _yawns.add(atUs);
+      _yawnSince = null;
+    }
+  }
+
+  void mouthUnavailable() => _yawnSince = null;
+
   void _trim(int nowUs) {
     _eyes.removeWhere((s) => nowUs - s.atUs > windowUs);
     while (_blinkEnds.isNotEmpty && nowUs - _blinkEnds.first > windowUs) {
@@ -136,6 +161,7 @@ class FatigueMonitor {
     }
     _longBlinks.removeWhere((t) => nowUs - t > trendUs);
     _nods.removeWhere((t) => nowUs - t > trendUs);
+    _yawns.removeWhere((t) => nowUs - t > trendUs);
   }
 
   FatigueSnapshot snapshot(int nowUs) {
@@ -173,6 +199,7 @@ class FatigueMonitor {
       meanBlinkMs: meanBlink,
       longBlinks: _longBlinks.length,
       nods: _nods.length,
+      yawns: _yawns.length,
       eyeCoverage: coverage,
     );
   }
