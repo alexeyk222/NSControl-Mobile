@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter_test/flutter_test.dart';
@@ -100,6 +101,33 @@ ArkitFaceRaw _raw(
   blendshapes: shapes,
 );
 
+List<double> _q(Vec3 axis, double degrees) {
+  final h = degrees * _rad / 2;
+  return [
+    math.cos(h),
+    axis.x * math.sin(h),
+    axis.y * math.sin(h),
+    axis.z * math.sin(h),
+  ];
+}
+
+List<double> _mul(List<double> a, List<double> b) => [
+  a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+  a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+  a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+  a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+];
+
+List<double> _inverse(List<double> q) => [q[0], -q[1], -q[2], -q[3]];
+
+/// Same rotation (q and −q are equal rotations).
+Matcher _sameRotation(List<double> expected) => predicate<List<double>>((q) {
+  final dot = [
+    for (var i = 0; i < 4; i++) q[i] * expected[i],
+  ].reduce((a, b) => a + b);
+  return (dot.abs() - 1).abs() < 1e-9;
+}, 'rotation $expected');
+
 void main() {
   // Apple's camera space: face in front at −z, portrait "up" along −x.
   final apple = _Rig(
@@ -181,6 +209,77 @@ void main() {
     expect(s.eyeGazeLeft, closeTo(-10, 1e-6));
     // Yaw and eye angles add exactly only without pitch.
     expect(s.gazeLeft, closeTo(-30, .2));
+  });
+
+  group('headRotation', () {
+    const left = Vec3(1, 0, 0), up = Vec3(0, 1, 0), toCamera = Vec3(0, 0, 1);
+    for (final (name, rig) in [('apple', apple), ('front', front)]) {
+      test('$name axes: identity when looking at the camera', () {
+        final q = arkitSignals(_raw(rig), gravityUp: rig.gravity).headRotation!;
+        expect(q, _sameRotation(const [1, 0, 0, 0]));
+        expect(q[0], greaterThan(0));
+      });
+
+      test('$name axes: yaw · pitch · roll about up, left, to camera', () {
+        final s = arkitSignals(
+          _raw(rig, yaw: 35, pitch: 15, roll: 10),
+          gravityUp: rig.gravity,
+        );
+        final expected = _mul(_q(up, 35), _mul(_q(left, 15), _q(toCamera, 10)));
+        expect(s.headRotation, _sameRotation(expected));
+        s.validate();
+      });
+    }
+
+    test('relative to a side calibration the nod is exact', () {
+      // Phone on the air vent: the road pose is 35° to the camera.
+      final cal = arkitSignals(
+        _raw(apple, yaw: 35),
+        gravityUp: apple.gravity,
+      ).headRotation!;
+      final nod = arkitSignals(
+        _raw(apple, yaw: 35, pitch: 20),
+        gravityUp: apple.gravity,
+      ).headRotation!;
+      expect(_mul(_inverse(cal), nod), _sameRotation(_q(left, 20)));
+    });
+
+    test('mirror flips yaw and roll, keeps pitch', () {
+      final s = arkitSignals(
+        _raw(apple, yaw: 20, pitch: 10, roll: 5),
+        gravityUp: apple.gravity,
+        axes: const ArkitAxes(mirror: true),
+      );
+      final expected = _mul(_q(up, -20), _mul(_q(left, 10), _q(toCamera, -5)));
+      expect(s.headRotation, _sameRotation(expected));
+    });
+
+    test('round-trips through JSON and rejects a non-unit quaternion', () {
+      final s = arkitSignals(_raw(apple, yaw: 30), gravityUp: apple.gravity);
+      final back = FaceSignals.fromJson(
+        jsonDecode(jsonEncode(s.toJson())) as Map<String, dynamic>,
+      );
+      expect(back.headRotation, s.headRotation);
+      expect(
+        () => FaceSignals(
+          engineId: 'x',
+          headRotation: const [1, 1, 0, 0],
+        ).validate(),
+        throwsFormatException,
+      );
+      expect(
+        () => FaceSignals(engineId: 'x', headRotation: const [1, 0]).validate(),
+        throwsFormatException,
+      );
+    });
+
+    test('untracked faces have no rotation', () {
+      final s = arkitSignals(
+        const ArkitFaceRaw(id: 1, tracked: false),
+        gravityUp: apple.gravity,
+      );
+      expect(s.headRotation, isNull);
+    });
   });
 
   test('eyelids: eyeOpen = 1 − eyeBlink, names follow the contract', () {

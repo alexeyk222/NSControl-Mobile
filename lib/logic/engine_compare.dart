@@ -87,6 +87,9 @@ class EngineComparison {
   static const reliableFalseClosed = .02;
   static const minBinFrames = 30;
 
+  /// Criterion 3 bins: 5° of yaw to the camera, the last one open-ended.
+  static const yawBin = 5, yawBins = 13;
+
   late final List<Episode> episodes = Episode.fromLabels(recording.labels);
 
   Episode? _episodeAt(int atUs) {
@@ -145,6 +148,7 @@ class EngineComparison {
       'Порог T и нейтральные углы — из калибровки каждого движка '
       '(из записи или пересчитанные по первым 10 с).',
     );
+    _mount(b);
     _criterion1(b);
     _criterion2(b);
     _criterion3(b);
@@ -152,6 +156,53 @@ class EngineComparison {
     _signs(b);
     _agreement(b);
     return b.toString();
+  }
+
+  /// Where the phone stands: the `mount` field of meta and the median head
+  /// pose to the camera while the driver looks at the road.
+  void _mount(StringBuffer b) {
+    b.writeln();
+    b.writeln('## Крепление');
+    b.writeln();
+    final mount = recording.meta['mount'];
+    b.writeln(
+      '- mount в meta: '
+      '${mount == null ? 'не записан' : (mount is String ? mount : jsonEncode(mount))}.',
+    );
+    b.writeln(
+      '- Медианы на шаге road относительно камеры. Поворот > 0 — голова '
+      'повёрнута влево от оси камеры, то есть телефон справа от водителя; '
+      '< 0 — слева.',
+    );
+    b.writeln();
+    b.writeln(
+      '| Движок | Кадров | Поворот к камере | Наклон вниз | Крен вправо | '
+      'Расстояние, м | Калибровка: поворот / наклон |',
+    );
+    b.writeln('|---|---|---|---|---|---|---|');
+    for (final engine in recording.engines) {
+      final road = [
+        for (final f in recording.frames)
+          if (f.engine == engine &&
+              f.signals != null &&
+              f.signals!.tracked &&
+              _episodeAt(f.capturedUs)?.step == 'road')
+            f.signals!,
+      ];
+      double? median(double? Function(FaceSignals s) v) {
+        final values = [for (final s in road) ?v(s)]..sort();
+        return _quantile(values, .5);
+      }
+
+      final p = _replays[engine]?.profile;
+      b.writeln(
+        '| $engine | ${road.length} | ${_f(median((s) => s.headYawLeft), 1)}° | '
+        '${_f(median((s) => s.headPitchDown), 1)}° | '
+        '${_f(median((s) => s.headRollRight), 1)}° | '
+        '${_f(median((s) => s.distanceM), 2)} | '
+        '${p == null ? '—' : '${_f(p.neutralYaw, 1)}° / ${_f(p.neutralPitch, 1)}°'} |',
+      );
+    }
   }
 
   // 1 and 2: events from the ТЗ automata, in both modes.
@@ -250,90 +301,129 @@ class EngineComparison {
     }
   }
 
-  // 3: yaw bins.
+  // 3: yaw to the camera, per eye.
   void _criterion3(StringBuffer b) {
     b.writeln();
     b.writeln('## 3. Рабочий диапазон поворота головы для век');
     b.writeln();
     b.writeln(
-      'Кадры шагов с поворотами головы и открытыми глазами (дорога, зеркала, '
-      'слепые зоны, перекрёсток, разговор), по модулю поворота относительно '
-      'калибровки. «Лицо» — '
-      'доля кадров с лицом, «веки» — с оценкой обоих глаз среди них, '
-      '«ложно < T» — оба глаза ниже T дольше моргания (0,4 с). Надёжной '
-      'считается полоса, где ложных '
-      'закрытий не больше ${_pctValue(reliableFalseClosed)} и кадров не меньше '
-      '$minBinFrames.',
+      'Кадры шагов, где глаза открыты и не смотрят вниз (дорога, зеркала, '
+      'слепые зоны, перекрёсток, разговор), по модулю поворота головы '
+      '**к камере** (headYawLeft как есть, без вычета калибровки): так '
+      'проверяет предел глаз ObservationEngine. Ближний глаз — тот, что '
+      'повёрнут к камере, дальний — тот, что уходит за нос (поворот влево → '
+      'дальний левый). «Оценён» — доля кадров с лицом, где у глаза есть '
+      'значение; «ложно < T» — глаз ниже T дольше моргания '
+      '(${blinkUs ~/ 1000} мс). Надёжная полоса: оценён не меньше 90 %, ложных '
+      'закрытий не больше ${_pctValue(reliableFalseClosed)}, кадров не меньше '
+      '$minBinFrames; полосы, где кадров меньше, пропускаются.',
     );
     for (final engine in recording.engines) {
       final r = _replays[engine];
       if (r == null) continue;
-      final profile = r.profile;
-      final t = profile.eyeThreshold;
+      final t = r.profile.eyeThreshold;
       final frames = recording.frames.where((f) => f.engine == engine).toList();
-      final long = _longClosures(frames, t);
-      final bins = <int, _Bin>{};
+      final longLeft = _longRuns(frames, t, (s) => s.eyeOpenLeft);
+      final longRight = _longRuns(frames, t, (s) => s.eyeOpenRight);
+      final bins = <int, _EyeBin>{};
+      var lost = 0;
       for (final f in frames) {
         final episode = _episodeAt(f.capturedUs);
         if (episode == null || !yawSteps.contains(episode.step)) continue;
         final s = f.signals;
         final yaw = s?.headYawLeft;
         if (f.faceCount == 0 || s == null || yaw == null || !s.tracked) {
-          // No face: counted in the bin of the step's last known yaw is not
-          // possible; keep a separate "no face" tally under bin −1.
-          (bins[-1] ??= _Bin()).frames++;
+          lost++;
           continue;
         }
-        final bin = ((yaw - profile.neutralYaw).abs() ~/ 10).clamp(0, 9);
-        final item = bins[bin] ??= _Bin();
-        item.frames++;
-        item.faces++;
-        final l = s.eyeOpenLeft, rr = s.eyeOpenRight;
-        if (l == null || rr == null) continue;
-        item.eyes++;
-        if (long.contains(f.capturedUs)) item.falseClosed++;
+        final bin = bins[(yaw.abs() ~/ yawBin).clamp(0, yawBins - 1)] ??=
+            _EyeBin();
+        bin.faces++;
+        if (yaw >= 0) bin.towardLeft++;
+        // Turned left: the left eye goes behind the nose.
+        final farLeft = yaw >= 0;
+        final far = farLeft ? s.eyeOpenLeft : s.eyeOpenRight;
+        final near = farLeft ? s.eyeOpenRight : s.eyeOpenLeft;
+        final farLong = (farLeft ? longLeft : longRight).contains(f.capturedUs);
+        final nearLong = (farLeft ? longRight : longLeft).contains(
+          f.capturedUs,
+        );
+        if (near != null) {
+          bin.near.eyes++;
+          if (nearLong) bin.near.falseClosed++;
+        }
+        if (far != null) {
+          bin.far.eyes++;
+          if (farLong) bin.far.falseClosed++;
+        }
       }
       b.writeln();
       b.writeln('**$engine** (T = ${_f(t, 2)}):');
       b.writeln();
-      b.writeln('| Поворот | Кадров | Веки | Ложно < T |');
-      b.writeln('|---|---|---|---|');
-      double? reliable;
-      var broken = false;
-      for (var i = 0; i < 10; i++) {
+      b.writeln(
+        '| Поворот к камере | Кадров с лицом | Влево | '
+        'Ближний: оценён · ложно < T | Дальний: оценён · ложно < T |',
+      );
+      b.writeln('|---|---|---|---|---|');
+      double? nearLimit, farLimit;
+      var nearBroken = false, farBroken = false;
+      for (var i = 0; i < yawBins; i++) {
         final bin = bins[i];
         if (bin == null) continue;
-        final label = i == 9 ? '≥ 90°' : '${i * 10}–${i * 10 + 10}°';
+        final label = i == yawBins - 1
+            ? '≥ ${i * yawBin}°'
+            : '${i * yawBin}–${(i + 1) * yawBin}°';
+        String eye(_Eye e) =>
+            '${_pct(e.eyes, bin.faces)} · ${_pct(e.falseClosed, e.eyes)}';
         b.writeln(
-          '| $label | ${bin.frames} | ${_pct(bin.eyes, bin.faces)} | '
-          '${_pct(bin.falseClosed, bin.eyes)} |',
+          '| $label | ${bin.faces} | ${_pct(bin.towardLeft, bin.faces)} | '
+          '${eye(bin.near)} | ${eye(bin.far)} |',
         );
-        final ok =
-            bin.eyes >= minBinFrames &&
-            bin.eyes >= .9 * bin.faces &&
-            bin.falseClosed <= reliableFalseClosed * bin.eyes;
-        if (!broken && ok) {
-          reliable = (i + 1) * 10.0;
-        } else if (bin.frames >= minBinFrames) {
-          broken = true;
+        bool ok(_Eye e) =>
+            e.eyes >= minBinFrames &&
+            e.eyes >= .9 * bin.faces &&
+            e.falseClosed <= reliableFalseClosed * e.eyes;
+        if (bin.faces >= minBinFrames) {
+          if (!nearBroken && ok(bin.near)) {
+            nearLimit = (i + 1) * yawBin.toDouble();
+          } else {
+            nearBroken = true;
+          }
+          if (!farBroken && ok(bin.far)) {
+            farLimit = (i + 1) * yawBin.toDouble();
+          } else {
+            farBroken = true;
+          }
         }
       }
-      final lost = bins[-1]?.frames ?? 0;
-      if (lost > 0) b.writeln('| без лица | $lost | — | — |');
+      if (lost > 0) b.writeln('| без лица | $lost | — | — | — |');
       b.writeln();
+      String limit(double? v) => v == null ? 'не набралось' : '≈ ${_f(v, 0)}°';
       b.writeln(
-        reliable == null
-            ? '- Надёжной полосы не набралось: мало кадров или много ложных закрытий.'
-            : '- Веки надёжны до |поворот| ≈ ${reliable.toStringAsFixed(0)}° '
-                  '(граница полосы 10°; для eyeYawLimit взять с запасом и '
-                  'проверить на второй записи).',
+        '- Ближний глаз надёжен до ${limit(nearLimit)}, дальний — до '
+        '${limit(farLimit)} (граница полосы $yawBin°).',
+      );
+      final both = nearLimit == null || farLimit == null
+          ? null
+          : math.min(nearLimit, farLimit);
+      b.writeln(
+        both == null
+            ? '- Оба глаза (ФТ-04 требует оба): полосы не набралось — мало '
+                  'кадров или много ложных закрытий.'
+            : '- Оба глаза (ФТ-04 требует оба) надёжны до |поворот к камере| '
+                  '≈ ${_f(both, 0)}°. Для eyeYawLimit взять с запасом и '
+                  'проверить на второй записи.',
       );
     }
   }
 
-  /// capturedUs of frames inside runs of "both eyes below [t]" that last
-  /// at least [blinkUs].
-  static Set<int> _longClosures(List<RecordedFrame> frames, double? t) {
+  /// capturedUs of frames inside runs where [value] stays below [t] for at
+  /// least [blinkUs].
+  static Set<int> _longRuns(
+    List<RecordedFrame> frames,
+    double? t,
+    double? Function(FaceSignals s) value,
+  ) {
     final result = <int>{};
     if (t == null) return result;
     final run = <int>[];
@@ -344,8 +434,8 @@ class EngineComparison {
 
     for (final f in frames) {
       final s = f.signals;
-      final l = s?.eyeOpenLeft, r = s?.eyeOpenRight;
-      if (s != null && s.tracked && l != null && r != null && l < t && r < t) {
+      final v = s == null || !s.tracked ? null : value(s);
+      if (v != null && v < t) {
         run.add(f.capturedUs);
       } else {
         flush();
@@ -682,8 +772,13 @@ class EngineComparison {
       f.faceCount > 0 && f.signals != null && f.signals!.tracked;
 }
 
-class _Bin {
-  int frames = 0, faces = 0, eyes = 0, falseClosed = 0;
+class _Eye {
+  int eyes = 0, falseClosed = 0;
+}
+
+class _EyeBin {
+  int faces = 0, towardLeft = 0;
+  final near = _Eye(), far = _Eye();
 }
 
 double? _pearson(List<double> x, List<double> y) {

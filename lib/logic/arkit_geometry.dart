@@ -276,6 +276,18 @@ FaceSignals arkitSignals(
         math.atan2(-eye.y, math.sqrt(eye.x * eye.x + eye.z * eye.z)) * _deg;
   }
 
+  // Exact pose: face axes in the upright camera-fixed head frame
+  // (+x driver's left, +y up, +z towards the camera). With [ArkitAxes.mirror]
+  // both the frame's and the face's left flip, which keeps it a rotation.
+  final leftSign = axes.mirror ? -1.0 : 1.0;
+  final hx = -frame.right, hy = frame.up, hz = -frame.toDriver;
+  Vec3 inHead(Vec3 v) => Vec3(v.dot(hx), v.dot(hy), v.dot(hz));
+  final headRotation = quaternionFromAxes(
+    inHead(faceX * leftSign),
+    inHead(faceY),
+    inHead(faceZ),
+  );
+
   final shapes = <String, double>{
     for (final e in raw.blendshapes.entries)
       contractBlendshapeName(e.key, swap: axes.swapEyes): _unit(e.value),
@@ -298,8 +310,53 @@ FaceSignals arkitSignals(
     eyeOpenLeft: blinkLeft == null ? null : 1 - blinkLeft,
     eyeOpenRight: blinkRight == null ? null : 1 - blinkRight,
     distanceM: distance.isFinite && distance > 0 ? distance : null,
+    headRotation: headRotation,
     blendshapes: Map.unmodifiable(shapes),
   );
+}
+
+/// Unit quaternion `[w, x, y, z]` (w ≥ 0) of the rotation whose matrix has
+/// columns [x], [y], [z]. The axes are re-orthonormalized from [z] and [y]
+/// first; null when they are degenerate.
+List<double>? quaternionFromAxes(Vec3 x, Vec3 y, Vec3 z) {
+  final c2 = z.unit;
+  final c0 = y.cross(c2).unit;
+  final c1 = c2.cross(c0);
+  if (c0.length < .5 || c2.length < .5 || c0.dot(x) <= 0) return null;
+  final m00 = c0.x, m01 = c1.x, m02 = c2.x;
+  final m10 = c0.y, m11 = c1.y, m12 = c2.y;
+  final m20 = c0.z, m21 = c1.z, m22 = c2.z;
+  final trace = m00 + m11 + m22;
+  double w, qx, qy, qz;
+  if (trace > 0) {
+    final s = math.sqrt(trace + 1) * 2;
+    w = s / 4;
+    qx = (m21 - m12) / s;
+    qy = (m02 - m20) / s;
+    qz = (m10 - m01) / s;
+  } else if (m00 > m11 && m00 > m22) {
+    final s = math.sqrt(1 + m00 - m11 - m22) * 2;
+    w = (m21 - m12) / s;
+    qx = s / 4;
+    qy = (m01 + m10) / s;
+    qz = (m02 + m20) / s;
+  } else if (m11 > m22) {
+    final s = math.sqrt(1 + m11 - m00 - m22) * 2;
+    w = (m02 - m20) / s;
+    qx = (m01 + m10) / s;
+    qy = s / 4;
+    qz = (m12 + m21) / s;
+  } else {
+    final s = math.sqrt(1 + m22 - m00 - m11) * 2;
+    w = (m10 - m01) / s;
+    qx = (m02 + m20) / s;
+    qy = (m12 + m21) / s;
+    qz = s / 4;
+  }
+  final sign = w < 0 ? -1 : 1;
+  final n = math.sqrt(w * w + qx * qx + qy * qy + qz * qz) * sign;
+  final q = [w / n, qx / n, qy / n, qz / n];
+  return q.every((v) => v.isFinite) ? List.unmodifiable(q) : null;
 }
 
 FaceBox? _box(
