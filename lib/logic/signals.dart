@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'face.dart';
 
 /// Engine-neutral per-face signals: the shared contract between the face
@@ -36,6 +38,7 @@ class FaceSignals {
     this.eyeOpenRight,
     this.distanceM,
     this.box,
+    this.headRotation,
     this.blendshapes = const {},
   });
 
@@ -58,6 +61,18 @@ class FaceSignals {
   /// Used to keep the driver's identity across tracking-id changes (ФТ-02,
   /// ФТ-03); null when the engine does not report it.
   final FaceBox? box;
+
+  /// Exact head pose as a unit quaternion `[w, x, y, z]`, for engines that
+  /// measure a full 3D pose (ARKit). The frame is fixed to the camera and
+  /// upright: +x the driver's left, +y up (the camera axis closest to
+  /// gravity), +z from the face towards the camera. The rotation maps the
+  /// face's axes (+x own left, +y up, +z out of the face) into that frame, so
+  /// a driver looking straight into the camera gives the identity, and a
+  /// positive rotation about +y / +x / +z is yaw left / pitch down / roll
+  /// right. Use it for poses relative to calibration, `R_cal⁻¹ · R`, which
+  /// stay exact when the camera sees the face from the side; Euler
+  /// differences do not. Null when the engine has no full pose (ML Kit).
+  final List<double>? headRotation;
   final Map<String, double> blendshapes;
 
   bool get hasGaze =>
@@ -101,6 +116,16 @@ class FaceSignals {
       throw FormatException('distance out of range: $distanceM');
     }
     box?.validate();
+    final q = headRotation;
+    if (q != null) {
+      if (q.length != 4 || q.any((v) => !v.isFinite)) {
+        throw FormatException('headRotation is not [w, x, y, z]: $q');
+      }
+      final norm = math.sqrt(q.fold<double>(0, (s, v) => s + v * v));
+      if ((norm - 1).abs() > .01) {
+        throw FormatException('headRotation is not a unit quaternion: $q');
+      }
+    }
   }
 
   Map<String, Object?> toJson() => {
@@ -118,6 +143,7 @@ class FaceSignals {
     if (eyeOpenRight != null) 'eyeOpenRight': eyeOpenRight,
     if (distanceM != null) 'distanceM': distanceM,
     if (box != null) 'box': box!.toJson(),
+    if (headRotation != null) 'headRotation': headRotation,
     if (blendshapes.isNotEmpty) 'blendshapes': blendshapes,
   };
 
@@ -141,6 +167,9 @@ class FaceSignals {
       box: json['box'] == null
           ? null
           : FaceBox.fromJson(Map<String, dynamic>.from(json['box'] as Map)),
+      headRotation: (json['headRotation'] as List?)
+          ?.map((v) => (v as num).toDouble())
+          .toList(growable: false),
       blendshapes: Map.unmodifiable({
         for (final e in shapes.entries) e.key: (e.value as num).toDouble(),
       }),

@@ -111,7 +111,9 @@ void main() {
         .split('\n')
         .firstWhere((l) => l.startsWith('| instruments |'));
     expect(RegExp(r'· \d+ / \d+').allMatches(instruments).length, 2);
-    expect(report, contains('Веки надёжны до |поворот| ≈ 60°'));
+    expect(report, contains('Оба глаза (ФТ-04 требует оба) надёжны до'));
+    expect(report, contains('## Крепление'));
+    expect(report, contains('mount в meta: не записан'));
     expect(report, contains('ML Kit на кадрах ARKit: проанализировано'));
     expect(report, contains('Мин. за окно 60 с'));
   });
@@ -123,6 +125,44 @@ void main() {
     expect(EngineComparison.perMinute(every100ms), [600, 600]);
     final gap = every100ms.where((t) => t < 30000000 || t >= 31000000);
     expect(EngineComparison.perMinute(gap.toList()), [590, 600]);
+  });
+
+  test('side mount: yaw to the camera and the far eye', () {
+    // The phone on the right air vent: every pose is 30° more to the left
+    // of the camera, and beyond 40° the far (left) eye reads as closed.
+    final lines = <String>[];
+    for (final line in const LineSplitter().convert(
+      SyntheticScenario(SyntheticStyle.arkit).toJsonl(),
+    )) {
+      final json = jsonDecode(line) as Map<String, dynamic>;
+      if (json['type'] == 'meta') json['mount'] = 'vent_right';
+      final s = json['signals'] as Map<String, dynamic>?;
+      if (json['type'] == 'frame' && s != null && s['headYawLeft'] != null) {
+        final yaw = (s['headYawLeft'] as num) + 30;
+        s['headYawLeft'] = yaw;
+        if (yaw > 40 && s['eyeOpenLeft'] != null) s['eyeOpenLeft'] = .1;
+      }
+      if (json['type'] == 'calibration') {
+        final profile = json['profile'] as Map<String, dynamic>?;
+        if (profile != null && profile['neutralYaw'] is num) {
+          profile['neutralYaw'] = (profile['neutralYaw'] as num) + 30;
+          // The lab records with a 45° eye limit (lab mode).
+          (profile['detector'] as Map<String, dynamic>)['eyeYawLimit'] = 45;
+        }
+      }
+      lines.add(jsonEncode(json));
+    }
+    final report = EngineComparison('${lines.join('\n')}\n').report();
+    expect(report, contains('mount в meta: vent_right'));
+    final road = report
+        .split('\n')
+        .firstWhere(
+          (l) => l.startsWith('| arkit_face_tracking | ') && l.contains('°'),
+        );
+    expect(road, contains('| 34,0° |'));
+    expect(report, contains('дальний — до ≈ 40°'));
+    expect(report, isNot(contains('Ближний глаз надёжен до ≈ 40°')));
+    expect(report, contains('надёжны до |поворот к камере| ≈ 40°'));
   });
 
   test('a scaled ML Kit frame is compared by its own size', () {
