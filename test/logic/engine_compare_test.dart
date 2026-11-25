@@ -160,7 +160,14 @@ void main() {
           (l) => l.startsWith('| arkit_face_tracking | ') && l.contains('°'),
         );
     expect(road, contains('| 34,0° |'));
-    expect(report, contains('дальний — до ≈ 40°'));
+    expect(report, contains('дальний — до ≈ 40° (граница'));
+    // The near eye never fails: its limit is where the data ends.
+    expect(
+      RegExp(
+        r'Ближний глаз надёжен до ≈ \d+° и дальше не проверен',
+      ).hasMatch(report),
+      isTrue,
+    );
     expect(report, isNot(contains('Ближний глаз надёжен до ≈ 40°')));
     expect(report, contains('надёжны до |поворот к камере| ≈ 40°'));
   });
