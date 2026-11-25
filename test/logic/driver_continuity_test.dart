@@ -149,6 +149,54 @@ void main() {
     expect(c.decision, ContinuityDecision.different);
   });
 
+  group('replacement of the participant (ПМИ)', () {
+    test('leaving through the frame edge is not taken back after 2 s', () {
+      final r = drive([
+        ...repeat(30, [face(1)]),
+        // The participant slides out to the left until the box crosses it.
+        for (var i = 1; i <= 10; i++) [face(1, cx: .5 - i * .04)],
+        ...repeat(30, []), // 2 s: the other participant sits down
+        ...repeat(15, [face(2)]),
+      ]);
+      expect(r.pipeline.continuity.decision, ContinuityDecision.different);
+      expect(r.engine.snapshot.requiresRecalibration, isTrue);
+    });
+
+    test('a hand over the face for 2 s, no second face: continues', () {
+      final r = drive([
+        ...repeat(30, [face(1)]),
+        ...repeat(30, []),
+        ...repeat(15, [face(2, cx: .48)]),
+      ]);
+      expect(r.pipeline.continuity.decision, ContinuityDecision.same);
+      expect(r.engine.snapshot.requiresRecalibration, isFalse);
+      expect(r.engine.snapshot.eyes.available, isTrue);
+    });
+
+    test('a second face stays while the selected one is covered: pause', () {
+      final r = drive([
+        ...repeat(30, [face(1)]),
+        ...repeat(15, [face(1), face(5, cx: .82, width: .25)]),
+        ...repeat(30, [face(5, cx: .82, width: .25)]),
+      ]);
+      expect(r.pipeline.continuity.decision, ContinuityDecision.different);
+      expect(r.engine.snapshot.requiresRecalibration, isTrue);
+    });
+
+    test('the edge rule needs the box to reach the edge', () {
+      final c = DriverContinuity(trackingId: 1);
+      c.resolve(0, [face(1, cx: .2)]); // left edge at 0.05
+      c.resolve(100000, []);
+      expect(c.leftFrame, isFalse);
+      expect(c.resolve(2000000, [face(2, cx: .22)]).single.trackingId, 1);
+      c.resolve(2100000, [face(2, cx: .16)]); // left edge at 0.01
+      c.resolve(2200000, []);
+      expect(c.leftFrame, isTrue);
+      c.resolve(3000000, [face(3, cx: .16)]);
+      expect(c.decision, ContinuityDecision.different);
+    });
+  });
+
   test('the decision is in the attention state', () {
     final p = AttentionPipeline(calibration: profile);
     expect(p.process(1000, [face(1)]).state.toJson()['driver'], 'same');
