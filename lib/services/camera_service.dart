@@ -41,6 +41,10 @@ class CameraService {
   CameraDescription? _description;
   int _generation = 0;
   bool _starting = false;
+
+  /// Size and rotation of the last frame offered to the detector (for the lab
+  /// overlay; frames themselves are never kept).
+  int? frameWidth, frameHeight, frameRotation;
   bool get running => controller?.value.isStreamingImages ?? false;
 
   Future<void> start() async {
@@ -135,6 +139,9 @@ class CameraService {
             controller!.value.deviceOrientation,
           )
         : _description!.sensorOrientation;
+    frameWidth = image.width;
+    frameHeight = image.height;
+    frameRotation = rotation;
     unawaited(
       pipeline.offer(
         VisionFrame(
