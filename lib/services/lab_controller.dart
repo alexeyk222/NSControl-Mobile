@@ -115,6 +115,32 @@ class LabController extends ChangeNotifier {
   String? recordingId;
   DateTime? recordingStartedAt;
   String subject = 'S1';
+
+  /// Where the phone is mounted, for the `meta.mount` field: `front`,
+  /// `vent_left` or `vent_right`, with the rough angle towards the driver
+  /// (degrees) and distance to the face (cm) when known.
+  String mountPosition = 'front';
+  int? mountAngleDeg, mountDistanceCm;
+
+  static const mountNames = {
+    'front': 'Прямо',
+    'vent_left': 'Решётка слева',
+    'vent_right': 'Решётка справа',
+  };
+
+  void setMount({String? position, int? angleDeg, int? distanceCm}) {
+    if (recording) return;
+    if (position != null) mountPosition = position;
+    mountAngleDeg = angleDeg ?? mountAngleDeg;
+    mountDistanceCm = distanceCm ?? mountDistanceCm;
+    _notify(force: true);
+  }
+
+  Map<String, Object?> get mount => {
+    'position': mountPosition,
+    'angleDeg': ?mountAngleDeg,
+    'distanceCm': ?mountDistanceCm,
+  };
   ScenarioRunner? scenario;
   Scenario? _pendingScenario;
   String? prompt;
@@ -141,8 +167,9 @@ class LabController extends ChangeNotifier {
     _newSession();
     _note(
       next.isAcceptance
-          ? 'Режим приёмки: только ТЗ'
-          : 'Режим Лаборатории: расширения включены',
+          ? 'Режим приёмки: только ТЗ (ракурс глаз до 18° — после новой калибровки)'
+          : 'Режим Лаборатории: расширения включены, ракурс глаз до 45° '
+                'для бокового крепления — после новой калибровки',
     );
   }
 
@@ -223,6 +250,7 @@ class LabController extends ChangeNotifier {
       'attention': attention.id,
       if (attentionSettings != null)
         'attentionSettings': attentionSettings!.toJson(),
+      'mount': mount,
       'algorithm': ObservationEngine.algorithmVersion,
       'settings': settings.toJson(),
     },
@@ -572,9 +600,29 @@ class LabController extends ChangeNotifier {
     _anchorFace = null;
     _collector = CalibrationCollector(
       trackingId: trackingId,
-      detector: source!.engines.first,
+      detector: calibrationDetector(source!.engines.first),
       hiddenEyes: settings.hiddenEyes,
       startedUs: atUs,
+    );
+  }
+
+  /// Eye-validity range for a side mount (phone on a vent, turned towards
+  /// the driver): a lab-mode extension. Acceptance keeps the engine's own
+  /// range (ML Kit 18°). The profile carries the range it was made with, so
+  /// the observation engine and the replay use the same one.
+  static const sideMountEyeYawLimit = 45.0;
+
+  DetectorCapabilities calibrationDetector(DetectorCapabilities engine) {
+    final settings = attentionSettings;
+    if (settings == null ||
+        settings.isAcceptance ||
+        engine.eyeYawLimit >= sideMountEyeYawLimit) {
+      return engine;
+    }
+    return DetectorCapabilities(
+      id: engine.id,
+      version: engine.version,
+      eyeYawLimit: sideMountEyeYawLimit,
     );
   }
 

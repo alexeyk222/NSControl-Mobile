@@ -294,6 +294,43 @@ class _Controls extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text('Движок: ${lab.option.title}'),
           ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SegmentedButton<String>(
+            segments: [
+              for (final e in LabController.mountNames.entries)
+                ButtonSegment(value: e.key, label: Text(e.value)),
+            ],
+            selected: {lab.mountPosition},
+            onSelectionChanged: lab.recording
+                ? null
+                : (value) => lab.setMount(position: value.single),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            children: [
+              Expanded(
+                child: _MountNumber(
+                  label: 'Угол к водителю, °',
+                  value: lab.mountAngleDeg,
+                  enabled: !lab.recording,
+                  onChanged: (v) => lab.setMount(angleDeg: v),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _MountNumber(
+                  label: 'До лица, см',
+                  value: lab.mountDistanceCm,
+                  enabled: !lab.recording,
+                  onChanged: (v) => lab.setMount(distanceCm: v),
+                ),
+              ),
+            ],
+          ),
+        ),
         if (lab.attentionSettings case final settings?)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
@@ -549,3 +586,25 @@ List<LabEngineOption> labEngineOptions(FaceDetectorPort Function() mlKit) => [
     create: () => CameraFaceSource(mlKit()),
   ),
 ];
+
+class _MountNumber extends StatelessWidget {
+  const _MountNumber({
+    required this.label,
+    required this.value,
+    required this.enabled,
+    required this.onChanged,
+  });
+  final String label;
+  final int? value;
+  final bool enabled;
+  final void Function(int?) onChanged;
+  @override
+  Widget build(BuildContext context) => TextFormField(
+    key: ValueKey(label),
+    initialValue: value?.toString() ?? '',
+    enabled: enabled,
+    keyboardType: TextInputType.number,
+    decoration: InputDecoration(labelText: label, isDense: true),
+    onChanged: (text) => onChanged(int.tryParse(text.trim())),
+  );
+}

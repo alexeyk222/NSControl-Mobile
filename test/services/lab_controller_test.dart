@@ -129,6 +129,7 @@ void main() {
 
   test('calibration, an eyes event and the recording file', () async {
     expect(lab.phase, LabPhase.uncalibrated);
+    lab.setMount(position: 'vent_left', angleDeg: 35, distanceCm: 55);
     await lab.startRecording();
     lab.calibrate();
     expect(lab.phase, LabPhase.calibrating);
@@ -151,6 +152,11 @@ void main() {
     expect(calibration['profile']['trackingId'], 1);
     expect(calibration['zones']['mirrorsCalibrated'], isFalse);
     expect(reader.meta['attentionSettings'], isNotNull);
+    expect(reader.meta['mount'], {
+      'position': 'vent_left',
+      'angleDeg': 35,
+      'distanceCm': 55,
+    });
     final signals = reader.signals().toList();
     expect(signals.length, greaterThan(400));
     expect(signals.first.eyeOpenLeft, .9);
@@ -295,5 +301,20 @@ void main() {
     ).ofType('calibration').toList();
     expect(calibrations.last['zones']['mirrorsCalibrated'], isTrue);
     expect(lab.notes.map((n) => n.text), contains('Зеркала откалиброваны'));
+  });
+
+  test('side mount: lab mode calibrates at 35°, acceptance does not', () async {
+    lab.calibrate();
+    run(10.5, () => face(yaw: 35));
+    expect(lab.calibration, isNotNull);
+    expect(lab.calibration!.detector.eyeYawLimit, 45);
+    run(2, () => face(yaw: 35, eyes: .05));
+    expect(lab.engine!.snapshot.eyes.activeEvent, isNotNull);
+
+    lab.setAttentionSettings(const AttentionSettings.acceptance());
+    lab.calibrate();
+    run(10.5, () => face(yaw: 35));
+    expect(lab.error, isNotNull);
+    expect(lab.notes.first.text, startsWith('Калибровка не удалась'));
   });
 }
