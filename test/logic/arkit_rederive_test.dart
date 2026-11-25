@@ -112,8 +112,8 @@ void main() {
     expect(row('Расстояние'), contains('| 0.50 |'));
   });
 
-  test('the iPhone default is mirrored', () {
+  test('the iPhone default is mirrored with swapped eyes', () {
     expect(ArkitAxes.device.mirror, isTrue);
-    expect(ArkitAxes.device.swapEyes, isFalse);
+    expect(ArkitAxes.device.swapEyes, isTrue);
   });
 }

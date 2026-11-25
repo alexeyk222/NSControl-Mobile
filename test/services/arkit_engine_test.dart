@@ -153,8 +153,9 @@ void main() {
       expect(box.top, closeTo(200 / 1280, 1e-12));
       expect(box.width, closeTo(300 / 720, 1e-12));
       expect(box.height, closeTo(400 / 1280, 1e-12));
-      expect(face.measurement.leftEye, closeTo(.95, 1e-12));
-      expect(face.measurement.rightEye, closeTo(.9, 1e-12));
+      // ArkitAxes.device swaps the eyes: eyeBlink_R is the driver's left.
+      expect(face.measurement.leftEye, closeTo(.9, 1e-12));
+      expect(face.measurement.rightEye, closeTo(.95, 1e-12));
       expect(face.measurement.hasHeadAngles, isTrue);
       expect(s.engine.display, (quarterTurns: 1, mirrored: false));
       expect(s.engine.axes.mirror, isTrue, reason: 'ArkitAxes.device');
