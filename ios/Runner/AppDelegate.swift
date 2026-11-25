@@ -250,19 +250,27 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
 }
 
 /// Voice prompts of the developer lab scenarios (Russian system voice).
-/// The audio session is taken only while a phrase is spoken and released with
-/// notifyOthersOnDeactivation afterwards, so other audio is not left ducked.
+/// The audio session is activated once, on the first phrase, and kept active
+/// until `speech.stop` (scenario cancelled or lab closed). Activating and
+/// deactivating it around every phrase stalled the camera for ~0.5 s after
+/// each prompt (bench-v1 20261126-001948: 67 gaps of 500–600 ms in both
+/// engines, all right after speech, none in silence). `.mixWithOthers`
+/// instead of `.duckOthers`, so keeping the session does not leave other
+/// audio ducked.
 final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
+    private var active = false
     override init() {
         super.init()
         synthesizer.delegate = self
     }
     func say(_ text: String) {
         guard !text.isEmpty else { return }
-        let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
-        try? session.setActive(true)
+        if !active {
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers])
+            active = (try? session.setActive(true)) != nil
+        }
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
@@ -270,16 +278,10 @@ final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
     }
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
-        release()
-    }
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { release() }
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { release() }
-    private func release() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.synthesizer.isSpeaking else { return }
-            // The lab never runs together with a trip, so no alarm is playing here.
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        }
+        guard active else { return }
+        active = false
+        // The lab never runs together with a trip, so no alarm is playing here.
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 }
 
