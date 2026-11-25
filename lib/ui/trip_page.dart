@@ -211,11 +211,12 @@ class TripPage extends StatelessWidget {
                   width: double.infinity,
                   child: ColoredBox(
                     color: Colors.black,
+                    // CameraPreview keeps the frame's own aspect ratio
+                    // (portrait on a phone held upright); an outer
+                    // AspectRatio with the controller's landscape ratio
+                    // squeezed it and stretched the face.
                     child: Center(
-                      child: AspectRatio(
-                        aspectRatio: trip.camera.controller!.value.aspectRatio,
-                        child: CameraPreview(trip.camera.controller!),
-                      ),
+                      child: CameraPreview(trip.camera.controller!),
                     ),
                   ),
                 ),
