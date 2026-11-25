@@ -30,6 +30,7 @@ Future<void> main() async {
   var theme = ThemeMode.system;
   var incomplete = false;
   var developerMode = false;
+  var tzReference = false;
   try {
     db = await TripRepository.open();
     await db.recoverInterrupted();
@@ -42,6 +43,7 @@ Future<void> main() async {
         ThemeMode.values.where((t) => t.name == storedTheme).firstOrNull ??
         ThemeMode.system;
     developerMode = await db.getSetting('developer_mode') == true;
+    tzReference = await db.getSetting('trip_tz_reference') == true;
   } catch (_) {
     incomplete = true;
   }
@@ -53,7 +55,7 @@ Future<void> main() async {
     platform: const PlatformBridge(),
     detector: registry.create('mlkit_face_detection'),
     settings: settings,
-  );
+  )..tzReference = tzReference;
   trip.journalIncomplete = incomplete || db == null;
   final sleep = SleepController(trip: trip, platform: const PlatformBridge());
   await sleep.load();

@@ -1152,34 +1152,25 @@ class AttentionPipeline {
   }
 
   FaceMeasurement _measurement(FaceSignals f, {required bool withEyes}) {
-    final m = f.toMeasurement();
     final road = this.road;
-    var eyes = withEyes;
-    double? yaw = m.yaw, pitch = m.pitchDown, roll = m.roll;
     if (road != null) {
-      // Eyes by the view of the camera (the far eye leaves the view), head
-      // angles relative to the road pose.
-      final view = f.headYawLeft;
-      eyes =
-          eyes &&
-          view != null &&
-          view.abs() <= calibration.detector.eyeYawLimit;
-      final head = road.head(f);
-      if (head == null) {
-        yaw = pitch = roll = null;
-      } else {
-        (yaw, pitch, roll) = head;
-      }
+      return mountMeasurement(
+        f,
+        road: road,
+        calibration: calibration,
+        withEyes: withEyes,
+      );
     }
-    if (eyes && road == null && m.trackingId != null) return m;
+    final m = f.toMeasurement();
+    if (withEyes && m.trackingId != null) return m;
     return FaceMeasurement(
       // Engines without face ids (one face only) inherit the calibrated id.
       trackingId: m.trackingId ?? calibration.trackingId,
-      leftEye: eyes ? m.leftEye : null,
-      rightEye: eyes ? m.rightEye : null,
-      pitchDown: pitch,
-      yaw: yaw,
-      roll: roll,
+      leftEye: withEyes ? m.leftEye : null,
+      rightEye: withEyes ? m.rightEye : null,
+      pitchDown: m.pitchDown,
+      yaw: m.yaw,
+      roll: m.roll,
     );
   }
 }
