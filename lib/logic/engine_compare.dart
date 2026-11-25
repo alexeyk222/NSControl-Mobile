@@ -398,10 +398,17 @@ class EngineComparison {
       }
       if (lost > 0) b.writeln('| без лица | $lost | — | — | — |');
       b.writeln();
-      String limit(double? v) => v == null ? 'не набралось' : '≈ ${_f(v, 0)}°';
+      // A limit that no failing bin ends is only where the data ends.
+      String limit(double? v, bool broken) => v == null
+          ? 'не набралось'
+          : broken
+          ? '≈ ${_f(v, 0)}°'
+          : '≈ ${_f(v, 0)}° и дальше не проверен (полос с $minBinFrames '
+                'кадрами больше нет)';
       b.writeln(
-        '- Ближний глаз надёжен до ${limit(nearLimit)}, дальний — до '
-        '${limit(farLimit)} (граница полосы $yawBin°).',
+        '- Ближний глаз надёжен до ${limit(nearLimit, nearBroken)}, '
+        'дальний — до ${limit(farLimit, farBroken)} (граница полосы '
+        '$yawBin°).',
       );
       final both = nearLimit == null || farLimit == null
           ? null
@@ -411,8 +418,9 @@ class EngineComparison {
             ? '- Оба глаза (ФТ-04 требует оба): полосы не набралось — мало '
                   'кадров или много ложных закрытий.'
             : '- Оба глаза (ФТ-04 требует оба) надёжны до |поворот к камере| '
-                  '≈ ${_f(both, 0)}°. Для eyeYawLimit взять с запасом и '
-                  'проверить на второй записи.',
+                  '≈ ${_f(both, 0)}°${nearBroken || farBroken ? '' : ', '
+                            'это нижняя оценка: отказа в данных нет'}. Для '
+                  'eyeYawLimit взять с запасом и проверить на второй записи.',
       );
     }
   }
