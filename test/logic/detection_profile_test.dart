@@ -238,6 +238,19 @@ void main() {
       expect(b.pitch, inInclusiveRange(1, 1.6));
     });
 
+    test('a drift past the cap is reported', () {
+      final a = RoadAdaptation(degPerMin: 3);
+      // The posture creeps 1°/min upward for 20 min: the cap is 10°.
+      for (var t = 0; t <= 1200000000; t += 100000) {
+        final drift = -t / 60e6;
+        a.observe(t, a.apply((0, drift, 0)));
+        if (t == 300000000) expect(a.atLimit, isFalse);
+      }
+      expect(a.pitch, -10);
+      expect(a.atLimit, isTrue);
+      expect(a.atLimitSinceUs, lessThan(1200000000));
+    });
+
     test('a lowered head does not pull the road pose', () {
       final a = RoadAdaptation(degPerMin: 1);
       for (var t = 0; t <= 300000000; t += 100000) {
