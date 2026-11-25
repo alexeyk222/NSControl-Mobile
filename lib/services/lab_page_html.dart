@@ -51,6 +51,7 @@ a{color:var(--accent)}
     <span class="chip" id="c-aps">анализов/с —</span>
     <span class="chip" id="c-lat">задержка —</span>
     <span class="chip" id="c-zone">зона —</span>
+    <span class="chip" id="c-driver">водитель —</span>
     <span class="chip" id="c-eyes">глаза —</span>
     <span class="chip" id="c-head">голова —</span>
     <span class="chip" id="c-rec">запись —</span>
@@ -63,6 +64,7 @@ const KEY = new URLSearchParams(location.search).get("k") || "";
 const WINDOW = 30;
 const PRIMARY_DASH = [], OTHER_DASH = [6, 4];
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const DRIVER = {same:"тот же",restored:"восстановлен",no_face:"нет лица",ambiguous:"несколько лиц",different:"другое лицо"};
 const ZONES = {road:"Дорога",mirror_left:"Левое зеркало",mirror_right:"Правое зеркало",mirror_rear:"Салонное зеркало",instruments:"Приборы",console:"Консоль",off_camera:"Вне камеры",unknown:"не определена"};
 const ZONE_COLORS = {road:"#2e9d5b",mirror_left:"#3b7dd8",mirror_right:"#7b5bd6",mirror_rear:"#1aa5b8",instruments:"#d89a1e",console:"#c2571a",off_camera:"#888",unknown:"#bbb"};
 const PHASES = {unavailable:"недоступен",warmingUp:"прогрев",normal:"норма",signPresent:"признак",warning:"ТРЕВОГА",recovering:"восстановление"};
@@ -209,6 +211,7 @@ function updateHeader() {
     setChip("c-lat", `задержка ≈ ${num(total, 0)} мс` + (rtt == null ? "" : ` (сеть ${num(rtt / 2, 0)})`), total > 500 ? "bad" : "");
   }
   setChip("c-zone", "зона: " + (ZONES[m.zone] || m.zone));
+  if (m.driver) setChip("c-driver", "водитель: " + (DRIVER[m.driver] || m.driver), m.driver === "ambiguous" || m.driver === "different" ? "bad" : "");
   for (const ch of ["eyes", "head"]) {
     const c = m[ch]; if (!c) continue;
     setChip("c-" + ch, `${ch === "eyes" ? "глаза" : "голова"}: ${PHASES[c.phase] || c.phase}`, c.phase === "warning" ? "bad" : "");

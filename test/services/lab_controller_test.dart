@@ -201,14 +201,47 @@ void main() {
     expect(labels.last['aborted'], isTrue);
   });
 
-  test('a new tracking id keeps the calibration in the lab', () async {
+  test('driver continuity restores a new tracking id after a loss', () async {
+    lab.setAttentionSettings(const AttentionSettings.acceptance());
     lab.calibrate();
     run(10.5, () => face());
+    await lab.startRecording();
+    run(1, () => face());
     run(.5, () => null);
+    expect(lab.driverDecision, 'no_face');
     run(.5, () => face(id: 2));
-    expect(lab.calibration!.trackingId, 2);
+    // The calibration is untouched: the pipeline gives the face its id back.
+    expect(lab.calibration!.trackingId, 1);
     expect(lab.engine!.snapshot.requiresRecalibration, isFalse);
-    expect(lab.notes.first.text, contains('перепривязано'));
+    expect(lab.driverDecision, 'same');
+    expect(lab.notes.map((n) => n.text), anyElement(contains('восстановлен')));
+    final file = await lab.stopRecording();
+    final derived = RecordingReader.parse(
+      await file!.readAsString(),
+    ).ofType('derived').map((d) => d['driver']).toSet();
+    expect(derived, containsAll(['same', 'no_face']));
+  });
+
+  test('two faces go to the engine directly and suspend it', () async {
+    lab.calibrate();
+    run(10.5, () => face());
+    final f2 = face(id: 7);
+    final end = now + 1000000;
+    while (now < end) {
+      now += 33000;
+      source.onResult!(
+        FaceResult(
+          engineId: 'mlkit_face_detection',
+          capturedUs: now - 20000,
+          completedUs: now,
+          faces: [face(), f2],
+          imageSize: const Size(480, 640),
+        ),
+      );
+      lab.tick();
+    }
+    expect(lab.driverDecision, 'ambiguous');
+    expect(lab.engine!.snapshot.requiresRecalibration, isTrue);
   });
 
   test('lab mode raises a distraction event, acceptance does not', () async {

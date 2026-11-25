@@ -467,7 +467,10 @@ class _Numbers extends StatelessWidget {
             'Анализов/с ${lab.analysesPerSecond.round()} · задержка конвейера '
             '${lab.lastLatencyUs == null ? '—' : '${(lab.lastLatencyUs! / 1000).round()} мс'}',
           ),
-          Text('Зона: ${LabController.zoneNames[lab.attentionState.zone]}'),
+          Text(
+            'Зона: ${LabController.zoneNames[lab.attentionState.zone]}'
+            '${lab.driverDecision == null ? '' : ' · водитель: ${LabController.driverNames[lab.driverDecision] ?? lab.driverDecision}'}',
+          ),
           Text('Автомат глаз: ${channel(snap?.eyes)}'),
           Text('Автомат головы: ${channel(snap?.head)}'),
           if (lab.calibration != null)

@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
-import '../logic/replay.dart' show tzSignActive;
+import '../logic/driver_continuity.dart';
+import '../logic/replay.dart' show channelSignActive, tzSignActive;
 import '../version.dart';
 import 'detector.dart';
 import 'face_source.dart';
@@ -81,6 +82,10 @@ class LabController extends ChangeNotifier {
 
   /// Road gaze collected during the ТЗ calibration (engines with gaze).
   final List<FaceSignals> _calibrationGaze = [];
+
+  /// How the attention pipeline identified the driver on the last frame
+  /// (`same`, `restored`, `no_face`, `ambiguous`, `different`).
+  String? driverDecision;
 
   /// Zone layout of the current calibration (road + optional mirrors).
   ZoneMap? zones;
@@ -380,16 +385,29 @@ class LabController extends ChangeNotifier {
       if (result.faces.length == 1 && signals != null && signals.hasGaze) {
         _calibrationGaze.add(signals);
       }
-    } else if (engine != null) {
-      _rebindIfNeeded(result.faces);
     }
-    final face = driver == null ? null : signals;
-    _mirrors?.add(captured, face);
-    attentionState = attention.update(face, captured);
+    // The provider takes one face for now: with several faces it sees none
+    // and the engine gets them all directly (it suspends observation, ФТ-02).
+    final single = result.faces.length == 1 ? signals : null;
+    _mirrors?.add(captured, single);
+    final previousDriver = driverDecision;
+    attentionState = attention.update(single, captured);
     final zoned = zoneProvider;
+    if (zoned != null && result.faces.length > 1) {
+      driverDecision = ContinuityDecision.ambiguous.code;
+    } else {
+      driverDecision = attentionState.details['driver'] as String?;
+    }
+    if (driverDecision == ContinuityDecision.restored.code &&
+        previousDriver != driverDecision) {
+      _note(
+        'Водитель восстановлен по рамке лица (trackingId ${single?.trackingId})',
+      );
+    }
     if (collector == null && engine != null) {
-      // The eye gate of the lab mode may withhold lowered lids from the
-      // `eyes_closed` automaton; in acceptance mode this is the same input.
+      // In both modes the engine gets the pipeline's measurements: driver
+      // continuity restores the calibrated id after a loss, and the lab-mode
+      // eye gate may withhold lowered lids from `eyes_closed`.
       if (zoned != null && result.faces.length <= 1) {
         final m = zoned.lastMeasurement;
         measurements = [?m];
@@ -404,6 +422,7 @@ class LabController extends ChangeNotifier {
       );
       _feedFatigue(measurements, captured);
       zoned?.tzSignActive = tzSignActive(engine!.snapshot);
+      zoned?.eyesSignActive = channelSignActive(engine!.snapshot.eyes);
       _distraction(zoned?.lastFrame);
     }
     // 10 per second is enough for the page and keeps an hour-long file
@@ -413,23 +432,6 @@ class LabController extends ChangeNotifier {
       _emitDerived(completed);
     }
     _notify();
-  }
-
-  /// ML Kit gives a new tracking id after the face was lost (blind spot,
-  /// long head turn). The trip then asks for a new calibration; the lab keeps
-  /// the profile and binds it to the single visible face, so a scenario can
-  /// go on. The rebind is written into the stream as a note.
-  void _rebindIfNeeded(List<DetectedFace> faces) {
-    final profile = calibration;
-    if (profile == null || faces.length != 1) return;
-    final id = faces.single.measurement.trackingId;
-    if (id == null || id == profile.trackingId) return;
-    calibration = CalibrationProfile.fromJson({
-      ...profile.toJson(),
-      'trackingId': id,
-    });
-    _newSession();
-    _note('Лицо перепривязано (новый trackingId $id)');
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
@@ -515,6 +517,7 @@ class LabController extends ChangeNotifier {
           },
           if (attentionState.details.isNotEmpty)
             'attention': attentionState.details,
+          'driver': ?driverDecision,
           if (scenario != null && scenario!.openSteps.isNotEmpty)
             'step': scenario!.openSteps.first,
         },
@@ -858,6 +861,14 @@ class LabController extends ChangeNotifier {
   }
 
   // ---- presentation -------------------------------------------------------
+
+  static const driverNames = {
+    'same': 'тот же',
+    'restored': 'восстановлен',
+    'no_face': 'нет лица',
+    'ambiguous': 'несколько лиц',
+    'different': 'другое лицо',
+  };
 
   static const zoneNames = {
     GazeZone.road: 'Дорога',
