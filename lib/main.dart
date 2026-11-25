@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path_provider/path_provider.dart';
 import 'data/trip_repository.dart' hide Row;
+import 'logic/arkit_geometry.dart' show arkitCapabilities;
 import 'logic/domain.dart';
 import 'services/detector.dart';
+import 'services/arkit_engine.dart';
 import 'services/lab_controller.dart';
 import 'services/mlkit_detector.dart';
 import 'services/platform_bridge.dart';
@@ -70,14 +72,30 @@ Future<void> main() async {
       initialDeveloperMode: developerMode,
       createLab: recordings == null
           ? null
-          : () => LabController(
-              options: labEngineOptions(
-                () => registry.create('mlkit_face_detection'),
-              ),
-              platform: const PlatformBridge(),
-              settings: trip.settings,
-              recordingsDirectory: recordings,
-            ),
+          : () {
+              late final LabController lab;
+              return lab = LabController(
+                options: [
+                  ...labEngineOptions(
+                    () => registry.create('mlkit_face_detection'),
+                  ),
+                  // ARKit owns the front camera while it runs; the lab stops
+                  // the camera plugin source before starting another one.
+                  if (Platform.isIOS)
+                    ...arkitLabEngineOptions(
+                      onRaw: (result, raw) {
+                        if (result.engineId == arkitCapabilities.id) {
+                          lab.attachRaw(result, raw);
+                        }
+                      },
+                      onStats: (stats) => lab.deviceLine(stats.toJson()),
+                    ),
+                ],
+                platform: const PlatformBridge(),
+                settings: trip.settings,
+                recordingsDirectory: recordings,
+              );
+            },
     ),
   );
 }

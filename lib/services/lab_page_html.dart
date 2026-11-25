@@ -51,9 +51,11 @@ a{color:var(--accent)}
     <span class="chip" id="c-aps">анализов/с —</span>
     <span class="chip" id="c-lat">задержка —</span>
     <span class="chip" id="c-zone">зона —</span>
+    <span class="chip" id="c-driver">водитель —</span>
     <span class="chip" id="c-eyes">глаза —</span>
     <span class="chip" id="c-head">голова —</span>
     <span class="chip" id="c-rec">запись —</span>
+    <span class="chip" id="c-device">телефон —</span>
   </div>
 </header>
 <main id="grid"></main>
@@ -63,6 +65,7 @@ const KEY = new URLSearchParams(location.search).get("k") || "";
 const WINDOW = 30;
 const PRIMARY_DASH = [], OTHER_DASH = [6, 4];
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const DRIVER = {same:"тот же",restored:"восстановлен",no_face:"нет лица",ambiguous:"несколько лиц",different:"другое лицо"};
 const ZONES = {road:"Дорога",mirror_left:"Левое зеркало",mirror_right:"Правое зеркало",mirror_rear:"Салонное зеркало",instruments:"Приборы",console:"Консоль",off_camera:"Вне камеры",unknown:"не определена"};
 const ZONE_COLORS = {road:"#2e9d5b",mirror_left:"#3b7dd8",mirror_right:"#7b5bd6",mirror_rear:"#1aa5b8",instruments:"#d89a1e",console:"#c2571a",off_camera:"#888",unknown:"#bbb"};
 const PHASES = {unavailable:"недоступен",warmingUp:"прогрев",normal:"норма",signPresent:"признак",warning:"ТРЕВОГА",recovering:"восстановление"};
@@ -173,9 +176,15 @@ function onLine(m) {
       updateHeader(); dirty = true; break;
     }
     case "event": {
-      const e = m.event, name = e.type === "eyes_closed" ? "глаза закрыты" : "голова опущена";
-      if (m.change === "started") { events.push({t: e.thresholdUs / 1e6, type: e.type}); addFeed("ТРЕВОГА: " + name, "ev"); }
-      else addFeed(`Событие «${name}» ${m.change === "ended" ? "завершено (" + e.endReason + ")" : m.change}`, "ev");
+      const e = m.event;
+      const name = e.type === "eyes_closed" ? "глаза закрыты"
+        : e.type === "head_pitch_down" ? "голова опущена"
+        : e.type === "distraction" ? `отвлечение (${e.kind || ""}, ${e.zone || ""})` : e.type;
+      if (m.change === "started") {
+        events.push({t: e.thresholdUs / 1e6, type: e.type});
+        addFeed((e.type === "distraction" ? "Расширение: " : "ТРЕВОГА: ") + name, "ev");
+      }
+      else addFeed(`Событие «${name}» ${m.change === "ended" ? "завершено" + (e.endReason ? " (" + e.endReason + ")" : "") : m.change}`, "ev");
       dirty = true; break;
     }
     case "label": {
@@ -184,6 +193,16 @@ function onLine(m) {
       else { const b = [...bands].reverse().find(b => b.step === m.step && b.t1 == null); if (b) b.t1 = t; }
       addFeed(`метка ${m.step}${m.rep ? " #" + m.rep : ""} ${m.edge === "start" ? "начало" : "конец"}${m.aborted ? " (прервано)" : ""}`, "lb");
       dirty = true; break;
+    }
+    case "device": {
+      const th = {nominal:"норма",fair:"тёплый",serious:"горячий",critical:"перегрев"};
+      const parts = ["телефон: " + (th[m.thermal] || m.thermal)];
+      if (m.battery != null) parts.push(Math.round(m.battery * 100) + "%" + (m.batteryState === "charging" ? " ⚡" : ""));
+      if (m.arkitFps != null) parts.push("ARKit " + m.arkitFps + " к/с");
+      if (m.mlKitDone != null) parts.push("ML Kit " + m.mlKitDone + "/с");
+      if (m.mlKitOrientation) parts.push(m.mlKitOrientation);
+      setChip("c-device", parts.join(" · "), m.thermal === "serious" || m.thermal === "critical" ? "bad" : "");
+      break;
     }
     case "lab":
       if (m.prompt !== undefined) document.getElementById("prompt").textContent = m.prompt || "";
@@ -203,6 +222,7 @@ function updateHeader() {
     setChip("c-lat", `задержка ≈ ${num(total, 0)} мс` + (rtt == null ? "" : ` (сеть ${num(rtt / 2, 0)})`), total > 500 ? "bad" : "");
   }
   setChip("c-zone", "зона: " + (ZONES[m.zone] || m.zone));
+  if (m.driver) setChip("c-driver", "водитель: " + (DRIVER[m.driver] || m.driver), m.driver === "ambiguous" || m.driver === "different" ? "bad" : "");
   for (const ch of ["eyes", "head"]) {
     const c = m[ch]; if (!c) continue;
     setChip("c-" + ch, `${ch === "eyes" ? "глаза" : "голова"}: ${PHASES[c.phase] || c.phase}`, c.phase === "warning" ? "bad" : "");

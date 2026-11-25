@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
 import 'package:nscontrol/services/detector.dart';
 import 'package:nscontrol/services/face_source.dart';
@@ -51,13 +52,18 @@ class FakePlatform extends PlatformBridge {
   }
 }
 
-DetectedFace face({double eyes = .9, double pitch = 0, int id = 1}) {
+DetectedFace face({
+  double eyes = .9,
+  double pitch = 0,
+  double yaw = 0,
+  int id = 1,
+}) {
   final s = MlKitSignals.from(
     trackingId: id,
     leftEyeOpen: eyes,
     rightEyeOpen: eyes,
     eulerX: -pitch,
-    eulerY: 2,
+    eulerY: 2 + yaw,
     eulerZ: 1,
   );
   return DetectedFace(
@@ -130,7 +136,7 @@ void main() {
     expect(lab.calibration, isNotNull);
     expect(lab.phase, LabPhase.observing);
     run(1, () => face());
-    expect(lab.statusLine, 'Зона не определена');
+    expect(lab.statusLine, 'Дорога');
     run(2, () => face(eyes: .05));
     expect(lab.engine!.snapshot.eyes.activeEvent, isNotNull);
     expect(lab.statusLine, startsWith('Глаза закрыты'));
@@ -143,6 +149,8 @@ void main() {
     expect(reader.meta['device'], 'iPhone12,1');
     final calibration = reader.ofType('calibration').single;
     expect(calibration['profile']['trackingId'], 1);
+    expect(calibration['zones']['mirrorsCalibrated'], isFalse);
+    expect(reader.meta['attentionSettings'], isNotNull);
     final signals = reader.signals().toList();
     expect(signals.length, greaterThan(400));
     expect(signals.first.eyeOpenLeft, .9);
@@ -152,7 +160,7 @@ void main() {
     expect(events.first['event']['type'], 'eyes_closed');
     expect(events.any((e) => e['change'] == 'ended'), isTrue);
     final derived = reader.ofType('derived').toList();
-    expect(derived.last['zone'], 'unknown');
+    expect(derived.map((d) => d['zone']), contains('road'));
     expect(derived.last['eyes'], isA<Map<String, dynamic>>());
     // Times start at the recording and never go backwards for frames.
     final captured = reader.ofType('frame').map((l) => l['capturedUs'] as int);
@@ -193,13 +201,99 @@ void main() {
     expect(labels.last['aborted'], isTrue);
   });
 
-  test('a new tracking id keeps the calibration in the lab', () async {
+  test('driver continuity restores a new tracking id after a loss', () async {
+    lab.setAttentionSettings(const AttentionSettings.acceptance());
     lab.calibrate();
     run(10.5, () => face());
+    await lab.startRecording();
+    run(1, () => face());
     run(.5, () => null);
+    expect(lab.driverDecision, 'no_face');
     run(.5, () => face(id: 2));
-    expect(lab.calibration!.trackingId, 2);
+    // The calibration is untouched: the pipeline gives the face its id back.
+    expect(lab.calibration!.trackingId, 1);
     expect(lab.engine!.snapshot.requiresRecalibration, isFalse);
-    expect(lab.notes.first.text, contains('перепривязано'));
+    expect(lab.driverDecision, 'same');
+    expect(lab.notes.map((n) => n.text), anyElement(contains('восстановлен')));
+    final file = await lab.stopRecording();
+    final derived = RecordingReader.parse(
+      await file!.readAsString(),
+    ).ofType('derived').map((d) => d['driver']).toSet();
+    expect(derived, containsAll(['same', 'no_face']));
+  });
+
+  test('two faces go to the engine directly and suspend it', () async {
+    lab.calibrate();
+    run(10.5, () => face());
+    final f2 = face(id: 7);
+    final end = now + 1000000;
+    while (now < end) {
+      now += 33000;
+      source.onResult!(
+        FaceResult(
+          engineId: 'mlkit_face_detection',
+          capturedUs: now - 20000,
+          completedUs: now,
+          faces: [face(), f2],
+          imageSize: const Size(480, 640),
+        ),
+      );
+      lab.tick();
+    }
+    expect(lab.driverDecision, 'ambiguous');
+    expect(lab.engine!.snapshot.requiresRecalibration, isTrue);
+  });
+
+  test('lab mode raises a distraction event, acceptance does not', () async {
+    lab.calibrate();
+    run(10.5, () => face());
+    expect(lab.attentionSettings!.isAcceptance, isFalse);
+    await lab.startRecording();
+    run(1, () => face());
+    run(4, () => face(yaw: -50));
+    run(1, () => face());
+    final file = await lab.stopRecording();
+    final events = RecordingReader.parse(
+      await file!.readAsString(),
+    ).ofType('event').where((e) => e['event']['type'] == 'distraction');
+    expect(events.first['change'], 'started');
+    expect(events.any((e) => e['change'] == 'ended'), isTrue);
+
+    lab.setAttentionSettings(const AttentionSettings.acceptance());
+    expect(lab.attentionSettings!.isAcceptance, isTrue);
+    await lab.startRecording();
+    run(1, () => face());
+    run(4, () => face(yaw: -50));
+    run(1, () => face());
+    final second = await lab.stopRecording();
+    final reader = RecordingReader.parse(await second!.readAsString());
+    expect(
+      reader.ofType('event').where((e) => e['event']['type'] == 'distraction'),
+      isEmpty,
+    );
+    expect(reader.meta['attentionSettings'], isNotNull);
+  });
+
+  test('mirror calibration writes calibrated zones', () async {
+    lab.calibrate();
+    run(10.5, () => face());
+    await lab.startRecording();
+    lab.calibrateMirrors();
+    expect(lab.calibratingMirrors, isTrue);
+    run(20, () {
+      final p = lab.prompt ?? '';
+      if (p.contains('левое')) return face(yaw: 38);
+      if (p.contains('правое')) return face(yaw: -52);
+      if (p.contains('салонное')) return face(yaw: -26, pitch: -14);
+      return face();
+    });
+    expect(lab.calibratingMirrors, isFalse);
+    expect(lab.zones!.mirrorsCalibrated, isTrue);
+    final file = await lab.stopRecording();
+    final calibrations = RecordingReader.parse(
+      await file!.readAsString(),
+    ).ofType('calibration').toList();
+    expect(calibrations.last['zones']['mirrorsCalibrated'], isTrue);
+    expect(lab.notes.map((n) => n.text), contains('Зеркала откалиброваны'));
   });
 }

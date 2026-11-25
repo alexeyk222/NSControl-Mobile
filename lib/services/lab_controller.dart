@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
+import '../logic/driver_continuity.dart';
+import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
 import 'detector.dart';
 import 'face_source.dart';
@@ -34,7 +37,8 @@ class LabController extends ChangeNotifier {
     this.startServer = true,
     int Function()? clockUs,
   }) : clockUs = clockUs ?? (Stopwatch()..start()).elapsedMicrosecondsOf,
-       attention = attention ?? const UnknownAttentionProvider(),
+       attention =
+           attention ?? ZoneAttentionProvider(settings: AttentionSettings.lab),
        recorder = LabRecorder(recordingsDirectory) {
     this.server =
         server ?? LabServer(recordings: recorder.list, onConnected: _greeting);
@@ -45,7 +49,10 @@ class LabController extends ChangeNotifier {
   final List<LabEngineOption> options;
   final PlatformBridge platform;
   final LabRecorder recorder;
-  final AttentionStateProvider attention;
+
+  /// Zones and decisions over the ТЗ automata. With [ZoneAttentionProvider]
+  /// its eye gate also decides what goes into the automata (lab mode only).
+  AttentionStateProvider attention;
   final bool startServer;
   late final LabServer server;
 
@@ -73,6 +80,30 @@ class LabController extends ChangeNotifier {
   String? _sessionId;
   int _sessions = 0;
 
+  /// Road gaze collected during the ТЗ calibration (engines with gaze).
+  final List<FaceSignals> _calibrationGaze = [];
+
+  /// How the attention pipeline identified the driver on the last frame
+  /// (`same`, `restored`, `no_face`, `ambiguous`, `different`).
+  String? driverDecision;
+
+  /// Driver reference for [ZoneAttentionProvider.anchorDriver]: the last
+  /// calibration frame, and when the driver was last seen (absolute clock).
+  FaceSignals? _anchorFace;
+  int? _driverSeenAbsUs;
+
+  /// Engine numbers of the result being delivered (ARKit `raw`).
+  (FaceResult, Map<String, Object?>)? _pendingRaw;
+
+  /// Latest `device` line (ARKit source), for the screen.
+  Map<String, Object?>? lastDevice;
+
+  /// Zone layout of the current calibration (road + optional mirrors).
+  ZoneMap? zones;
+  ZoneCalibrationCollector? _mirrors;
+  final List<(int, void Function())> _mirrorPlan = [];
+  bool get calibratingMirrors => _mirrorPlan.isNotEmpty;
+
   /// Last results per engine id (primary first in [engineIds]).
   final Map<String, FaceResult> lastResults = {};
   final Map<String, FaceSignals?> lastSignals = {};
@@ -93,6 +124,28 @@ class LabController extends ChangeNotifier {
   Map<String, String>? _device;
 
   bool get recording => recorder.active;
+
+  ZoneAttentionProvider? get zoneProvider {
+    final a = attention;
+    return a is ZoneAttentionProvider ? a : null;
+  }
+
+  /// Acceptance (ТЗ only) or lab extensions; null for another provider.
+  AttentionSettings? get attentionSettings => zoneProvider?.settings;
+
+  /// Switches the attention mode. The automata restart with the same
+  /// calibration, because the eye gate changes their input.
+  void setAttentionSettings(AttentionSettings next) {
+    if (recording || attentionSettings == null) return;
+    attention = ZoneAttentionProvider(settings: next, zones: zones);
+    _newSession();
+    _note(
+      next.isAcceptance
+          ? 'Режим приёмки: только ТЗ'
+          : 'Режим Лаборатории: расширения включены',
+    );
+  }
+
   bool get isOpen => _open;
   List<String> get engineIds =>
       source?.engines.map((e) => e.id).toList() ?? option.engineIds;
@@ -140,13 +193,20 @@ class LabController extends ChangeNotifier {
   /// Writes to the recording (when on) and to every connected page.
   void _emit(Map<String, Object?> line) {
     recorder.write(line);
-    server.broadcast(line);
+    // The page does not use the raw engine numbers; keep the stream light.
+    server.broadcast(
+      line.containsKey('raw') ? ({...line}..remove('raw')) : line,
+    );
   }
 
   List<Map<String, Object?>> _greeting() => [
     _metaLine(live: !recording),
     if (calibration != null)
-      RecordingSchema.calibration(atUs: 0, profile: calibration!),
+      RecordingSchema.calibration(
+        atUs: 0,
+        profile: calibration!,
+        zones: zones?.toJson(),
+      ),
     {'type': 'lab', 'prompt': prompt ?? ''},
   ];
 
@@ -161,6 +221,8 @@ class LabController extends ChangeNotifier {
     extra: {
       if (live) 'live': true,
       'attention': attention.id,
+      if (attentionSettings != null)
+        'attentionSettings': attentionSettings!.toJson(),
       'algorithm': ObservationEngine.algorithmVersion,
       'settings': settings.toJson(),
     },
@@ -228,6 +290,7 @@ class LabController extends ChangeNotifier {
   Future<void> pause() async {
     if (!_open) return;
     _cancelCalibration();
+    _cancelMirrors();
     await _stopSource();
     _notify(force: true);
   }
@@ -241,7 +304,10 @@ class LabController extends ChangeNotifier {
     if (recording || next.id == option.id) return;
     option = next;
     calibration = null;
+    zones = null;
+    zoneProvider?.zones = null;
     _cancelCalibration();
+    _cancelMirrors();
     engine = null;
     attention.reset(null);
     await _stopSource();
@@ -303,15 +369,30 @@ class LabController extends ChangeNotifier {
     final signals = _signalsOf(driver, result.engineId);
     lastResults[result.engineId] = result;
     lastSignals[result.engineId] = signals;
-    _emit(
-      RecordingSchema.frame(
+    final pending = _pendingRaw;
+    _pendingRaw = null;
+    // Every face in the order the engine reported it (and the pipeline gets
+    // it); the frame line keeps the chosen face in `signals`, the rest in
+    // `others`, so a replay sees the same ambiguity (ФТ-02).
+    final all = [
+      for (final f in result.faces)
+        identical(f, driver) ? signals! : _signalsOf(f, result.engineId)!,
+    ];
+    _emit({
+      ...RecordingSchema.frame(
         engine: result.engineId,
         capturedUs: captured,
         completedUs: completed,
         faceCount: result.faces.length,
         signals: signals,
       ),
-    );
+      if (result.faces.length > 1)
+        'others': [
+          for (var i = 0; i < all.length; i++)
+            if (!identical(result.faces[i], driver)) all[i].toJson(),
+        ],
+      if (pending != null && identical(pending.$1, result)) 'raw': pending.$2,
+    });
     if (result.engineId != primaryEngine) {
       _notify();
       return;
@@ -319,7 +400,7 @@ class LabController extends ChangeNotifier {
     _primaryCompletions.add(result.completedUs);
     _primaryCompletions.removeWhere((t) => t < clockUs() - 2000000);
     lastLatencyUs = completed - captured;
-    final measurements = result.faces.map((f) => f.measurement).toList();
+    var measurements = result.faces.map((f) => f.measurement).toList();
 
     if (_calibrationRequested && _collector == null) {
       if (result.faces.length == 1 &&
@@ -330,8 +411,35 @@ class LabController extends ChangeNotifier {
     final collector = _collector;
     if (collector != null) {
       collector.add(capturedUs: captured, faces: measurements);
-    } else if (engine != null) {
-      _rebindIfNeeded(result.faces);
+      if (result.faces.length == 1 && signals != null) {
+        _anchorFace = signals;
+        _driverSeenAbsUs = result.capturedUs;
+        if (signals.hasGaze) _calibrationGaze.add(signals);
+      }
+    }
+    final single = result.faces.length == 1 ? signals : null;
+    _mirrors?.add(captured, single);
+    final previousDriver = driverDecision;
+    final zoned = zoneProvider;
+    attentionState = zoned != null
+        ? zoned.updateFaces(all, captured)
+        : attention.update(single, captured);
+    driverDecision = attentionState.details['driver'] as String?;
+    if (driverDecision == ContinuityDecision.same.code ||
+        driverDecision == ContinuityDecision.restored.code) {
+      _driverSeenAbsUs = result.capturedUs;
+    }
+    if (driverDecision == ContinuityDecision.restored.code &&
+        previousDriver != driverDecision) {
+      _note(
+        'Водитель восстановлен по рамке лица (trackingId ${single?.trackingId})',
+      );
+    }
+    if (collector == null && engine != null) {
+      // In both modes the engine gets only the pipeline's measurements:
+      // driver continuity restores the calibrated id after a loss, and the
+      // lab-mode eye gate may withhold lowered lids from `eyes_closed`.
+      if (zoned != null) measurements = zoned.lastMeasurements;
       _apply(
         engine!.process(
           sessionId: _sessionId!,
@@ -341,11 +449,10 @@ class LabController extends ChangeNotifier {
         ),
       );
       _feedFatigue(measurements, captured);
+      zoned?.tzSignActive = tzSignActive(engine!.snapshot);
+      zoned?.eyesEventActive = engine!.snapshot.eyes.activeEvent != null;
+      _distraction(zoned?.lastFrame);
     }
-    attentionState = attention.update(
-      driver == null ? null : signals,
-      captured,
-    );
     // 10 per second is enough for the page and keeps an hour-long file
     // small; the replay recomputes decisions from the frames anyway.
     if (completed - _lastDerivedUs >= 100000 || completed < _lastDerivedUs) {
@@ -353,23 +460,6 @@ class LabController extends ChangeNotifier {
       _emitDerived(completed);
     }
     _notify();
-  }
-
-  /// ML Kit gives a new tracking id after the face was lost (blind spot,
-  /// long head turn). The trip then asks for a new calibration; the lab keeps
-  /// the profile and binds it to the single visible face, so a scenario can
-  /// go on. The rebind is written into the stream as a note.
-  void _rebindIfNeeded(List<DetectedFace> faces) {
-    final profile = calibration;
-    if (profile == null || faces.length != 1) return;
-    final id = faces.single.measurement.trackingId;
-    if (id == null || id == profile.trackingId) return;
-    calibration = CalibrationProfile.fromJson({
-      ...profile.toJson(),
-      'trackingId': id,
-    });
-    _newSession();
-    _note('Лицо перепривязано (новый trackingId $id)');
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
@@ -417,6 +507,27 @@ class LabController extends ChangeNotifier {
     }
   }
 
+  void _distraction(AttentionFrame? frame) {
+    final started = frame?.distractionStarted, ended = frame?.distractionEnded;
+    if (started != null) {
+      _emit({
+        'type': 'event',
+        'change': 'started',
+        'atUs': nowUs,
+        'event': started.toJson(),
+      });
+      _note('Отвлечение (${started.zone.code})', important: true);
+    }
+    if (ended != null) {
+      _emit({
+        'type': 'event',
+        'change': 'ended',
+        'atUs': nowUs,
+        'event': ended.toJson(),
+      });
+    }
+  }
+
   void _emitDerived(int atUs) {
     final snapshot = engine?.snapshot;
     _emit(
@@ -434,6 +545,7 @@ class LabController extends ChangeNotifier {
           },
           if (attentionState.details.isNotEmpty)
             'attention': attentionState.details,
+          'driver': ?driverDecision,
           if (scenario != null && scenario!.openSteps.isNotEmpty)
             'step': scenario!.openSteps.first,
         },
@@ -447,6 +559,7 @@ class LabController extends ChangeNotifier {
   void calibrate() {
     if (source == null) return;
     _cancelCalibration();
+    _cancelMirrors();
     _calibrationRequested = true;
     engine = null;
     _say('Калибровка. Смотрите на дорогу десять секунд');
@@ -455,6 +568,8 @@ class LabController extends ChangeNotifier {
 
   void _beginCollector(int trackingId, int atUs) {
     _calibrationStartUs = atUs;
+    _calibrationGaze.clear();
+    _anchorFace = null;
     _collector = CalibrationCollector(
       trackingId: trackingId,
       detector: source!.engines.first,
@@ -472,6 +587,7 @@ class LabController extends ChangeNotifier {
   void _finishCalibration() {
     final collector = _collector!;
     final result = collector.finish(nowUs: nowUs);
+    final gaze = List.of(_calibrationGaze);
     _cancelCalibration();
     final profile = result.profile;
     if (profile == null) {
@@ -486,7 +602,23 @@ class LabController extends ChangeNotifier {
     }
     error = null;
     calibration = profile;
-    _emit(RecordingSchema.calibration(atUs: nowUs, profile: profile));
+    // Road gaze: median gaze of the calibration window, as the replay does.
+    final map = gaze.length < 10
+        ? ZoneMap.fromCalibration(profile)
+        : ZoneMap.fromCalibration(
+            profile,
+            roadGazeLeft: median(gaze.map((s) => s.gazeLeft!)),
+            roadGazeDown: median(gaze.map((s) => s.gazeDown!)),
+          );
+    zones = map;
+    zoneProvider?.zones = map;
+    _emit(
+      RecordingSchema.calibration(
+        atUs: nowUs,
+        profile: profile,
+        zones: map.toJson(),
+      ),
+    );
     _newSession();
     _say('Калибровка завершена');
     _note(
@@ -499,6 +631,75 @@ class LabController extends ChangeNotifier {
       _pendingScenario = null;
       _beginScenario(pending, delayUs: 2500000);
     }
+  }
+
+  /// Optional mirror step: about 2.5 s of gaze into each mirror on a voice
+  /// prompt. The calibrated centres replace the default sectors.
+  void calibrateMirrors() {
+    final base = zones;
+    if (calibration == null || base == null || calibratingMirrors) return;
+    if (scenario != null || phase != LabPhase.observing) return;
+    final collector = ZoneCalibrationCollector(base);
+    _mirrors = collector;
+    var t = nowUs + 500000;
+    for (final (zone, name) in [
+      (GazeZone.mirrorLeft, 'левое'),
+      (GazeZone.mirrorRight, 'правое'),
+      (GazeZone.mirrorRear, 'салонное'),
+    ]) {
+      _mirrorPlan
+        ..add((
+          t,
+          () {
+            _say('Смотрите в $name зеркало');
+            _setPrompt('Смотрите в $name зеркало');
+          },
+        ))
+        ..add((t + 1500000, () => collector.begin(zone, nowUs)))
+        ..add((
+          t + 4000000,
+          () {
+            final issue = collector.end(nowUs);
+            if (issue != null) _note('Зеркало $name: $issue');
+            _say('Дорога');
+            _setPrompt('Дорога');
+          },
+        ));
+      t += 6000000;
+    }
+    _mirrorPlan.add((t, () => _finishMirrors(collector)));
+    _note('Калибровка зеркал');
+    _notify(force: true);
+  }
+
+  void _finishMirrors(ZoneCalibrationCollector collector) {
+    _mirrors = null;
+    _setPrompt(null);
+    final map = collector.finish();
+    if (!map.mirrorsCalibrated || calibration == null) {
+      _say('Зеркала не откалиброваны');
+      _note('Зеркала не откалиброваны, остались стартовые секторы');
+      return;
+    }
+    zones = map;
+    zoneProvider?.zones = map;
+    _emit(
+      RecordingSchema.calibration(
+        atUs: nowUs,
+        profile: calibration!,
+        zones: map.toJson(),
+      ),
+    );
+    _newSession();
+    _say('Зеркала откалиброваны');
+    _note('Зеркала откалиброваны');
+  }
+
+  void _cancelMirrors() {
+    if (_mirrorPlan.isEmpty && _mirrors == null) return;
+    _mirrorPlan.clear();
+    _mirrors = null;
+    _setPrompt(null);
   }
 
   /// New ObservationEngine session on the current time base.
@@ -522,6 +723,27 @@ class LabController extends ChangeNotifier {
     );
     fatigue = FatigueSnapshot.empty;
     attention.reset(profile);
+    // Where the driver was last seen, so a loss right after the start of the
+    // session is judged by geometry (ПЗ: the selected face keeps its profile).
+    final anchor = _anchorFace, seen = _driverSeenAbsUs;
+    if (anchor != null && seen != null) {
+      zoneProvider?.anchorDriver(anchor, seen - baseUs);
+    }
+  }
+
+  /// ARKit hands the engine numbers of a result just before the result
+  /// itself; they go into its `frame` line as `raw`.
+  void attachRaw(FaceResult result, Map<String, Object?> raw) =>
+      _pendingRaw = (result, raw);
+
+  /// A `device` line (ArkitStats.toJson) on the lab time base.
+  void deviceLine(Map<String, Object?> line) {
+    if (!_open) return;
+    final at = line['atUs'];
+    final rebased = {...line, if (at is int) 'atUs': at - baseUs};
+    if (rebased['atUs'] is int && (rebased['atUs'] as int) < 0) return;
+    lastDevice = rebased;
+    _emit(rebased);
   }
 
   // ---- recording ----------------------------------------------------------
@@ -541,6 +763,7 @@ class LabController extends ChangeNotifier {
     // restarts; the automata start a new session with the same profile.
     final wasCalibrating = _collector != null || _calibrationRequested;
     _cancelCalibration();
+    _cancelMirrors();
     baseUs = clockUs();
     _primaryCompletions.clear();
     try {
@@ -552,7 +775,13 @@ class LabController extends ChangeNotifier {
     }
     _emit(_metaLine());
     if (calibration != null) {
-      _emit(RecordingSchema.calibration(atUs: 0, profile: calibration!));
+      _emit(
+        RecordingSchema.calibration(
+          atUs: 0,
+          profile: calibration!,
+          zones: zones?.toJson(),
+        ),
+      );
       _newSession();
     }
     if (wasCalibrating) calibrate();
@@ -575,7 +804,9 @@ class LabController extends ChangeNotifier {
   // ---- scenarios ----------------------------------------------------------
 
   Future<void> startScenario(Scenario next) async {
-    if (!_open || source == null || scenario != null) return;
+    if (!_open || source == null || scenario != null || calibratingMirrors) {
+      return;
+    }
     if (!recording) await startRecording();
     if (calibration == null) {
       _pendingScenario = next;
@@ -637,6 +868,9 @@ class LabController extends ChangeNotifier {
         now - _calibrationStartUs! >= 10000000) {
       _finishCalibration();
     }
+    while (_mirrorPlan.isNotEmpty && _mirrorPlan.first.$1 <= now) {
+      _mirrorPlan.removeAt(0).$2();
+    }
     final current = engine;
     if (current != null) {
       _apply(current.tick(now));
@@ -677,6 +911,14 @@ class LabController extends ChangeNotifier {
   }
 
   // ---- presentation -------------------------------------------------------
+
+  static const driverNames = {
+    'same': 'тот же',
+    'restored': 'восстановлен',
+    'no_face': 'нет лица',
+    'ambiguous': 'несколько лиц',
+    'different': 'другое лицо',
+  };
 
   static const zoneNames = {
     GazeZone.road: 'Дорога',
