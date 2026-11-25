@@ -76,7 +76,11 @@ class Recording {
   final List<Map<String, dynamic>> recordedEvents;
 
   /// Lines of unknown type or that could not be read.
+  /// Lines that are not frames, events or skipped: decisions of the app
+  /// (`derived`) and phone load (`device`, read by the engine comparison).
   final int skippedLines;
+
+  static const unusedTypes = {'derived', 'device'};
 
   String get id => (meta['recordingId'] as String?) ?? 'без идентификатора';
 
@@ -155,8 +159,9 @@ class Recording {
           case 'event':
             events.add(json);
           default:
-            // `derived` and future line types are not used by the replay.
-            if (json['type'] != 'derived') skipped++;
+            // Known lines the replay does not use (`derived`, `device`) are
+            // not counted; unknown types are.
+            if (!unusedTypes.contains(json['type'])) skipped++;
         }
       } catch (_) {
         // A line of a known type that does not match the schema.
@@ -423,6 +428,14 @@ class ReplayRunner {
       zones: zones,
       settings: options.attention,
     );
+    // Where the driver was at the end of calibration, as the app does it.
+    for (final f in frames.reversed) {
+      if (f.capturedUs > calibrationEndUs) continue;
+      if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
+        pipeline.anchorDriver(f.signals!, f.capturedUs);
+      }
+      break;
+    }
     final settings = AlgorithmSettings(hiddenEyes: profile.hiddenEyes);
     final engine = ObservationEngine(
       sessionId: 'replay',
@@ -593,11 +606,25 @@ class ReplayRunner {
     ReplayOptions options,
   ) {
     final lines = recording.calibrations;
-    RecordedCalibration? line;
-    for (final c in lines) {
-      if (c.profile?.detector.id == options.engine) line = c;
+    // The calibration the scenario ran on: the last one before the first
+    // label (a recalibration later in the recording does not move the start),
+    // preferably of this engine.
+    final scenarioUs = recording.labels.isEmpty
+        ? null
+        : recording.labels.first.atUs;
+    RecordedCalibration? pick(bool Function(RecordedCalibration) ok) {
+      RecordedCalibration? before, first;
+      for (final c in lines) {
+        if (!ok(c)) continue;
+        first ??= c;
+        if (scenarioUs == null || c.atUs <= scenarioUs) before = c;
+      }
+      return before ?? first;
     }
-    line ??= lines.isEmpty ? null : lines.first;
+
+    final line =
+        pick((c) => c.profile?.detector.id == options.engine) ??
+        pick((c) => true);
     final profile = line?.profile;
     if (!options.recalibrate &&
         profile != null &&
@@ -605,8 +632,18 @@ class ReplayRunner {
       return (profile, 'строка calibration записи', line!.atUs, line);
     }
     // Recompute from the frames of this engine: the 10 s before the recorded
-    // calibration, or the first 10 s of the recording.
-    final endUs = line?.atUs ?? frames.first.capturedUs + calibrationUs;
+    // calibration, or the first 10 s of the recording. When the recording
+    // started already calibrated (the line at its very start), there are no
+    // frames before the line: then the 10 s after it are used and the
+    // observation starts after them.
+    var endUs = line?.atUs ?? frames.first.capturedUs + calibrationUs;
+    var source = 'пересчитана по кадрам записи';
+    if (line != null &&
+        frames.where((f) => f.capturedUs <= endUs).length < 10 &&
+        frames.first.capturedUs >= endUs - calibrationUs ~/ 2) {
+      endUs = line.atUs + calibrationUs;
+      source = 'пересчитана по 10 с после строки calibration';
+    }
     final startUs = endUs - calibrationUs;
     final trackingId =
         frames
@@ -655,7 +692,7 @@ class ReplayRunner {
         '${result.issues.join(' ')}',
       );
     }
-    return (result.profile!, 'пересчитана по кадрам записи', endUs, line);
+    return (result.profile!, source, endUs, line);
   }
 
   ZoneMap _zones(

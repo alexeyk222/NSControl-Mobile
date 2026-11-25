@@ -141,4 +141,18 @@ void main() {
     expect(report, contains('Строк device нет'));
     expect(report, isNot(contains('Согласие движков')));
   });
+
+  test('reads the comparison mode as the iPhone writes it', () {
+    final report = EngineComparison(
+      SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
+    ).report();
+    expect(report, isNot(contains('ошибка:')));
+    expect(
+      report,
+      contains('| arkit_face_tracking | строка calibration записи'),
+    );
+    expect(report, contains('| mlkit_face_detection | пересчитана'));
+    expect(report, contains('ML Kit на кадрах ARKit'));
+    expect(report, contains('Согласие движков на одних кадрах'));
+  });
 }
