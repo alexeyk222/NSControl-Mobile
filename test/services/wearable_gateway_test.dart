@@ -226,4 +226,52 @@ void main() {
     });
     expect(acks, hasLength(1));
   });
+
+  test(
+    'Apple Watch background mode is reported from the live link only',
+    () async {
+      final sent = <Map<String, Object?>>[];
+      final states = <String>[];
+      final gateway = WearableGateway(
+        nowUs: () => 5000000,
+        send: (m) async => sent.add(m),
+        onWatchState: states.add,
+      );
+      gateway.setState(
+        tripId: 't',
+        sessionId: 's',
+        extra: {'level': 'observing'},
+      );
+      await gateway.connect();
+      final connection = sent.last['connection_id'];
+      await gateway.receive({
+        'type': 'ready',
+        'receiver_epoch': 'x',
+        'connection_id': connection,
+        'background': 'off',
+      });
+      expect(gateway.watchBackground, 'off');
+      await gateway.receive({
+        'type': 'watch_state',
+        'background': 'active',
+        'connection_id': 'stale',
+        'receiver_epoch': 'x',
+      });
+      expect(gateway.watchBackground, 'off');
+      await gateway.receive({
+        'type': 'watch_state',
+        'background': 'active',
+        'connection_id': connection,
+        'receiver_epoch': 'x',
+      });
+      await gateway.receive({
+        'type': 'watch_state',
+        'background': 'active',
+        'connection_id': connection,
+        'receiver_epoch': 'x',
+      });
+      expect(gateway.watchBackground, 'active');
+      expect(states, ['off', 'active']);
+    },
+  );
 }

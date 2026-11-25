@@ -1,117 +1,138 @@
+import HealthKit
 import SwiftUI
-import WatchConnectivity
 import WatchKit
+
+/// Receives the workout configuration when the iPhone starts a trip
+/// (`HKHealthStore.startWatchApp`), even if the watch app was not running.
+final class AppDelegate: NSObject, WKApplicationDelegate {
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        WatchLink.shared.launchedForTrip(workoutConfiguration)
+    }
+}
 
 @main
 struct NSControlWatchApp: App {
-    @StateObject private var link = WatchLink()
+    @WKApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     var body: some Scene {
-        WindowGroup {
-          ScrollView {
-            VStack(spacing: 10) {
-                Text("NSControl").font(.headline)
-                Text(link.reason).font(.body).multilineTextAlignment(.center)
-                Text(link.status).font(.caption2).foregroundStyle(.secondary)
-                Text("1.0 • 1").font(.caption2).foregroundStyle(.secondary)
-            }.padding()
-          }
+        WindowGroup { RootView(link: WatchLink.shared) }
+    }
+}
+
+struct RootView: View {
+    @ObservedObject var link: WatchLink
+
+    var body: some View {
+        Group {
+            switch link.phase {
+            case .alarm: AlarmView(link: link)
+            case .notice: NoticeView(link: link)
+            default: StatusView(link: link)
+            }
+        }
+        .onAppear {
+            // Ask once, while the app is in front: the trip may later start it in the background.
+            if link.workout.needsAuthorization { link.enableBackground() }
         }
     }
 }
 
-final class WatchLink: NSObject, ObservableObject, WCSessionDelegate {
-    @Published var reason = "Откройте NSControl на телефоне"
-    @Published var status = "Нет связи"
-    private let gate = AlertGate()
-    private let session = WCSession.default
-    private var receiverEpoch = UUID().uuidString
-    override init() {
-        super.init()
-        session.delegate = self
-        session.activate()
-    }
-    private func nowMs() -> Double { ProcessInfo.processInfo.systemUptime * 1000 }
-    private func label(_ status: String) -> String {
-        switch status {
-        case "synchronized": return "Связь установлена"
-        case "accepted": return "Сигнал запрошен"
-        case "state_only": return "Актуальное состояние"
-        case "expired": return "Срок сигнала истёк"
-        case "duplicate": return "Уже принято"
-        case "cancelled": return "Отменено"
-        default: return "Ожидается синхронизация"
-        }
-    }
-    private func ready() {
-        DispatchQueue.main.async {
-            self.gate.disconnect()
-            self.receiverEpoch = UUID().uuidString
-            guard self.session.isReachable else { return }
-            self.session.sendMessage(["v": 1, "type": "ready", "message_id": UUID().uuidString,
-                                      "receiver_epoch": self.receiverEpoch], replyHandler: nil, errorHandler: nil)
-        }
-    }
-    func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
-        DispatchQueue.main.async { self.status = error?.localizedDescription ?? "Ожидается синхронизация" }
-        ready()
-    }
-    func sessionReachabilityDidChange(_ session: WCSession) {
-        DispatchQueue.main.async { self.status = session.isReachable ? "Ожидается синхронизация" : "Нет связи" }
-        ready()
-    }
-    func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String: Any]) {
-        // Context is display-only. It cannot authorize replay of a queued alert.
-        DispatchQueue.main.async {
-            // Live protocol state wins over an opportunistically delivered older context.
-            guard !session.isReachable || self.gate.connectionID == nil else { return }
-            self.reason = applicationContext["recommendation"] as? String ?? applicationContext["reason"] as? String ?? "Нет активных предупреждений"
-        }
-    }
-    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { handle(message, reply: nil) }
-    func session(_ session: WCSession, didReceiveMessage message: [String: Any], replyHandler: @escaping ([String: Any]) -> Void) {
-        handle(message, reply: replyHandler)
-    }
-    private func handle(_ message: [String: Any], reply: (([String: Any]) -> Void)?) {
-        DispatchQueue.main.async {
-            if message["type"] as? String == "hello" {
-                self.gate.disconnect()
-                self.receiverEpoch = UUID().uuidString
-                var response: [String: Any] = ["v": 1, "type": "ready", "message_id": UUID().uuidString,
-                                               "receiver_epoch": self.receiverEpoch]
-                response["connection_id"] = message["connection_id"]
-                if let reply { reply(response) }
-                else if self.session.isReachable { self.session.sendMessage(response, replyHandler: nil, errorHandler: nil) }
-                return
+/// Full-screen alarm. One big target: the driver answers without looking for it.
+struct AlarmView: View {
+    @ObservedObject var link: WatchLink
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").font(.title2)
+            Text(link.title).font(.title3).bold()
+            Text(link.detail).font(.footnote).multilineTextAlignment(.center).lineLimit(4)
+            Spacer(minLength: 2)
+            Button(action: link.acknowledgeAlarm) {
+                Text("Я в порядке").font(.headline).frame(maxWidth: .infinity)
             }
-            guard message["receiver_epoch"] as? String == self.receiverEpoch else { return }
-            let received = self.nowMs()
-            // Check and haptic request are serialized; cancellation is effective once received.
-            let decision = self.gate.receive(message, nowMs: received)
-            var response: [String: Any] = ["v": 1, "type": "ack", "message_id": UUID().uuidString,
-                "ack_message_id": message["message_id"] ?? "", "status": decision.status,
-                "haptic_requested": false, "receiver_epoch": self.receiverEpoch]
-            for key in ["connection_id", "session_id", "trip_id"] { response[key] = message[key] }
-            if decision.status == "pong" {
-                response["type"] = "pong"
-                response["phone_sent_us"] = message["phone_sent_us"]
-                response["watch_received_ms"] = received
-                response["watch_sent_ms"] = self.nowMs()
-            } else if decision.vibrate {
-                // No deferred work between the final TTL check and the haptic request.
-                WKInterfaceDevice.current().play(.notification)
-                response["haptic_requested"] = true
-            }
-            DispatchQueue.main.async {
-                self.status = self.label(decision.status)
-                if decision.vibrate {
-                    self.reason = [message["reason"] as? String, message["recommendation"] as? String]
-                        .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
-                } else if message["type"] as? String == "snapshot" {
-                    self.reason = message["reason"] as? String ?? message["recommendation"] as? String ?? "Нет активных предупреждений"
+            .tint(.white)
+            .foregroundStyle(.red)
+        }
+        .padding(.horizontal, 6)
+        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.red.ignoresSafeArea())
+    }
+}
+
+struct NoticeView: View {
+    @ObservedObject var link: WatchLink
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "cup.and.saucer.fill").font(.title2).foregroundStyle(.orange)
+            Text(link.title).font(.headline)
+            Text(link.detail).font(.footnote).multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 6)
+    }
+}
+
+struct StatusView: View {
+    @ObservedObject var link: WatchLink
+
+    private var color: Color {
+        switch link.phase {
+        case .observing: return .green
+        case .limited: return .orange
+        case .noLink: return .gray
+        default: return .blue
+        }
+    }
+
+    private var icon: String {
+        switch link.phase {
+        case .observing: return "eye.fill"
+        case .limited: return "eye.slash.fill"
+        case .noLink: return "iphone.slash"
+        default: return "car.fill"
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 8) {
+                ZStack {
+                    Circle().stroke(color.opacity(0.35), lineWidth: 6)
+                    Image(systemName: icon).font(.title2).foregroundStyle(color)
                 }
+                .frame(width: 58, height: 58)
+                Text(link.title).font(.headline).multilineTextAlignment(.center)
+                Text(link.detail).font(.footnote).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                if let minutes = link.driveMinutes, link.phase == .observing || link.phase == .limited {
+                    Text("В пути \(minutes) мин").font(.footnote)
+                }
+                if let text = link.recommendation {
+                    Text(text).font(.footnote).foregroundStyle(.orange).multilineTextAlignment(.center)
+                }
+                backgroundRow
+                Button("Проверить вибрацию", action: link.testVibration)
+                    .font(.footnote)
+                Text("NSControl 1.0 • 2").font(.caption2).foregroundStyle(.secondary)
             }
-            if let reply { reply(response) }
-            else if self.session.isReachable { self.session.sendMessage(response, replyHandler: nil, errorHandler: nil) }
+            .padding(.horizontal, 4)
+        }
+    }
+
+    /// Screen-off alerts need the background session; say plainly when it is missing.
+    @ViewBuilder private var backgroundRow: some View {
+        switch link.background {
+        case .active:
+            Label("Работает при погасшем экране", systemImage: "checkmark.circle.fill")
+                .font(.caption2).foregroundStyle(.green)
+        case .denied:
+            VStack(spacing: 4) {
+                Text("Без разрешения часы молчат, когда экран погас")
+                    .font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
+                Button("Разрешить", action: link.enableBackground).font(.footnote)
+            }
+        case .failed, .unavailable:
+            Text("Фоновый режим не запустился. Держите приложение открытым")
+                .font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
+        case .off, .starting:
+            EmptyView()
         }
     }
 }

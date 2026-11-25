@@ -125,6 +125,20 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
             } else {
                 transport = "watch_connectivity"; watch?.activate(); result(wearableStatus())
             }
+        case "wearable.prepare":
+            // Trip start: launch the watch app into its background (workout) session,
+            // so alerts keep working after the watch screen turns off.
+            guard transport == "watch_connectivity", let watch, watch.activationState == .activated,
+                  watch.isPaired, watch.isWatchAppInstalled, HKHealthStore.isHealthDataAvailable() else {
+                result(["status": "unavailable"]); return
+            }
+            let configuration = HKWorkoutConfiguration()
+            configuration.activityType = .other
+            configuration.locationType = .unknown
+            health.startWatchApp(with: configuration) { success, error in
+                self.finish(result, success ? ["status": "launched"]
+                    : ["status": "error", "reason": error?.localizedDescription ?? "startWatchApp failed"])
+            }
         case "wearable.send":
             guard let message = args["message"] as? [String: Any] else { result(["status": "error", "reason": "Missing message"]); return }
             if transport == "garmin" {

@@ -45,7 +45,19 @@ class _IntegrationsPageState extends State<IntegrationsPage> {
                       ? 'Обмен временем установлен'
                       : 'Вибрация требует актуального обмена с приложением часов',
                 ),
+                if (widget.trip.watchBackgroundText case final text?) ...[
+                  const SizedBox(height: 8),
+                  Text(text),
+                ],
                 const SizedBox(height: 12),
+                if (widget.trip.wearable.synchronized) ...[
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(widget.trip.testWatch()),
+                    icon: const Icon(Icons.vibration),
+                    label: const Text('Проверить вибрацию часов'),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 FilledButton.tonalIcon(
                   onPressed: connecting ? null : () => unawaited(connect()),
                   icon: const Icon(Icons.bluetooth_searching),
