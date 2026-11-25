@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'attention_zones.dart';
+import 'holder_shift.dart';
 import 'calibration.dart';
 import 'detection_profile.dart';
 import 'driver_continuity.dart';
@@ -26,15 +27,25 @@ class RecordedFrame {
     required this.faceCount,
     this.signals,
     this.others = const [],
+    this.gravityUp,
   });
   final String engine;
   final int capturedUs, completedUs, faceCount;
+
+  /// The phone's "up" in the camera frame (ARKit): `gravityUp` of a trip
+  /// frame line, `raw.gravityUp` of a lab one.
+  final List<double>? gravityUp;
 
   /// The driver candidate (the face the app chose).
   final FaceSignals? signals;
 
   /// The other faces of the frame (optional `others` of the `frame` line).
   final List<FaceSignals> others;
+}
+
+List<double>? _vector(Object? json) {
+  if (json is! List || json.length != 3) return null;
+  return [for (final v in json) (v as num).toDouble()];
 }
 
 class RecordedLabel {
@@ -166,6 +177,9 @@ class Recording {
                   for (final o in others ?? const [])
                     FaceSignals.fromJson(Map<String, dynamic>.from(o as Map)),
                 ],
+                gravityUp: _vector(
+                  json['gravityUp'] ?? (json['raw'] as Map?)?['gravityUp'],
+                ),
               ),
             );
           case 'label':
@@ -428,7 +442,11 @@ class ReplayResult {
     required this.observedUs,
     this.restoredFrames = 0,
     this.pausedAtUs,
+    this.holderShift,
   });
+
+  /// The holder-shift sign over the run (first suspicion only).
+  final HolderShift? holderShift;
 
   /// Frames whose face got the calibrated id back after a loss (ФТ-02/03).
   final int restoredFrames;
@@ -544,6 +562,11 @@ class ReplayRunner {
       if (r != null) (r.glances[key] ??= []).add(endUs - startUs);
     }
 
+    final holder = _holder(
+      frames,
+      calibrationEndUs,
+      options.profile?.holderShift ?? const HolderShiftSettings(),
+    );
     for (final frame in frames) {
       if (frame.capturedUs <= calibrationEndUs) continue;
       firstUs ??= frame.capturedUs;
@@ -619,6 +642,13 @@ class ReplayRunner {
         );
       }
       _feedFatigue(fatigue, attention, frame, engineProfile, settings);
+      _observeHolder(
+        holder,
+        frame,
+        attention.measurements,
+        engineProfile,
+        tzSign,
+      );
       final snapshot = update.snapshot;
       tzSign = tzSignActive(snapshot);
       eyesEvent = snapshot.eyes.activeEvent != null;
@@ -675,6 +705,72 @@ class ReplayRunner {
       observedUs: (lastUs ?? 0) - (firstUs ?? 0),
       restoredFrames: restored,
       pausedAtUs: pausedAtUs,
+      holderShift: holder,
+    );
+  }
+
+  /// References of the holder-shift sign from the calibration window: the
+  /// phone's "up" and the eyes' direction in the head.
+  static HolderShift _holder(
+    List<RecordedFrame> frames,
+    int calibrationEndUs,
+    HolderShiftSettings settings,
+  ) {
+    final window = frames
+        .where(
+          (f) =>
+              f.capturedUs <= calibrationEndUs &&
+              f.capturedUs >= calibrationEndUs - calibrationUs,
+        )
+        .toList();
+    final ups = [
+      for (final f in window)
+        if (f.gravityUp != null) f.gravityUp!,
+    ];
+    final eyes = [
+      for (final f in window)
+        if (f.signals?.eyeGazeLeft != null && f.signals?.eyeGazeDown != null)
+          (f.signals!.eyeGazeLeft!, f.signals!.eyeGazeDown!),
+    ];
+    return HolderShift(settings: settings)..reset(
+      gravityUp: ups.isEmpty
+          ? null
+          : [for (var i = 0; i < 3; i++) median(ups.map((u) => u[i]))],
+      eyesInHead: eyes.length < 10
+          ? null
+          : (median(eyes.map((e) => e.$1)), median(eyes.map((e) => e.$2))),
+    );
+  }
+
+  static void _observeHolder(
+    HolderShift holder,
+    RecordedFrame frame,
+    List<FaceMeasurement> measurements,
+    CalibrationProfile profile,
+    bool sign,
+  ) {
+    final m = measurements
+        .where((m) => m.trackingId == profile.trackingId)
+        .firstOrNull;
+    final t = profile.eyeThreshold;
+    final s = frame.faceCount == 1 ? frame.signals : null;
+    holder.observe(
+      frame.capturedUs,
+      gravityUp: frame.gravityUp,
+      head: m == null || !m.hasHeadAngles
+          ? null
+          : (
+              m.yaw! - profile.neutralYaw,
+              m.pitchDown! - profile.neutralPitch,
+              (m.roll ?? profile.neutralRoll) - profile.neutralRoll,
+            ),
+      eyesInHead: s?.eyeGazeLeft == null || s?.eyeGazeDown == null
+          ? null
+          : (s!.eyeGazeLeft!, s.eyeGazeDown!),
+      eyesOpen: m?.leftEye == null || m?.rightEye == null || t == null
+          ? true
+          : math.max(m!.leftEye!, m.rightEye!) >= t,
+      sign: sign,
     );
   }
 
@@ -1149,6 +1245,16 @@ String replayReport(Recording recording, List<ReplayResult> results) {
       '${r.restoredFrames} кадрах; '
       '${r.pausedAtUs == null ? 'наблюдение не приостанавливалось' : '**наблюдение приостановлено до новой калибровки на ${_s(r.pausedAtUs!)} с** (другое или второе лицо, долгая потеря)'}.',
     );
+    final shift = r.holderShift;
+    if (shift != null) {
+      final (y, p, roll) = shift.offset;
+      String d(double v) => v.toStringAsFixed(1);
+      b.writeln(
+        '- Сдвиг держателя: ${!shift.suspected ? 'не заподозрен' : '**заподозрен на ${_s(shift.sinceUs!)} с** '
+                  '(${shift.source == HolderShiftSource.gravity ? 'по гравитации' : 'по позе головы'}; '
+                  'смещение: поворот ${d(y)}°, наклон ${d(p)}°, крен ${d(roll)}°)'}.',
+      );
+    }
     b.writeln(
       '- **Итог: ложных тревог ТЗ ${r.falseAlarms}, пропусков ${r.missed}.**'
       '${r.late > 0 ? ' Найдено позже допуска от метки: ${r.late}.' : ''}'
