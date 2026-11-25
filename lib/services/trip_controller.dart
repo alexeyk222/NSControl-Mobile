@@ -10,6 +10,7 @@ import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
 import '../logic/driver_continuity.dart' show ContinuityDecision;
+import '../logic/holder_shift.dart';
 import '../logic/mount.dart';
 import '../logic/mount_shift.dart';
 import '../logic/replay.dart' show tzSignActive;
@@ -209,6 +210,20 @@ class TripController extends ChangeNotifier {
 
   /// «Телефон сдвинулся» while the new calibration is collected.
   String? movedText;
+
+  /// A sudden holder shift (FR-CAL-08), which the slow road adaptation does
+  /// not follow: a tilt of the phone to gravity that the head pose follows,
+  /// or a steady head pose off the road with the eyes straight out of the
+  /// head (a turn of the holder). Either starts a background re-calibration
+  /// like [RoadAdaptation.atLimit].
+  HolderShift? holderShift;
+
+  /// Frames of the calibration window for the references of the holder
+  /// sign: capture time, the phone's "up", the eyes' direction in the head.
+  final List<(int, List<double>?, (double, double)?)> _holderWindow = [];
+  List<double>? _holderUp;
+  (double, double)? _holderEyes;
+  bool _shiftLogged = false;
 
   /// More than one face and no single driver: observation is paused until
   /// the driver is alone in the frame again.
@@ -695,6 +710,7 @@ class TripController extends ChangeNotifier {
     calibrationNote = null;
     _anchorFace = null;
     _anchorUs = null;
+    _holderWindow.clear();
     _calibrationStart = clock.elapsedMicroseconds;
     if (!mountRelative) {
       _collector = CalibrationCollector(
@@ -756,6 +772,7 @@ class TripController extends ChangeNotifier {
         _anchorFace = signals.single;
         _anchorUs = captured;
       }
+      _addHolderFrame(signals, captured);
     } else if (phase == TripPhase.observing &&
         sessionId != null &&
         engine != null) {
@@ -804,6 +821,7 @@ class TripController extends ChangeNotifier {
         ),
       );
       _feedFatigue(measurements, at);
+      _observeHolder(result, measurements, at);
       pipeline
         ?..tzSignActive = tzSignActive(engine.snapshot)
         ..eyesEventActive = engine.snapshot.eyes.activeEvent != null;
@@ -834,23 +852,24 @@ class TripController extends ChangeNotifier {
         // An automaton needs the driver: no new road pose from this window.
         _shiftCollector = null;
         movedText = null;
+        _holderRetry();
         _notify();
         return;
       }
-      collector.add(
-        capturedUs: captured,
-        faces: result.map(_signalsOf).toList(),
-      );
+      final signals = result.map(_signalsOf).toList();
+      collector.add(capturedUs: captured, faces: signals);
       if (result.length == 1) {
         _anchorFace = _signalsOf(result.single);
         _anchorUs = captured;
       }
+      _addHolderFrame(signals, captured);
       if (captured >= _shiftEndUs) {
         _shiftCollector = null;
         final r = collector.finish(nowUs: captured);
         final found = r.result.profile;
         if (found == null) {
           movedText = null;
+          _holderRetry();
           _notify();
         } else {
           unawaited(_swapCalibration(found, r.note, captured));
@@ -861,15 +880,18 @@ class TripController extends ChangeNotifier {
     if (result.length != 1) return;
     final id = result.single.measurement.trackingId;
     if (id == null) return;
+    final shifted = holderShift?.suspected ?? false;
     if (!mountShift.shouldStart(
       atUs: at,
       atLimitSinceUs: adaptation.atLimitSinceUs,
       onRoad: attentionState.zone == GazeZone.road,
       signActive: busy,
+      shifted: shifted,
     )) {
       return;
     }
     mountShift.attempted(at);
+    _holderWindow.clear();
     final start = captured + mountShift.promptDelayUs;
     _shiftCollector = MountCalibrationCollector(
       trackingId: id,
@@ -898,12 +920,109 @@ class TripController extends ChangeNotifier {
       final saved = calibration!.toJson();
       _write((db) => db.setSetting('calibration', saved));
       calibrationNote = note;
+      _takeHolderReferences(now);
       _newSession();
       _recordCalibration(now);
     } finally {
       movedText = null;
       _shiftSwapping = false;
       _notify();
+    }
+  }
+
+  /// A re-calibration did not take: the sign must hold its whole window
+  /// again before the next attempt, so a wrong suspicion does not repeat
+  /// the phrase every [MountShiftMonitor.retryUs].
+  void _holderRetry() {
+    holderShift?.reset(gravityUp: _holderUp, eyesInHead: _holderEyes);
+    _shiftLogged = false;
+  }
+
+  /// One frame of a calibration window, for the holder sign's references.
+  void _addHolderFrame(List<FaceSignals> faces, int captured) {
+    final s = faces.length == 1 ? faces.single : null;
+    final up = _frameGravity;
+    _holderWindow.add((
+      captured,
+      up == null ? null : [for (final v in up) (v as num).toDouble()],
+      s?.eyeGazeLeft == null || s?.eyeGazeDown == null
+          ? null
+          : (s!.eyeGazeLeft!, s.eyeGazeDown!),
+    ));
+  }
+
+  /// The references of the holder sign from the last 10 s of the window
+  /// (as the replay takes them), for the sessions on this calibration.
+  void _takeHolderReferences(int endUs) {
+    final window = _holderWindow.where((f) => f.$1 >= endUs - 10000000);
+    final ups = [
+      for (final f in window)
+        if (f.$2 case final up? when up.length == 3) up,
+    ];
+    final eyes = [for (final f in window) ?f.$3];
+    _holderUp = ups.isEmpty
+        ? null
+        : [for (var i = 0; i < 3; i++) median(ups.map((u) => u[i]))];
+    _holderEyes = eyes.length < 10
+        ? null
+        : (median(eyes.map((e) => e.$1)), median(eyes.map((e) => e.$2)));
+    _holderWindow.clear();
+  }
+
+  /// One observing frame for the holder sign, fed as the replay feeds it.
+  void _observeHolder(
+    List<DetectedFace> result,
+    List<FaceMeasurement> measurements,
+    int at,
+  ) {
+    final shift = holderShift;
+    final profile = engineCalibration, engine = this.engine;
+    if (shift == null || profile == null || engine == null) return;
+    if (_shiftCollector != null || _shiftSwapping) return;
+    final m = measurements
+        .where((m) => m.trackingId == profile.trackingId)
+        .firstOrNull;
+    final s = result.length == 1 ? _signalsOf(result.single) : null;
+    final t = profile.eyeThreshold;
+    final up = _frameGravity;
+    // Head angles every frame (road frame): the gravity path needs the head
+    // to follow the tilt, so a slope or a turn alone does not fire it.
+    shift.observe(
+      at,
+      gravityUp: up == null
+          ? null
+          : [for (final v in up) (v as num).toDouble()],
+      head: m == null || !m.hasHeadAngles
+          ? null
+          : (
+              m.yaw! - profile.neutralYaw,
+              m.pitchDown! - profile.neutralPitch,
+              (m.roll ?? profile.neutralRoll) - profile.neutralRoll,
+            ),
+      eyesInHead: s?.eyeGazeLeft == null || s?.eyeGazeDown == null
+          ? null
+          : (s!.eyeGazeLeft!, s.eyeGazeDown!),
+      eyesOpen: m?.leftEye == null || m?.rightEye == null || t == null
+          ? true
+          : (m!.leftEye! > m.rightEye! ? m.leftEye! : m.rightEye!) >= t,
+      sign:
+          tzSignActive(engine.snapshot) ||
+          engine.snapshot.activeEvents.isNotEmpty,
+    );
+    if (shift.suspected && !_shiftLogged) {
+      _shiftLogged = true;
+      if (_tapping) {
+        final o = shift.offset;
+        _record({
+          'type': 'trip',
+          'atUs': _recUs(clock.elapsedMicroseconds),
+          'holderShift': {
+            'source': shift.source?.code,
+            'sinceUs': shift.sinceUs,
+            'offset': [o.$1, o.$2, o.$3],
+          },
+        });
+      }
     }
   }
 
@@ -1165,6 +1284,7 @@ class TripController extends ChangeNotifier {
         calibration = profile.calibrate(result.profile!);
         final saved = calibration!.toJson();
         _write((db) => db.setSetting('calibration', saved));
+        _takeHolderReferences(now);
         if (note != null) {
           // FR-CAL-06: a false eye alarm is worse than no eye tracking.
           calibrationNote = note;
@@ -1201,6 +1321,12 @@ class TripController extends ChangeNotifier {
     attentionState = AttentionState.unknown;
     // Session times start at 0 again; a new road pose starts a new watch.
     mountShift = MountShiftMonitor();
+    // The holder sign starts over on the references of the calibration
+    // (kept over a pause: the phone is where it was).
+    final shiftSettings = this.profile.holderShift;
+    holderShift = HolderShift(settings: shiftSettings)
+      ..reset(gravityUp: _holderUp, eyesInHead: _holderEyes);
+    _shiftLogged = false;
     final anchor = _anchorFace, seen = _anchorUs;
     if (anchor != null && seen != null) {
       // Where the driver was last seen, so a loss right after the start of

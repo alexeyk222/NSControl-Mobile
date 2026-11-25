@@ -21,4 +21,20 @@ void main() {
     expect(at(60 * s), isFalse);
     expect(at(140 * s), isTrue);
   });
+
+  test('a sudden shift starts without the hold and the road zone', () {
+    final m = MountShiftMonitor();
+    bool at(int t, {bool sign = false}) => m.shouldStart(
+      atUs: t,
+      atLimitSinceUs: null,
+      onRoad: false,
+      signActive: sign,
+      shifted: true,
+    );
+    expect(at(5 * s, sign: true), isFalse);
+    expect(at(5 * s), isTrue);
+    m.attempted(5 * s);
+    expect(at(60 * s), isFalse);
+    expect(at(125 * s), isTrue);
+  });
 }

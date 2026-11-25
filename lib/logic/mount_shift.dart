@@ -28,14 +28,24 @@ class MountShiftMonitor {
   int? _lastAttemptUs;
 
   /// [atLimitSinceUs] from [RoadAdaptation], all times on the same clock.
+  /// [shifted]: [HolderShift] (pose path) suspects a sudden shift. It has
+  /// held its own window with the head steady and the eyes straight out of
+  /// the head, so it needs neither the hold nor the road zone (after a jump
+  /// of the holder the road itself lies outside the old road zone).
   bool shouldStart({
     required int atUs,
     required int? atLimitSinceUs,
     required bool onRoad,
     required bool signActive,
+    bool shifted = false,
   }) {
-    if (atLimitSinceUs == null || atUs - atLimitSinceUs < holdUs) return false;
-    if (!onRoad || signActive) return false;
+    if (signActive) return false;
+    if (!shifted) {
+      if (atLimitSinceUs == null || atUs - atLimitSinceUs < holdUs) {
+        return false;
+      }
+      if (!onRoad) return false;
+    }
     final last = _lastAttemptUs;
     return last == null || atUs - last >= retryUs;
   }
