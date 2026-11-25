@@ -274,19 +274,21 @@ class _Controls extends StatelessWidget {
         if (lab.options.length > 1)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
-            child: SegmentedButton<String>(
-              segments: [
+            // Chips wrap on a narrow screen: four engine choices do not fit
+            // one segmented row.
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
                 for (final o in lab.options)
-                  ButtonSegment(value: o.id, label: Text(o.title)),
+                  ChoiceChip(
+                    label: Text(o.title),
+                    selected: o.id == lab.option.id,
+                    onSelected: lab.recording
+                        ? null
+                        : (_) => unawaited(lab.selectEngine(o)),
+                  ),
               ],
-              selected: {lab.option.id},
-              onSelectionChanged: lab.recording
-                  ? null
-                  : (value) => unawaited(
-                      lab.selectEngine(
-                        lab.options.firstWhere((o) => o.id == value.single),
-                      ),
-                    ),
             ),
           )
         else

@@ -307,9 +307,13 @@ void main() {
       await s.dispose();
     });
 
-    test('lab options list both variants', () {
+    test('lab options list the variants', () {
       final options = arkitLabEngineOptions();
-      expect(options.map((o) => o.id), ['arkit', 'arkit_mlkit']);
+      expect(options.map((o) => o.id), ['arkit', 'arkit_30', 'arkit_mlkit']);
+      expect(
+        (options[1].create() as ArkitFaceSource).options.toMap()['fps'],
+        30,
+      );
       expect(options.last.engineIds, [
         'arkit_face_tracking',
         'mlkit_face_detection',
