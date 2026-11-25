@@ -89,6 +89,8 @@
 	<string>Bluetooth нужен для передачи предупреждений на часы Garmin.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Bluetooth нужен для передачи предупреждений на часы Garmin.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Во время поездки NSControl держит Apple Watch в режиме тренировки, чтобы предупредить вибрацией при погасшем экране. Тренировка не сохраняется.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Завершённый сон с часов нужен для локальных рекомендаций; доступна только информация о сне.</string>
 </dict>
