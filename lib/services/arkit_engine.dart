@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import '../logic/arkit_geometry.dart';
 import '../logic/clock_map.dart';
 import '../logic/domain.dart';
+import 'debug_video.dart';
 import 'detector.dart';
 import 'face_source.dart';
 
@@ -110,6 +111,8 @@ class ArkitStats {
     this.imageHeight,
     this.mlKitWidth,
     this.mlKitHeight,
+    this.jpegs,
+    this.jpegBytes,
   });
   final int atUs, arFrames, sent, droppedEvents;
   final int mlKitDone, mlKitSkipped, mlKitErrors, mlKitBusyUs;
@@ -125,6 +128,10 @@ class ArkitStats {
   /// Size of the image ML Kit actually analysed in the last second (after
   /// scaling, before rotation), null when ML Kit did not run.
   final int? mlKitWidth, mlKitHeight;
+
+  /// Debug video JPEGs made in the last second and their bytes; null when
+  /// the debug video is off.
+  final int? jpegs, jpegBytes;
 
   /// The `device` line of the recording (see the contract).
   Map<String, Object?> toJson() => {
@@ -147,6 +154,8 @@ class ArkitStats {
     if (imageHeight != null) 'imageHeight': imageHeight,
     if (mlKitWidth != null) 'mlKitWidth': mlKitWidth,
     if (mlKitHeight != null) 'mlKitHeight': mlKitHeight,
+    if (jpegs != null) 'jpegs': jpegs,
+    if (jpegBytes != null) 'jpegBytes': jpegBytes,
   };
 }
 
@@ -266,6 +275,31 @@ class ArkitEngine {
   final Map<int, int> _captured = {};
   final List<int> _capturedOrder = [];
 
+  /// Developer debug video (docs/trip-debug.md), re-applied after each
+  /// start because the bridge turns it off on stop.
+  DebugVideoOptions debugVideo = DebugVideoOptions.off;
+  void Function(DebugJpeg jpeg)? onJpeg;
+
+  /// Turns the debug JPEGs on or off, now if running, else at [start].
+  Future<void> setDebugVideo(
+    DebugVideoOptions options,
+    void Function(DebugJpeg jpeg)? onJpeg,
+  ) async {
+    debugVideo = options;
+    this.onJpeg = onJpeg;
+    if (running) await _applyDebugVideo();
+  }
+
+  Future<void> _applyDebugVideo() async {
+    try {
+      await _method.invokeMethod<void>('debugVideo', debugVideo.toMap());
+    } on MissingPluginException {
+      // An older bridge without the debug video.
+    } on PlatformException {
+      // Not implemented by this build of the bridge.
+    }
+  }
+
   Future<bool> isSupported() async =>
       await _method.invokeMethod<bool>('isSupported') ?? false;
 
@@ -329,6 +363,7 @@ class ArkitEngine {
         textureId: (reply['textureId'] as num?)?.toInt(),
       );
       info = started;
+      if (debugVideo.on) await _applyDebugVideo();
       return started;
     } catch (_) {
       await stop();
@@ -435,6 +470,22 @@ class ArkitEngine {
           ),
           {'orientation': event['orientation']},
         );
+      case 'jpeg':
+        final sink = onJpeg;
+        final data = event['data'];
+        if (sink == null || data is! Uint8List || !clock.ready) return;
+        final nativeCaptured = (event['capturedUptimeUs'] as num).toInt();
+        sink(
+          DebugJpeg(
+            capturedUs:
+                _captured[nativeCaptured] ?? _local(nativeCaptured, received),
+            bytes: data,
+            width: (event['width'] as num).toInt(),
+            height: (event['height'] as num).toInt(),
+            quarterTurns: display?.quarterTurns ?? 1,
+            mirrored: display?.mirrored ?? true,
+          ),
+        );
       case 'stats':
         if (onStats == null || !clock.ready) return;
         double? d(String key) => (event[key] as num?)?.toDouble();
@@ -458,6 +509,8 @@ class ArkitEngine {
             imageHeight: info?.height,
             mlKitWidth: (event['mlKitWidth'] as num?)?.toInt(),
             mlKitHeight: (event['mlKitHeight'] as num?)?.toInt(),
+            jpegs: (event['jpegs'] as num?)?.toInt(),
+            jpegBytes: (event['jpegBytes'] as num?)?.toInt(),
           ),
         );
       case 'error':
@@ -500,7 +553,7 @@ class ArkitEngine {
 /// ARKit as a lab [FaceSource]: `[arkit]` or, with [compare], `[arkit,
 /// mlkit]` where ML Kit analyses the same `capturedImage` and both results
 /// carry the same `capturedUs`.
-class ArkitFaceSource implements FaceSource {
+class ArkitFaceSource implements FaceSource, DebugVideoSource {
   ArkitFaceSource({
     this.compare = false,
     ArkitOptions? options,
@@ -608,6 +661,12 @@ class ArkitFaceSource implements FaceSource {
       ),
     );
   }
+
+  @override
+  Future<void> setDebugVideo(
+    DebugVideoOptions options,
+    void Function(DebugJpeg jpeg)? onJpeg,
+  ) => engine.setDebugVideo(options, onJpeg);
 
   @override
   Future<void> dispose() => stop();

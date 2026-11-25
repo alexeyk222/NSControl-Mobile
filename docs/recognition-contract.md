@@ -6,7 +6,7 @@
 
 - Пороги ТЗ: глаза — обе оценки ниже T не меньше 1,5 с (ФТ-04); голова — наклон относительно калибровки строго больше 20° не меньше 2,0 с при повороте до 30° включительно (ФТ-05). Автоматы `ObservationEngine` получают только `FaceMeasurement`.
 - Всё сверх ТЗ (зоны, отвлечение, учёт взгляда вниз) работает под флагом и в режиме приёмки выключается, если оно ослабляет обязательные требования.
-- Кадры и видео приложение не сохраняет и не передаёт (ФТ-01), в том числе в Лаборатории и в записи. В запись и поток идут только числа.
+- Кадры и видео приложение не сохраняет и не передаёт (ФТ-01), в том числе в Лаборатории и в записи. В запись и поток идут только числа. Единственное исключение — отладочное видео режима разработчика (по умолчанию выключено, только локальная сеть и телефон, `docs/trip-debug.md`, раздел 7).
 
 ## Сигналы лица: `lib/logic/signals.dart`
 
@@ -65,6 +65,15 @@
 - **`derived`.** Пишется 10 раз в секунду, только пока идёт наблюдение: зона и решения конвейера (`attention`: затвор глаз, водитель).
 - **`device`.** На ARKit раз в секунду, как у Лаборатории. **На запасном ML Kit строк `device` нет**: плагин камеры статистики устройства не отдаёт, поэтому нагрев на ML Kit не отслеживается.
 - **`trip`.** `{"type":"trip","atUs":…,"heat":{"thermal":"serious","economy":true,"emitEvery":2,"floorHit":false}}` при смене режима нагрева (FR-DRV-08). Replay такие строки пропускает.
+
+Живой дебаг и разбор поездки (`docs/trip-debug.md`), режим разработчика:
+
+- **`meta.thresholds`.** Пороги, на которых работают автоматы поездки: `eyesClosedUs`, `headDownUs`, `pitchThreshold`, `headYawLimit`, `maximumGapUs`, `eyeYawLimit`, `eyeThreshold` (если профиль фиксирует T движка). `meta.clips: true`, если пишутся клипы тревог. `meta.live: true` у потока без записи.
+- **`derived.measure`.** То, что получили автоматы на последнем кадре, относительно калибровки, на которой они работают: `pitchDown`, `yaw` (°, от позы «дорога» при `mountRelative`), `eyeLeft`, `eyeRight` (после затвора глаз), `eyeThreshold` (T). Без лица поля нет.
+- **`mark`.** `{"type":"mark","atUs":…,"kind":"mark|false|true|miss","source":"phone|mac","eventId":…,"cause":…,"note":…,"sessionOffsetUs":…}`. Метка на ходу: двойное касание экрана поездки (`source: phone`, `kind: mark`) или страница на Mac. `eventId` указывает, к какой тревоге относится вердикт `false`/`true`; без него вердикт относится к последней тревоге не раньше 60 с. `cause` — код причины (`mirror`, `blind_spot`, `instruments`, `phone`, `talk`, `squint`, `glare`, `yawn`, `bump`, `face_lost`, `mount`, `other`; для верных `drowsy`, `deliberate`, `long_look`). Replay такие строки пропускает.
+- **`trip` с `ended: true`** в конце поездки.
+- **Разбор** — отдельный файл `nscontrol-<recordingId>.review.json` рядом с записью: `{"type":"review","schema":1,"recordingId":…,"items":[{"kind":"event","eventId":…,"eventType":…,"atUs":…,"signStartedUs":…,"endedUs":…,"verdict":"true|false|unsure","cause":…,"note":…},{"kind":"mark","mark":…,"atUs":…,"verdict":"no_issue|miss_eyes|miss_head|unsure","windowFromUs":…,"windowToUs":…}]}`. Времена на часах записи (у событий уже прибавлен `sessionOffsetUs`). `tool/trip_review.dart --out` превращает разбор в строки `label` сценария `trip-review` (шаги `trip_*`, таблица в `docs/trip-debug.md`).
+- **Изображения.** В JSONL и в разборе их нет. Отладочное видео живёт отдельно (раздел 7 `docs/trip-debug.md`): бинарные сообщения WebSocket `NSJ1` + длина заголовка (uint32 LE) + заголовок JSON `{"type":"jpeg","atUs","width","height","quarterTurns","mirrored"}` + JPEG в ориентации сенсора, а клипы лежат в `recordings/clips/nscontrol-<id>.clip-<мс>-<причина>.ndjson`: строка `clip` (окно `fromUs`..`toUs`, `reasons`, `eventIds`, поворот) и строки `{"type":"jpeg","atUs":…,"data":"<base64>"}`.
 
 ## Шаги сценария
 

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 import 'package:camera/camera.dart' show CameraException, CameraPreview;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Widget;
@@ -16,9 +17,11 @@ import '../logic/thermal.dart';
 import '../version.dart';
 import 'arkit_engine.dart' show ArkitOptions, ArkitStats;
 import 'camera_service.dart';
+import 'debug_video.dart';
 import 'detector.dart';
 import 'face_source.dart';
 import 'lab_recorder.dart';
+import 'lab_server.dart';
 import 'platform_bridge.dart';
 import 'wearable_gateway.dart';
 
@@ -216,6 +219,36 @@ class TripController extends ChangeNotifier {
   /// folder as the lab recordings, for offline analysis. Numbers only.
   LabRecorder? recorder;
   bool recordTrips = false;
+
+  /// Developer option «Живой дебаг» (docs/trip-debug.md): a local server
+  /// with the live page for a browser on the Mac (same Wi-Fi or the phone's
+  /// hotspot) and the review page of recorded trips. It runs while the
+  /// option is on, not only during a trip, so a trip can be reviewed right
+  /// after it ends.
+  bool liveDebug = false;
+  LabServer? debugServer;
+
+  /// Port of the trip's live debug; the lab keeps 8765.
+  static const debugPort = 8766;
+
+  /// Developer option «Клипы тревог»: with the trip recording on, the phone
+  /// keeps short low-resolution clips around each alarm and mark in
+  /// `recordings/clips/` for the review (ARKit only). Pictures never go
+  /// into the JSONL recording and never leave the phone except to the
+  /// review page on the local network.
+  bool debugClips = false;
+  ClipRecorder? clips;
+
+  /// Debug video sent to the ARKit source now, and to which source.
+  DebugVideoOptions _video = DebugVideoOptions.off;
+  Object? _videoSource;
+
+  /// For a page that connects during the trip: the meta and calibration in
+  /// effect and the recent events and marks.
+  Map<String, Object?>? _metaLine, _calibrationLine;
+  final List<Map<String, Object?>> _history = [];
+  bool _debugSuspended = false;
+  int _lastCapturedUs = 0;
 
   /// Where the phone is mounted, for `meta.mount` (as in the lab).
   String mountPosition = 'front';
@@ -422,6 +455,7 @@ class TripController extends ChangeNotifier {
         onError: _cameraError,
         onChanged: _notify,
       );
+      _updateDebugVideo();
     } catch (e) {
       if (!identical(_arkit, source)) return;
       _arkit = null;
@@ -480,7 +514,7 @@ class TripController extends ChangeNotifier {
   void _onArkitStats(ArkitStats stats) {
     final line = stats.toJson();
     lastDevice = line;
-    if (recording) _record({...line, 'atUs': _recUs(stats.atUs)});
+    if (_tapping) _record({...line, 'atUs': _recUs(stats.atUs)});
     if (!active) return;
     final wasEconomy = heat.economy, wasReduced = heat.rateReduced;
     final decision = heat.update(
@@ -493,7 +527,8 @@ class TripController extends ChangeNotifier {
     if (decision.warnCritical) _heatSpeech = _HeatSpeech.critical;
     _sayHeat();
     if (wasEconomy != heat.economy || wasReduced != heat.rateReduced) {
-      if (recording) {
+      _updateDebugVideo();
+      if (_tapping) {
         _record({
           'type': 'trip',
           'atUs': _recUs(stats.atUs),
@@ -649,6 +684,7 @@ class TripController extends ChangeNotifier {
   void _onFaces(List<DetectedFace> result, int captured, int completed) {
     if (!active || !_foreground) return;
     faces = result;
+    _lastCapturedUs = captured;
     _recordFrame(result, captured, completed);
     if (phase == TripPhase.calibrating) {
       _collector?.add(
@@ -1165,21 +1201,30 @@ class TripController extends ChangeNotifier {
       _audioRequested = shouldSound;
       _syncAudio(shouldSound);
     }
-    if (recording) {
+    for (final e in update.started) {
+      clips?.trigger(
+        atUs: _recUs(sessionBaseUs + e.thresholdUs),
+        reason: e.type.code,
+        eventId: e.id,
+      );
+    }
+    if (_tapping || debugServer != null) {
       for (final (change, events) in [
         ('started', update.started),
         ('ended', update.ended),
         ('acknowledged', update.acknowledged),
       ]) {
         for (final e in events) {
-          _record({
+          final line = {
             ...RecordingSchema.event(
               change: change,
               event: e,
               atUs: _recUs(clock.elapsedMicroseconds),
             ),
             'sessionOffsetUs': _recUs(sessionBaseUs),
-          });
+          };
+          _remember(line);
+          _record(line);
         }
       }
     }
@@ -1332,6 +1377,16 @@ class TripController extends ChangeNotifier {
     final id = tripId!;
     phase = TripPhase.idle;
     await _endSession(EventEndReason.tripEnded);
+    final ended = {
+      'type': 'trip',
+      'atUs': _recUs(clock.elapsedMicroseconds),
+      'ended': true,
+    };
+    _remember(ended);
+    _record(ended);
+    _setDebugVideo(DebugVideoOptions.off);
+    await clips?.flush();
+    clips = null;
     await _stopRecording();
     tripId = null;
     faces = [];
@@ -1373,6 +1428,14 @@ class TripController extends ChangeNotifier {
     }
     final generation = ++_lifecycleGeneration;
     _foreground = value;
+    if (!value) {
+      _debugSuspended = liveDebug;
+    } else if (_debugSuspended) {
+      // iOS may have closed the listening socket in the background; the
+      // same key keeps the page's link valid.
+      _debugSuspended = false;
+      unawaited(_restartDebugServer());
+    }
     if (!active) return;
     if (!value) {
       faces = [];
@@ -1684,10 +1747,212 @@ class TripController extends ChangeNotifier {
     _write((db) => db.upsertDelivery(row));
   }
 
+  // ---- live debug (developer option, docs/trip-debug.md) -------------------
+
+  /// Turns the live debug server on or off (setting `trip_debug_live`).
+  Future<void> setLiveDebug(bool on) async {
+    liveDebug = on;
+    if (!on) {
+      final server = debugServer;
+      debugServer = null;
+      _updateDebugVideo();
+      await server?.stop();
+      _notify();
+      return;
+    }
+    final server = debugServer ??= LabServer(
+      recordings: () async => await recorder?.list() ?? const [],
+      port: debugPort,
+      onConnected: _greeting,
+      onMessage: _onDebugMessage,
+      onVideoDemand: (_) => _updateDebugVideo(),
+      directory: recorder?.directory,
+    );
+    try {
+      await server.start();
+    } catch (e) {
+      alertError = 'Живой дебаг не запустился: $e';
+    }
+    _notify();
+  }
+
+  Future<void> _restartDebugServer() async {
+    final server = debugServer;
+    if (server == null) return;
+    await server.stop();
+    if (!identical(server, debugServer)) return;
+    try {
+      await server.start();
+    } catch (_) {}
+    _notify();
+  }
+
+  /// Addresses of the live page, Wi-Fi and hotspot first.
+  List<String> get debugUrls =>
+      debugServer?.running ?? false ? debugServer!.urls : const [];
+
+  List<Map<String, Object?>> _greeting() => [
+    _metaLine ??
+        {
+          'type': 'meta',
+          'schema': RecordingSchema.version,
+          'recordingId': '',
+          'source': 'trip',
+          'live': true,
+          'engines': [capabilities.id],
+          'detectionProfile': profile.toJson(),
+          'settings': settings.toJson(),
+        },
+    ?_calibrationLine,
+    ?lastDevice == null ? null : {...lastDevice!, 'atUs': 0},
+    ..._history,
+    {
+      'type': 'trip',
+      'atUs': _recUs(clock.elapsedMicroseconds),
+      'phase': phase.name,
+      'active': active,
+    },
+  ];
+
+  /// Keeps event, mark and trip lines for a page that connects later.
+  void _remember(Map<String, Object?> line) {
+    _history.add(line);
+    if (_history.length > 400) _history.removeAt(0);
+  }
+
+  void _onDebugMessage(Map<String, Object?> message) {
+    if (message['type'] != 'mark') return;
+    String? text(String key) {
+      final v = message[key];
+      return v is String && v.isNotEmpty && v.length <= 200 ? v : null;
+    }
+
+    mark(
+      kind: text('kind') ?? 'mark',
+      source: 'mac',
+      eventId: text('eventId'),
+      cause: text('cause'),
+      note: text('note'),
+    );
+  }
+
+  /// Mark kinds of the review (docs/trip-debug.md): something odd here,
+  /// the alarm was false, the alarm was right, an alarm was missed.
+  static const markKinds = {'mark', 'false', 'true', 'miss'};
+
+  /// A mark of the review at this moment: from the phone (a double tap on
+  /// the trip screen, said back by voice) or from the live page on the Mac
+  /// (a passenger, keys or buttons). A verdict about one alarm carries its
+  /// [eventId]; `false`/`true` without it are about the latest alarm.
+  /// The mark goes into the recording and the live page, and starts a clip.
+  void mark({
+    String kind = 'mark',
+    String source = 'phone',
+    String? eventId,
+    String? cause,
+    String? note,
+  }) {
+    if (!active || !markKinds.contains(kind)) return;
+    // Now, and never before the last analysed frame.
+    final now = clock.elapsedMicroseconds;
+    final at = _recUs(now > _lastCapturedUs ? now : _lastCapturedUs);
+    final line = <String, Object?>{
+      'type': 'mark',
+      'atUs': at,
+      'kind': kind,
+      'source': source,
+      'eventId': ?eventId,
+      'cause': ?cause,
+      'note': ?note,
+      'sessionOffsetUs': _recUs(sessionBaseUs),
+    };
+    _remember(line);
+    _record(line);
+    // A verdict about an alarm already has the alarm's clip.
+    if (eventId == null) clips?.trigger(atUs: at, reason: kind);
+    if (source == 'phone') _say('Отметил');
+    _notify();
+  }
+
+  /// The debug video the ARKit source should send now: for a live page
+  /// that asked for it or for the clips; fewer pictures when the phone is
+  /// hot (FR-DRV-08).
+  void _updateDebugVideo() {
+    final wanted =
+        active &&
+        engineInUse == TripEngine.arkit &&
+        ((debugServer?.videoWanted ?? false) || clips != null);
+    _setDebugVideo(
+      !wanted
+          ? DebugVideoOptions.off
+          : heat.economy
+          ? const DebugVideoOptions(fps: 2)
+          : DebugVideoOptions.live,
+    );
+  }
+
+  void _setDebugVideo(DebugVideoOptions options) {
+    final source = _arkit;
+    if (source is! DebugVideoSource) return;
+    final fresh = !identical(source, _videoSource);
+    if (!fresh && options == _video) return;
+    _video = options;
+    _videoSource = source;
+    // A new source starts without the video.
+    if (fresh && !options.on) return;
+    final video = source as DebugVideoSource;
+    unawaited(
+      _safe(() => video.setDebugVideo(options, options.on ? _onJpeg : null)),
+    );
+  }
+
+  void _onJpeg(DebugJpeg jpeg) {
+    final at = _recUs(jpeg.capturedUs);
+    clips?.add(at, jpeg);
+    final server = debugServer;
+    if (server != null && server.videoWanted) {
+      server.broadcastJpeg(jpeg.message(at));
+    }
+  }
+
+  /// What the automata got on the last frame, relative to the calibration
+  /// they run on: head down and turned (°), the eyes and their T. The live
+  /// page draws it against the thresholds.
+  Map<String, Object?>? _measure() {
+    final cal = engineCalibration ?? calibration;
+    final list = attention?.lastMeasurements ?? const <FaceMeasurement>[];
+    if (cal == null || list.isEmpty) return null;
+    final m =
+        list.where((f) => f.trackingId == cal.trackingId).firstOrNull ??
+        list.first;
+    double round(double v, int digits) {
+      final scale = digits == 1 ? 10 : 1000;
+      return (v * scale).roundToDouble() / scale;
+    }
+
+    return {
+      if (m.pitchDown != null)
+        'pitchDown': round(m.pitchDown! - cal.neutralPitch, 1),
+      if (m.yaw != null) 'yaw': round(m.yaw! - cal.neutralYaw, 1),
+      if (m.leftEye != null) 'eyeLeft': round(m.leftEye!, 3),
+      if (m.rightEye != null) 'eyeRight': round(m.rightEye!, 3),
+      'eyeThreshold': ?cal.eyeThreshold,
+    };
+  }
+
   // ---- recording (developer option) ----------------------------------------
 
   int _recUs(int absUs) => absUs - _recordBaseUs;
-  void _record(Map<String, Object?> line) => recorder?.write(line);
+
+  /// Writes the line to the trip recording (when on) and sends it to the
+  /// live pages (when any is connected).
+  void _record(Map<String, Object?> line) {
+    if (recording) recorder?.write(line);
+    debugServer?.broadcast(line);
+  }
+
+  /// Lines go out when the trip is recorded or a live page is connected.
+  bool get _tapping => recording || (debugServer?.clients ?? 0) > 0;
 
   static String _stamp(DateTime t) {
     String two(int v) => v.toString().padLeft(2, '0');
@@ -1696,49 +1961,78 @@ class TripController extends ChangeNotifier {
   }
 
   Future<void> _startRecording() async {
-    final target = recorder;
-    if (!recordTrips || target == null) return;
-    final started = DateTime.now();
-    final id = 'trip-${_stamp(started)}';
-    try {
-      await target.start(id);
-    } catch (e) {
-      alertError = 'Запись поездки не началась: $e';
-      return;
-    }
-    recordingId = id;
+    // The stream clock starts with the trip even when it is not recorded,
+    // so a live page and the recording share it.
     _recordBaseUs = clock.elapsedMicroseconds;
     _lastDerivedUs = 0;
+    _calibrationLine = null;
+    _history.clear();
+    _metaLine = null;
+    final started = DateTime.now();
+    final id = 'trip-${_stamp(started)}';
+    final target = recorder;
+    var recordingOn = false;
+    if (recordTrips && target != null) {
+      try {
+        await target.start(id);
+        recordingOn = true;
+      } catch (e) {
+        alertError = 'Запись поездки не началась: $e';
+      }
+    }
+    recordingId = recordingOn ? id : null;
+    clips = recordingOn && debugClips && target != null
+        ? ClipRecorder(
+            directory: Directory('${target.directory.path}/clips'),
+            recordingId: id,
+          )
+        : null;
+    if (!recordingOn && !liveDebug) return;
     Map<String, Object?> device = const {};
     try {
       device = await platform
           .call('device.info')
           .timeout(const Duration(milliseconds: 500));
     } catch (_) {}
-    _record(
-      RecordingSchema.meta(
-        recordingId: id,
-        app: appVersion,
-        engines: [capabilities.id],
-        startedAt: started,
-        device: device['model'] as String?,
-        os: device['os'] as String?,
-        extra: {
-          'source': 'trip',
-          'tripId': tripId,
-          // The trip runs the profile's attention pipeline as the lab does.
-          'attention': ZoneAttentionProvider(settings: profile.attention).id,
-          'attentionSettings': profile.attention.toJson(),
-          'tripEngine': engineInUse.name,
-          if (engineNote != null) 'engineNote': engineNote,
-          'tzReference': tzReference,
-          'detectionProfile': profile.toJson(),
-          'mount': {'position': mountPosition},
-          'algorithm': ObservationEngine.algorithmVersion,
-          'settings': settings.toJson(),
+    final session = profile.session(settings);
+    final meta = RecordingSchema.meta(
+      recordingId: id,
+      app: appVersion,
+      engines: [capabilities.id],
+      startedAt: started,
+      device: device['model'] as String?,
+      os: device['os'] as String?,
+      extra: {
+        'source': 'trip',
+        // Not recorded: only the live page sees this trip.
+        if (!recordingOn) 'live': true,
+        'tripId': tripId,
+        // The trip runs the profile's attention pipeline as the lab does.
+        'attention': ZoneAttentionProvider(settings: profile.attention).id,
+        'attentionSettings': profile.attention.toJson(),
+        'tripEngine': engineInUse.name,
+        if (engineNote != null) 'engineNote': engineNote,
+        'tzReference': tzReference,
+        'detectionProfile': profile.toJson(),
+        // The thresholds the automata of this trip run on (the user's ТЗ
+        // settings under «ТЗ 2.2 (эталон)», the profile's otherwise).
+        'thresholds': {
+          'eyesClosedUs': session.eyesClosedUs,
+          'headDownUs': session.headDownUs,
+          'pitchThreshold': session.pitchThreshold,
+          'headYawLimit': session.headYawLimit,
+          'maximumGapUs': session.maximumGapUs,
+          'eyeYawLimit': profile.detector(capabilities).eyeYawLimit,
+          'eyeThreshold': ?profile.eyeThresholds[capabilities.id],
         },
-      ),
+        if (clips != null) 'clips': true,
+        'mount': {'position': mountPosition},
+        'algorithm': ObservationEngine.algorithmVersion,
+        'settings': settings.toJson(),
+      },
     );
+    _metaLine = meta;
+    _record(meta);
   }
 
   Future<void> _stopRecording() async {
@@ -1753,21 +2047,24 @@ class TripController extends ChangeNotifier {
   /// the session (events) to the recording clock.
   void _recordCalibration(int now) {
     final profile = calibration;
-    if (!recording || profile == null) return;
+    if (profile == null || (!_tapping && debugServer == null)) return;
     final zones =
         attention?.pipeline?.zones ?? ZoneMap.fromCalibration(profile);
-    _record({
+    final line = {
       ...RecordingSchema.calibration(
         atUs: _recUs(now),
         profile: profile,
         zones: zones.toJson(),
       ),
       'sessionOffsetUs': _recUs(sessionBaseUs),
-    });
+    };
+    // A page that connects later starts from the calibration in effect.
+    _calibrationLine = line;
+    _record(line);
   }
 
   void _recordFrame(List<DetectedFace> result, int captured, int completed) {
-    if (!recording) return;
+    if (!_tapping) return;
     final id = calibration?.trackingId;
     final driver = result.isEmpty
         ? null
@@ -1797,7 +2094,7 @@ class TripController extends ChangeNotifier {
   /// 10 per second, as in the lab.
   void _recordDerived(int completed) {
     final current = engine?.snapshot;
-    if (!recording || current == null) return;
+    if (!_tapping || current == null) return;
     if (completed - _lastDerivedUs < 100000 && completed >= _lastDerivedUs) {
       return;
     }
@@ -1813,6 +2110,7 @@ class TripController extends ChangeNotifier {
           'sessionOffsetUs': _recUs(sessionBaseUs),
           if (attentionState.details.isNotEmpty)
             'attention': attentionState.details,
+          'measure': ?_measure(),
         },
       ),
     );
@@ -1821,6 +2119,7 @@ class TripController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(debugServer?.stop());
     unawaited(recorder?.stop());
     _timer?.cancel();
     unawaited(_platformEvents?.cancel());

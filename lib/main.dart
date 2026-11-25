@@ -33,6 +33,7 @@ Future<void> main() async {
   var incomplete = false;
   var developerMode = false;
   var recordTrips = false;
+  var liveDebug = false, debugClips = false;
   var tripProfile = DetectionProfile.current;
   var tripEngine = TripEngine.arkit;
   String? tripMount;
@@ -56,6 +57,8 @@ Future<void> main() async {
             ? DetectionProfile.tz22
             : DetectionProfile.current);
     recordTrips = await db.getSetting('trip_recording') == true;
+    liveDebug = await db.getSetting('trip_debug_live') == true;
+    debugClips = await db.getSetting('trip_debug_clips') == true;
     final engine = await db.getSetting('trip_engine');
     tripEngine =
         TripEngine.values.where((e) => e.name == engine).firstOrNull ??
@@ -89,6 +92,7 @@ Future<void> main() async {
         ..profile = tripProfile
         ..engineChoice = tripEngine
         ..recordTrips = recordTrips
+        ..debugClips = debugClips
         ..mountPosition = tripMount ?? 'front';
   trip.journalIncomplete = incomplete || db == null;
   final sleep = SleepController(trip: trip, platform: const PlatformBridge());
@@ -101,6 +105,8 @@ Future<void> main() async {
       ? null
       : Directory('${documents.path}/recordings');
   if (recordings != null) trip.recorder = LabRecorder(recordings);
+  // Developer live debug: the server lives while the option is on.
+  if (liveDebug) unawaited(trip.setLiveDebug(true));
   runApp(
     NSControlApp(
       trip: trip,
