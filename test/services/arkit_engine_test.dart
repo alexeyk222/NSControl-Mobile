@@ -290,6 +290,8 @@ void main() {
       expect(stats.single.toJson()['type'], 'device');
       expect(stats.single.toJson()['thermal'], 'fair');
       expect(stats.single.atUs, 1500000);
+      expect(stats.single.toJson()['imageWidth'], 1280);
+      expect(stats.single.toJson()['imageHeight'], 720);
       expect(errors.single.toString(), contains('Нет доступа к камере'));
       await s.dispose();
     });

@@ -56,6 +56,8 @@ String _comparison({double mlYawSign = 1, bool devices = true}) {
           'mlKitDone': 15,
           'mlKitSkipped': 15,
           'mlKitBusyUs': 15 * 25000,
+          'imageWidth': 1280,
+          'imageHeight': 720,
         }),
       );
     }
@@ -75,7 +77,7 @@ void main() {
     // The synthetic ARKit signals find every positive episode.
     final arkitRow = report
         .split('\n')
-        .firstWhere((l) => l.startsWith('| arkit_face_tracking |'));
+        .firstWhere((l) => l.startsWith('| arkit_face_tracking | приёмка |'));
     expect(arkitRow, contains('| 2 из 2 | 1 из 1 |'));
     // Signs: mirrors turn the head the expected way for both engines.
     final mirror = report
@@ -91,6 +93,22 @@ void main() {
     expect(yaw, startsWith('| headYawLeft | 1,00 |'));
     expect(report, contains('Тепловое состояние iOS: nominal'));
     expect(report, contains('Заряд: 90 % → 80 %'));
+    expect(
+      report,
+      contains(
+        'Кадр ARKit (его же в режиме сравнения анализирует ML Kit): 1280×720',
+      ),
+    );
+    expect(report, contains('Разрешения заметно разные (в 3,0 раза'));
+    // Both replay modes for criteria 1 and 2.
+    expect(report, contains('| arkit_face_tracking | приёмка |'));
+    expect(report, contains('| arkit_face_tracking | затвор глаз |'));
+    final instruments = report
+        .split('## 2.')
+        .last
+        .split('\n')
+        .firstWhere((l) => l.startsWith('| instruments |'));
+    expect(RegExp(r'· \d+ / \d+').allMatches(instruments).length, 2);
     expect(report, contains('Веки надёжны до |поворот| ≈ 60°'));
     expect(report, contains('ML Kit на кадрах ARKit: проанализировано'));
   });

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'attention_zones.dart';
 import 'calibration.dart';
 import 'replay.dart';
 import 'signals.dart';
@@ -95,23 +96,35 @@ class EngineComparison {
     return null;
   }
 
+  /// Replay modes for criteria 1 and 2: the ТЗ acceptance mode, and the
+  /// gaze-aware eye gate without distraction — the candidate for the change
+  /// request (decision of 28.11).
+  static const gatedEyes = AttentionSettings(gazeAwareEyes: true);
+
   Map<String, ReplayResult?> _replays = const {};
+  Map<String, ReplayResult?> _gated = const {};
   Map<String, String> _replayErrors = const {};
 
   void _runReplays() {
     final results = <String, ReplayResult?>{};
+    final gated = <String, ReplayResult?>{};
     final errors = <String, String>{};
     for (final engine in recording.engines) {
       try {
         results[engine] = ReplayRunner(
           recording,
         ).run(ReplayOptions(engine: engine));
+        gated[engine] = ReplayRunner(
+          recording,
+        ).run(ReplayOptions(engine: engine, attention: gatedEyes));
       } catch (error) {
         results[engine] = null;
+        gated[engine] = null;
         errors[engine] = '$error';
       }
     }
     _replays = results;
+    _gated = gated;
     _replayErrors = errors;
   }
 
@@ -141,35 +154,61 @@ class EngineComparison {
     return b.toString();
   }
 
-  // 1 and 2: events from the ТЗ automata.
+  // 1 and 2: events from the ТЗ automata, in both modes.
   void _criterion1(StringBuffer b) {
     b.writeln();
     b.writeln('## 1. Положительные эпизоды (автоматы ТЗ)');
     b.writeln();
     b.writeln(
-      '| Движок | Калибровка | eyes_closed найдено | head_pitch_down найдено | '
-      'Пограничные | Позже допуска | Ложные тревоги |',
+      'Два режима: «приёмка» — как в ТЗ; «затвор глаз» — '
+      'AttentionSettings(gazeAwareEyes: true), без отвлечения: веко, опущенное '
+      'взглядом вниз или прищуром, не копит отсчёт eyes_closed. Пороги ТЗ '
+      'одинаковые.',
     );
-    b.writeln('|---|---|---|---|---|---|---|');
+    b.writeln();
+    b.writeln(
+      '| Движок | Режим | Калибровка | eyes_closed найдено | '
+      'head_pitch_down найдено | Пограничные | Позже допуска | Ложные тревоги |',
+    );
+    b.writeln('|---|---|---|---|---|---|---|---|');
     for (final engine in recording.engines) {
-      final r = _replays[engine];
-      if (r == null) {
-        b.writeln('| $engine | ошибка: ${_replayErrors[engine]} | | | | | |');
-        continue;
-      }
-      String score(String type) {
-        final s = r.scores[type];
-        if (s == null || s.tp + s.fn == 0) return '—';
-        return '${s.tp} из ${s.tp + s.fn}';
-      }
+      for (final (mode, r) in [
+        ('приёмка', _replays[engine]),
+        ('затвор глаз', _gated[engine]),
+      ]) {
+        if (r == null) {
+          b.writeln(
+            '| $engine | $mode | ошибка: ${_replayErrors[engine]} | | | | | |',
+          );
+          continue;
+        }
+        String score(String type) {
+          final s = r.scores[type];
+          if (s == null || s.tp + s.fn == 0) return '—';
+          return '${s.tp} из ${s.tp + s.fn}';
+        }
 
-      b.writeln(
-        '| $engine | ${r.calibrationSource}, T = '
-        '${_f(r.profile.eyeThreshold, 2)} | ${score(ScenarioExpectations.eyesClosed)} | '
-        '${score(ScenarioExpectations.headPitchDown)} | ${r.borderline} | '
-        '${r.late} | ${r.falseAlarms} |',
-      );
+        b.writeln(
+          '| $engine | $mode | ${r.calibrationSource}, T = '
+          '${_f(r.profile.eyeThreshold, 2)} | '
+          '${score(ScenarioExpectations.eyesClosed)} | '
+          '${score(ScenarioExpectations.headPitchDown)} | ${r.borderline} | '
+          '${r.late} | ${r.falseAlarms} |',
+        );
+      }
     }
+  }
+
+  static int _eyeAlarms(ReplayResult r, String step) {
+    var alarms = 0;
+    for (final e in r.episodes.where((e) => e.episode.step == step)) {
+      alarms += [
+        ...e.unexpected,
+        ...e.allowed,
+        ...e.duplicates,
+      ].where((x) => x.type == ScenarioExpectations.eyesClosed).length;
+    }
+    return alarms;
   }
 
   void _criterion2(StringBuffer b) {
@@ -177,9 +216,9 @@ class EngineComparison {
     b.writeln('## 2. Ложное «глаза закрыты»: приборы, зеркала, прищур');
     b.writeln();
     b.writeln(
-      'Доля кадров шага, где оба глаза ниже T, и тревоги eyes_closed внутри '
-      'шага. Прищур, смех и зевок здесь не ошибка детектора, но тревоги на '
-      'них быть не должно.',
+      'В ячейке: доля кадров шага, где оба глаза ниже T, затем тревоги '
+      'eyes_closed внутри шага в режиме приёмки / с затвором глаз. Прищур, '
+      'смех и зевок не ошибка детектора, но тревоги на них быть не должно.',
     );
     b.writeln();
     final engines = recording.engines;
@@ -194,22 +233,18 @@ class EngineComparison {
     for (final step in steps) {
       final cells = <String>[];
       for (final engine in engines) {
-        final r = _replays[engine];
+        final r = _replays[engine], g = _gated[engine];
         if (r == null) {
           cells.add('—');
           continue;
         }
-        var frames = 0, closed = 0, alarms = 0;
+        var frames = 0, closed = 0;
         for (final e in r.episodes.where((e) => e.episode.step == step)) {
           frames += e.frames;
           closed += e.closedFrames;
-          alarms += [
-            ...e.unexpected,
-            ...e.allowed,
-            ...e.duplicates,
-          ].where((x) => x.type == ScenarioExpectations.eyesClosed).length;
         }
-        cells.add('${_pct(closed, frames)} · $alarms');
+        final gated = g == null ? '—' : '${_eyeAlarms(g, step)}';
+        cells.add('${_pct(closed, frames)} · ${_eyeAlarms(r, step)} / $gated');
       }
       b.writeln('| $step | ${cells.join(' | ')} |');
     }
@@ -412,10 +447,44 @@ class EngineComparison {
         '(занят), среднее время анализа ${_f(done == 0 ? null : busy / done / 1000, 0)} мс.',
       );
     }
+    _resolution(b);
     if (light.isNotEmpty) {
       b.writeln(
         '- Освещённость ARKit (ambientIntensity, 1000 ≈ норма): медиана '
         '${_f(_quantile(light, .5), 0)}, минимум ${_f(light.first, 0)}.',
+      );
+    }
+  }
+
+  /// The camera plugin path of ML Kit (`CameraService`,
+  /// `ResolutionPreset.medium`) delivers 640×480 frames on iOS.
+  static const cameraPluginPixels = 640 * 480;
+
+  void _resolution(StringBuffer b) {
+    final sized = devices.where(
+      (d) => d['imageWidth'] is num && d['imageHeight'] is num,
+    );
+    if (sized.isEmpty) {
+      b.writeln(
+        '- Разрешение кадра ARKit в записи не указано (нет imageWidth в '
+        'строках device).',
+      );
+      return;
+    }
+    final w = (sized.first['imageWidth'] as num).toInt();
+    final h = (sized.first['imageHeight'] as num).toInt();
+    final ratio = w * h / cameraPluginPixels;
+    b.writeln(
+      '- Кадр ARKit (его же в режиме сравнения анализирует ML Kit): $w×$h. '
+      'Обычный путь ML Kit через плагин camera (ResolutionPreset.medium) '
+      'получает 640×480.',
+    );
+    if (ratio > 1.5 || ratio < 1 / 1.5) {
+      b.writeln(
+        '- **Разрешения заметно разные (в ${_f(ratio, 1)} раза по числу '
+        'пикселей): сравнение ML Kit с ARKit на кадрах ARKit не полностью '
+        'повторяет обычный путь ML Kit. Для честного вывода нужен короткий '
+        'прогон ML Kit через плагин camera.**',
       );
     }
   }
