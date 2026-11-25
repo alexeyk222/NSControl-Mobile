@@ -304,6 +304,7 @@ class ReplayOptions {
     this.attention = const AttentionSettings(),
     this.recalibrate = false,
     this.eyeYawLimit = 25,
+    this.mlKitEyeYawLimit,
   });
   final String engine;
   final AttentionSettings attention;
@@ -315,6 +316,11 @@ class ReplayOptions {
   /// Eye yaw limit for an engine other than ML Kit when the profile has to be
   /// recomputed. ARKit's own limit is measured by the ARKit thread.
   final double eyeYawLimit;
+
+  /// Eye yaw limit for a recomputed ML Kit profile; null keeps the ТЗ value
+  /// ([DetectorCapabilities.mlKit]). Set it only for a lab recording made
+  /// with a wider limit (side mount), where the road pose is beyond 18°.
+  final double? mlKitEyeYawLimit;
 }
 
 /// Per-step outcome.
@@ -671,8 +677,15 @@ class ReplayRunner {
             .firstWhere((id) => id != null, orElse: () => null) ??
         profile?.trackingId ??
         0;
+    final mlKitLimit = options.mlKitEyeYawLimit;
     final detector = options.engine == DetectorCapabilities.mlKit.id
-        ? DetectorCapabilities.mlKit
+        ? (mlKitLimit == null
+              ? DetectorCapabilities.mlKit
+              : DetectorCapabilities(
+                  id: DetectorCapabilities.mlKit.id,
+                  version: '${DetectorCapabilities.mlKit.version}+lab',
+                  eyeYawLimit: mlKitLimit,
+                ))
         : DetectorCapabilities(
             id: options.engine,
             version: 'replay',

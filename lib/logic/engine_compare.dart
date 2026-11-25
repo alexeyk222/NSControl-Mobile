@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'attention_zones.dart';
 import 'calibration.dart';
+import 'face.dart';
 import 'replay.dart';
 import 'signals.dart';
 
@@ -174,18 +175,55 @@ class EngineComparison {
   Map<String, ReplayResult?> _gated = const {};
   Map<String, String> _replayErrors = const {};
 
+  /// Eye limit for an engine whose calibration is recomputed from frames:
+  /// the largest limit a recorded calibration used (the lab records with a
+  /// wider limit at a side mount, where the road pose is 30–40° to the
+  /// camera), else the replay default. ТЗ thresholds are not involved: the
+  /// limit only decides which frames the calibration may use.
+  double get recalibrationEyeYawLimit =>
+      _recordedEyeYawLimit ?? const ReplayOptions(engine: '').eyeYawLimit;
+
+  /// The same for ML Kit, only when a recorded calibration was wider than
+  /// the ТЗ 18°; otherwise ML Kit keeps the ТЗ limit.
+  double? get mlKitRecalibrationEyeYawLimit {
+    final limit = _recordedEyeYawLimit;
+    return limit != null && limit > DetectorCapabilities.mlKit.eyeYawLimit
+        ? limit
+        : null;
+  }
+
+  double? get _recordedEyeYawLimit {
+    double? best;
+    for (final c in recording.calibrations) {
+      final limit = c.profile?.detector.eyeYawLimit;
+      if (limit != null && (best == null || limit > best)) best = limit;
+    }
+    return best;
+  }
+
   void _runReplays() {
     final results = <String, ReplayResult?>{};
     final gated = <String, ReplayResult?>{};
     final errors = <String, String>{};
+    final limit = recalibrationEyeYawLimit;
+    final mlKitLimit = mlKitRecalibrationEyeYawLimit;
     for (final engine in recording.engines) {
       try {
-        results[engine] = ReplayRunner(
-          recording,
-        ).run(ReplayOptions(engine: engine));
-        gated[engine] = ReplayRunner(
-          recording,
-        ).run(ReplayOptions(engine: engine, attention: gatedEyes));
+        results[engine] = ReplayRunner(recording).run(
+          ReplayOptions(
+            engine: engine,
+            eyeYawLimit: limit,
+            mlKitEyeYawLimit: mlKitLimit,
+          ),
+        );
+        gated[engine] = ReplayRunner(recording).run(
+          ReplayOptions(
+            engine: engine,
+            attention: gatedEyes,
+            eyeYawLimit: limit,
+            mlKitEyeYawLimit: mlKitLimit,
+          ),
+        );
       } catch (error) {
         results[engine] = null;
         gated[engine] = null;
@@ -209,6 +247,13 @@ class EngineComparison {
       '${recording.frames.length}, шагов ${episodes.length}, строк device '
       '${devices.length}.',
     );
+    if (mlKitRecalibrationEyeYawLimit case final limit?) {
+      b.writeln(
+        '- Запись сделана с пределом глаз ${_f(limit, 0)}° (Лаборатория, '
+        'боковое крепление); калибровка, пересчитанная по кадрам, берёт '
+        'его и для ML Kit вместо 18° ТЗ.',
+      );
+    }
     if (swappedEyes.isNotEmpty) {
       b.writeln(
         '- Левый и правый глаз переставлены перед сравнением у: '
