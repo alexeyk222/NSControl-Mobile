@@ -286,7 +286,7 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
               Text('Часы: ${widget.trip.wearableStatus}'),
               Text(
-                'Обмен с часами: ${widget.trip.wearable.connected ? (widget.trip.wearable.synchronized ? 'время синхронизировано' : 'нет синхронизации') : 'не подключены'}',
+                'Обмен с часами: ${widget.trip.wearable.connected ? (widget.trip.wearable.synchronized ? 'время синхронизировано' : 'нет синхронизации') : 'не подключены'}; фон часов: ${widget.trip.wearable.watchBackground ?? 'неизвестно'}; последний ответ: ${widget.trip.lastWatchAck ?? 'нет'}',
               ),
               const SizedBox(height: 12),
               const Text(
