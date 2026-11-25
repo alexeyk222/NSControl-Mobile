@@ -6,7 +6,11 @@ import 'package:nscontrol/logic/synthetic.dart';
 
 /// The synthetic ARKit scenario plus an "ML Kit" engine on the same frames
 /// (angles and eye openness only) and a `device` line per second.
-String _comparison({double mlYawSign = 1, bool devices = true}) {
+String _comparison({
+  double mlYawSign = 1,
+  bool devices = true,
+  bool scaled = false,
+}) {
   final out = <String>[];
   var lastUs = 0;
   for (final line in const LineSplitter().convert(
@@ -56,6 +60,10 @@ String _comparison({double mlYawSign = 1, bool devices = true}) {
           'mlKitDone': 15,
           'mlKitSkipped': 15,
           'mlKitBusyUs': 15 * 25000,
+          'imageWidth': 1280,
+          'imageHeight': 720,
+          if (scaled) 'mlKitWidth': 640,
+          if (scaled) 'mlKitHeight': 360,
         }),
       );
     }
@@ -75,7 +83,7 @@ void main() {
     // The synthetic ARKit signals find every positive episode.
     final arkitRow = report
         .split('\n')
-        .firstWhere((l) => l.startsWith('| arkit_face_tracking |'));
+        .firstWhere((l) => l.startsWith('| arkit_face_tracking | приёмка |'));
     expect(arkitRow, contains('| 2 из 2 | 1 из 1 |'));
     // Signs: mirrors turn the head the expected way for both engines.
     final mirror = report
@@ -91,8 +99,28 @@ void main() {
     expect(yaw, startsWith('| headYawLeft | 1,00 |'));
     expect(report, contains('Тепловое состояние iOS: nominal'));
     expect(report, contains('Заряд: 90 % → 80 %'));
+    expect(report, contains('ML Kit в режиме сравнения анализирует 1280×720'));
+    expect(report, contains('Поле зрения разное'));
+    expect(report, contains('Разрешения заметно разные (в 3,0 раза'));
+    // Both replay modes for criteria 1 and 2.
+    expect(report, contains('| arkit_face_tracking | приёмка |'));
+    expect(report, contains('| arkit_face_tracking | затвор глаз |'));
+    final instruments = report
+        .split('## 2.')
+        .last
+        .split('\n')
+        .firstWhere((l) => l.startsWith('| instruments |'));
+    expect(RegExp(r'· \d+ / \d+').allMatches(instruments).length, 2);
     expect(report, contains('Веки надёжны до |поворот| ≈ 60°'));
     expect(report, contains('ML Kit на кадрах ARKit: проанализировано'));
+  });
+
+  test('a scaled ML Kit frame is compared by its own size', () {
+    final report = EngineComparison(_comparison(scaled: true)).report();
+    expect(report, contains('Кадр ARKit: 1280×720; ML Kit'));
+    expect(report, contains('анализирует 640×360'));
+    expect(report, isNot(contains('Разрешения заметно разные')));
+    expect(report, contains('Поле зрения разное'));
   });
 
   test('flags an engine whose yaw sign is inverted', () {
@@ -112,5 +140,19 @@ void main() {
     ).report();
     expect(report, contains('Строк device нет'));
     expect(report, isNot(contains('Согласие движков')));
+  });
+
+  test('reads the comparison mode as the iPhone writes it', () {
+    final report = EngineComparison(
+      SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
+    ).report();
+    expect(report, isNot(contains('ошибка:')));
+    expect(
+      report,
+      contains('| arkit_face_tracking | строка calibration записи'),
+    );
+    expect(report, contains('| mlkit_face_detection | пересчитана'));
+    expect(report, contains('ML Kit на кадрах ARKit'));
+    expect(report, contains('Согласие движков на одних кадрах'));
   });
 }

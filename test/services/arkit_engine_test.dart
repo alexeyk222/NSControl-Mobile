@@ -204,6 +204,7 @@ void main() {
         onChanged: () {},
       );
       expect(calls.single.arguments['compareMlKit'], true);
+      expect(calls.single.arguments['mlKitWidth'], 640);
       now = 1050000;
       sink.success(_arkitEvent(captured: 50020000, delivered: 50040000));
       await Future<void>.delayed(Duration.zero);
@@ -279,6 +280,8 @@ void main() {
         'lowPower': false,
         'batteryState': 'unplugged',
         'battery': .81,
+        'mlKitWidth': 640,
+        'mlKitHeight': 360,
       });
       sink.success({
         'type': 'error',
@@ -290,6 +293,10 @@ void main() {
       expect(stats.single.toJson()['type'], 'device');
       expect(stats.single.toJson()['thermal'], 'fair');
       expect(stats.single.atUs, 1500000);
+      expect(stats.single.toJson()['imageWidth'], 1280);
+      expect(stats.single.toJson()['imageHeight'], 720);
+      expect(stats.single.toJson()['mlKitWidth'], 640);
+      expect(stats.single.toJson()['mlKitHeight'], 360);
       expect(errors.single.toString(), contains('Нет доступа к камере'));
       await s.dispose();
     });

@@ -25,7 +25,7 @@ const negativeSteps = {
 };
 
 void main() {
-  for (final style in SyntheticStyle.values) {
+  for (final style in [SyntheticStyle.arkit, SyntheticStyle.mlKit]) {
     group('synthetic ${style.name}', () {
       final recording = Recording.parse(SyntheticScenario(style).toJsonl());
       final runner = ReplayRunner(recording);
@@ -275,11 +275,107 @@ void main() {
     });
   });
 
+  group('comparison mode «ARKit + ML Kit» as the iPhone writes it', () {
+    const arkit = 'arkit_face_tracking', mlKit = 'mlkit_face_detection';
+    final text = SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl();
+    final recording = Recording.parse(text);
+    final runner = ReplayRunner(recording);
+    final lines = [
+      for (final l in const LineSplitter().convert(text))
+        jsonDecode(l) as Map<String, dynamic>,
+    ];
+
+    test('two frame lines per analysed frame, device and raw are read', () {
+      expect(recording.engines, [arkit, mlKit]);
+      expect(recording.skippedLines, 0);
+      expect(
+        lines.where((l) => l['type'] == 'device').length,
+        greaterThan(100),
+      );
+      final arkitFrames = lines.where(
+        (l) => l['type'] == 'frame' && l['engine'] == arkit,
+      );
+      expect(arkitFrames.every((l) => l.containsKey('raw')), isTrue);
+      final arkitTimes = {
+        for (final f in recording.frames)
+          if (f.engine == arkit) f.capturedUs,
+      };
+      final mlKitFrames = recording.frames.where((f) => f.engine == mlKit);
+      expect(mlKitFrames.length, closeTo(arkitTimes.length / 4, 2));
+      expect(
+        mlKitFrames.every((f) => arkitTimes.contains(f.capturedUs)),
+        isTrue,
+      );
+    });
+
+    test('each engine is replayed on its own frames and calibration', () {
+      final a = runner.run(const ReplayOptions(engine: arkit));
+      final m = runner.run(const ReplayOptions(engine: mlKit));
+      expect(a.calibrationSource, 'строка calibration записи');
+      expect(m.calibrationSource, contains('пересчитана'));
+      expect(a.missed, 0);
+      expect(m.missed, 0);
+      Set<String> falseSteps(ReplayResult r) => {
+        for (final e in r.episodes)
+          if (e.unexpected.isNotEmpty) e.episode.step,
+      };
+      expect(falseSteps(a), {'instruments', 'squint', 'yawn'});
+      expect(falseSteps(m), isEmpty);
+      expect(m.restoredFrames, greaterThanOrEqualTo(4));
+      for (final engine in [arkit, mlKit]) {
+        final r = runner.run(
+          ReplayOptions(engine: engine, attention: AttentionSettings.lab),
+        );
+        expect(r.falseAlarms, 0, reason: engine);
+        expect(r.missed, 0, reason: engine);
+        expect(r.pausedAtUs, isNull, reason: engine);
+      }
+    });
+
+    test('the report has a separate section per engine and mode', () {
+      final report = replayReport(recording, [
+        for (final engine in [arkit, mlKit])
+          for (final mode in [
+            const AttentionSettings.acceptance(),
+            AttentionSettings.lab,
+          ])
+            runner.run(ReplayOptions(engine: engine, attention: mode)),
+      ]);
+      for (final engine in [arkit, mlKit]) {
+        expect(report, contains('## $engine, приёмка (только ТЗ)'));
+        expect(report, contains('## $engine, расширения'));
+      }
+      expect(report, isNot(contains('пропущено строк')));
+    });
+
+    test('a recording started after calibration (line at 0) replays', () {
+      final shifted = [
+        for (final l in lines)
+          jsonEncode(l['type'] == 'calibration' ? {...l, 'atUs': 0} : l),
+      ].join('\n');
+      final r = ReplayRunner(Recording.parse(shifted));
+      final m = r.run(const ReplayOptions(engine: mlKit));
+      expect(m.calibrationSource, contains('после строки calibration'));
+      expect(m.missed, 0);
+      expect(r.run(const ReplayOptions(engine: arkit)).missed, 0);
+    });
+
+    test('a later recalibration does not move the start of the scenario', () {
+      final calibration = lines.firstWhere((l) => l['type'] == 'calibration');
+      final again = jsonEncode({...calibration, 'atUs': 100000000});
+      final r = ReplayRunner(Recording.parse('$text$again\n'));
+      final a = r.run(const ReplayOptions(engine: arkit));
+      expect(a.missed, 0);
+      expect(a.episodes.length, Episode.fromLabels(recording.labels).length);
+    });
+  });
+
   test('unknown lines are skipped, a newer schema is refused', () {
     final r = Recording.parse(
       [
         '{"type":"meta","schema":1,"recordingId":"x"}',
         '{"type":"derived","atUs":1,"zone":"road"}',
+        '{"type":"device","atUs":1,"thermal":"nominal"}',
         '{"type":"future","x":1}',
         'not json',
       ].join('\n'),

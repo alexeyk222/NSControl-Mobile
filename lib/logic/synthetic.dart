@@ -8,21 +8,34 @@ import 'signals.dart';
 /// Synthetic recordings (JSONL, schema 1) of the contract scenario steps, for
 /// tests and for checking the replay without a phone.
 ///
-/// Two kinds of signals:
+/// Three kinds of recordings:
 /// - [SyntheticStyle.arkit]: 30 fps, head pose, gaze, eye-in-head angles,
 ///   blendshapes, openness = 1 − eyeBlink;
 /// - [SyntheticStyle.mlKit]: 15 fps, head angles and eye-open probabilities
-///   only.
+///   only;
+/// - [SyntheticStyle.arkitMlKit]: the lab's comparison mode «ARKit + ML Kit»
+///   as the iPhone writes it: ARKit at 60 fps with the `raw` field, ML Kit on
+///   every fourth ARKit frame with the same `capturedUs` (two `frame` lines
+///   per analysed frame), a `device` line every second. One scene for both
+///   engines (the ARKit one); ML Kit is assumed to keep the lid above T in a
+///   squint or yawn, as in [SyntheticStyle.mlKit].
 ///
 /// The model is deliberately simple and its assumptions are listed in
 /// docs/attention-method.md. It exercises the logic; it does not replace
 /// recordings of a real face.
 enum SyntheticStyle {
   arkit('arkit_face_tracking'),
-  mlKit('mlkit_face_detection');
+  mlKit('mlkit_face_detection'),
+  arkitMlKit('arkit_face_tracking');
 
   const SyntheticStyle(this.engineId);
+
+  /// The primary engine: calibration and the ТЗ automata.
   final String engineId;
+
+  List<String> get engines => this == arkitMlKit
+      ? const ['arkit_face_tracking', 'mlkit_face_detection']
+      : [engineId];
 }
 
 class _Pose {
@@ -132,7 +145,12 @@ class SyntheticScenario {
   /// Camera offset of the road direction (phone a bit to the right and below).
   static const roadYaw = 4.0, roadPitch = -3.0;
 
-  bool get _arkit => style == SyntheticStyle.arkit;
+  /// The scene and the primary engine are ARKit's.
+  bool get _arkit => style != SyntheticStyle.mlKit;
+  bool get _dual => style == SyntheticStyle.arkitMlKit;
+
+  /// ML Kit analyses every n-th ARKit frame in the comparison mode (busy).
+  static const mlKitEvery = 4;
 
   /// The bench-v1 steps of the contract plus `distraction_4s`.
   List<_Step> get _steps => [
@@ -255,8 +273,8 @@ class SyntheticScenario {
   String toJsonl() {
     final rnd = math.Random(seed);
     double noise(double amp) => (rnd.nextDouble() * 2 - 1) * amp;
-    final frameUs = _arkit ? 33333 : 66667;
-    final latencyUs = _arkit ? 35000 : 70000;
+    final frameUs = _dual ? 16667 : (_arkit ? 33333 : 66667);
+    final latencyUs = _dual ? 20000 : (_arkit ? 35000 : 70000);
     final plan = <(int, _Step)>[];
     var cursor = calibrationUs + gapUs;
     for (final s in _steps) {
@@ -266,10 +284,13 @@ class SyntheticScenario {
     final endUs = cursor;
     final out = <String>[];
     final frames = <(int, int, FaceSignals?)>[];
+    // Comparison mode: ML Kit results of the same frames.
+    final mlKitFrames = <int, (int, FaceSignals?)>{};
     var nextBlinkUs = 2000000;
-    var wasLost = false;
+    var wasLost = false, mlKitWasLost = false;
     _id = 1;
-    for (var t = 0; t <= endUs; t += frameUs) {
+    var mlKitId = 1, index = 0;
+    for (var t = 0; t <= endUs; t += frameUs, index++) {
       final captured = t + noise(2000).round().abs();
       var pose = _road;
       for (final (start, step) in plan) {
@@ -290,8 +311,17 @@ class SyntheticScenario {
       frames.add((
         captured,
         captured + latencyUs + noise(5000).round().abs(),
-        visible ? _signals(pose, noise) : null,
+        visible ? _signals(pose, noise, arkit: _arkit, id: _id) : null,
       ));
+      if (_dual && index % mlKitEvery == 0) {
+        final seen = pose.visible && pose.yaw.abs() <= 55;
+        if (seen && mlKitWasLost) mlKitId++;
+        mlKitWasLost = !seen;
+        mlKitFrames[captured] = (
+          captured + 60000 + noise(10000).round().abs(),
+          seen ? _signals(pose, noise, arkit: false, id: mlKitId) : null,
+        );
+      }
     }
     final profile = _calibrate(frames);
     out.add(
@@ -300,9 +330,9 @@ class SyntheticScenario {
         'schema': 1,
         'recordingId': 'synthetic-${style.name}-$seed',
         'app': 'synthetic',
-        'device': 'synthetic',
+        'device': _dual ? 'iPhone12,1' : 'synthetic',
         'os': 'synthetic',
-        'engines': [style.engineId],
+        'engines': style.engines,
         'startedAt': '2026-11-25T00:00:00+03:00',
         'subject': 'synthetic',
         'notes': 'SyntheticScenario',
@@ -337,7 +367,12 @@ class SyntheticScenario {
       ));
     }
     var li = 0;
+    var nextDeviceUs = 1000000;
     for (final (captured, completed, signals) in frames) {
+      if (_dual && captured >= nextDeviceUs) {
+        out.add(jsonEncode(_device(nextDeviceUs, endUs)));
+        nextDeviceUs += 1000000;
+      }
       if (!calibrationWritten && captured > calibrationUs) {
         out.add(
           jsonEncode({
@@ -359,8 +394,23 @@ class SyntheticScenario {
           'completedUs': completed,
           'faceCount': signals == null ? 0 : 1,
           if (signals != null) 'signals': signals.toJson(),
+          if (_dual) 'raw': _raw(signals),
         }),
       );
+      final mlKit = mlKitFrames[captured];
+      if (mlKit != null) {
+        final (done, face) = mlKit;
+        out.add(
+          jsonEncode({
+            'type': 'frame',
+            'engine': SyntheticStyle.mlKit.engineId,
+            'capturedUs': captured,
+            'completedUs': done,
+            'faceCount': face == null ? 0 : 1,
+            if (face != null) 'signals': face.toJson(),
+          }),
+        );
+      }
     }
     while (li < labels.length) {
       out.add(labels[li++].$2);
@@ -399,7 +449,60 @@ class SyntheticScenario {
 
   int _id = 1;
 
-  FaceSignals _signals(_Pose p, double Function(double) noise) {
+  /// A `device` line of the comparison mode: slow warming and discharge.
+  Map<String, Object?> _device(int atUs, int endUs) {
+    final k = atUs / endUs;
+    return {
+      'type': 'device',
+      'atUs': atUs,
+      'thermal': k < .6 ? 'nominal' : 'fair',
+      'battery': double.parse((.81 - .04 * k).toStringAsFixed(3)),
+      'batteryState': 'unplugged',
+      'lowPower': false,
+      'light': 820,
+      'arkitFps': 60,
+      'sent': 60,
+      'dropped': 0,
+      'mlKitDone': 60 ~/ mlKitEvery,
+      'mlKitSkipped': 60 - 60 ~/ mlKitEvery,
+      'mlKitErrors': 0,
+      'mlKitBusyUs': 900000,
+      'mlKitOrientation': 'leftMirrored',
+    };
+  }
+
+  /// Bridge numbers of an ARKit frame (shape of `ArkitFaceSource.onRaw`);
+  /// the replay ignores them, they only have to be carried.
+  Map<String, Object?> _raw(FaceSignals? s) => {
+    'gravityUp': [0.0, 1.0, 0.0],
+    'light': 820,
+    'axes': {'mirror': false, 'swapEyes': false},
+    'faces': [
+      if (s != null)
+        {
+          'id': s.trackingId,
+          'tracked': true,
+          'faceInCamera': [
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0, //
+            0.0, 0.0, -(s.distanceM ?? .55), 1.0,
+          ],
+          'lookAt': [0.0, 0.0, 1.0],
+          'blendshapes': {
+            'eyeBlink_L': s.blendshape(Blendshape.eyeBlinkLeft),
+            'eyeBlink_R': s.blendshape(Blendshape.eyeBlinkRight),
+          },
+        },
+    ],
+  };
+
+  FaceSignals _signals(
+    _Pose p,
+    double Function(double) noise, {
+    required bool arkit,
+    required int id,
+  }) {
     // The face box moves and narrows as the head turns.
     final yawRad = p.yaw * math.pi / 180;
     final width = .3 * (.75 + .25 * math.cos(yawRad)) + noise(.004);
@@ -412,17 +515,22 @@ class SyntheticScenario {
     double clamp01(double v) => v.clamp(0.0, 1.0).toDouble();
     // The lid follows the eye down: about 0.035 openness per degree below 5°.
     final lidDrop = p.eyeDown > 5 ? (p.eyeDown - 5) * .035 : 0.0;
-    final open = math.min(p.lid, .9 - lidDrop);
+    var open = math.min(p.lid, .9 - lidDrop);
+    // One scene for both engines in the comparison mode: ML Kit is assumed
+    // to keep the lid above T in a squint or yawn (see [SyntheticStyle]).
+    if (!arkit && _dual && p.squint >= .55) open = math.max(open, .5);
     final closed = open < .2;
     final yaw = roadYaw + p.yaw + noise(.6);
     final pitch = roadPitch + p.pitch + noise(.6);
     final roll = 1 + p.roll + noise(.5);
-    final left = clamp01(open + noise(_arkit ? .02 : .05));
-    final right = clamp01(open + noise(_arkit ? .02 : .05));
-    if (!_arkit) {
+    final left = clamp01(open + noise(arkit ? .02 : .05));
+    final right = clamp01(open + noise(arkit ? .02 : .05));
+    if (!arkit) {
       return FaceSignals(
-        engineId: style.engineId,
-        trackingId: _id,
+        engineId: arkit
+            ? SyntheticStyle.arkit.engineId
+            : SyntheticStyle.mlKit.engineId,
+        trackingId: id,
         headYawLeft: yaw,
         box: box,
         headPitchDown: pitch,
@@ -438,8 +546,10 @@ class SyntheticScenario {
     final eyeLeft = p.eyeLeft + noise(1);
     final lookDown = clamp01(eyeDown / 30 + (closed ? .4 : 0));
     return FaceSignals(
-      engineId: style.engineId,
-      trackingId: _id,
+      engineId: arkit
+          ? SyntheticStyle.arkit.engineId
+          : SyntheticStyle.mlKit.engineId,
+      trackingId: id,
       headYawLeft: yaw,
       box: box,
       headPitchDown: pitch,

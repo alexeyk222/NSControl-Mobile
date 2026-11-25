@@ -21,6 +21,7 @@ class ArkitOptions {
     this.compareMlKit = false,
     this.mlKitOrientation = 'auto',
     this.mlKitBgra = false,
+    this.mlKitWidth = 640,
     this.emitEvery = 1,
     this.axes = ArkitAxes.standard,
   });
@@ -44,6 +45,11 @@ class ArkitOptions {
   final String mlKitOrientation;
   final bool mlKitBgra;
 
+  /// ML Kit input width in comparison mode: the ARKit frame (1280 wide) is
+  /// scaled to it, keeping its aspect ratio, to be closer to the 640-wide
+  /// frames of the camera-plugin ML Kit path. 0 keeps the full frame.
+  final int mlKitWidth;
+
   /// Send every n-th ARKit frame to Dart.
   final int emitEvery;
   final ArkitAxes axes;
@@ -57,6 +63,7 @@ class ArkitOptions {
     'compareMlKit': compareMlKit,
     'mlKitOrientation': mlKitOrientation,
     'mlKitBgra': mlKitBgra,
+    'mlKitWidth': mlKitWidth,
     'emitEvery': emitEvery,
   };
 }
@@ -99,6 +106,10 @@ class ArkitStats {
     this.battery,
     this.mlKitOrientation,
     this.lightIntensity,
+    this.imageWidth,
+    this.imageHeight,
+    this.mlKitWidth,
+    this.mlKitHeight,
   });
   final int atUs, arFrames, sent, droppedEvents;
   final int mlKitDone, mlKitSkipped, mlKitErrors, mlKitBusyUs;
@@ -106,6 +117,14 @@ class ArkitStats {
   final bool lowPower;
   final double? battery, lightIntensity;
   final String? mlKitOrientation;
+
+  /// `capturedImage` size of the running ARKit format (sensor orientation);
+  /// ML Kit analyses the same image in comparison mode.
+  final int? imageWidth, imageHeight;
+
+  /// Size of the image ML Kit actually analysed in the last second (after
+  /// scaling, before rotation), null when ML Kit did not run.
+  final int? mlKitWidth, mlKitHeight;
 
   /// The `device` line of the recording (see the contract).
   Map<String, Object?> toJson() => {
@@ -124,6 +143,10 @@ class ArkitStats {
     'mlKitErrors': mlKitErrors,
     'mlKitBusyUs': mlKitBusyUs,
     if (mlKitOrientation != null) 'mlKitOrientation': mlKitOrientation,
+    if (imageWidth != null) 'imageWidth': imageWidth,
+    if (imageHeight != null) 'imageHeight': imageHeight,
+    if (mlKitWidth != null) 'mlKitWidth': mlKitWidth,
+    if (mlKitHeight != null) 'mlKitHeight': mlKitHeight,
   };
 }
 
@@ -425,6 +448,10 @@ class ArkitEngine {
             batteryState: event['batteryState'] as String? ?? 'unknown',
             battery: d('battery'),
             mlKitOrientation: event['mlKitOrientation'] as String?,
+            imageWidth: info?.width,
+            imageHeight: info?.height,
+            mlKitWidth: (event['mlKitWidth'] as num?)?.toInt(),
+            mlKitHeight: (event['mlKitHeight'] as num?)?.toInt(),
           ),
         );
       case 'error':
@@ -521,6 +548,7 @@ class ArkitFaceSource implements FaceSource {
         compareMlKit: compare,
         mlKitOrientation: options.mlKitOrientation,
         mlKitBgra: options.mlKitBgra,
+        mlKitWidth: options.mlKitWidth,
         emitEvery: options.emitEvery,
         axes: options.axes,
       ),

@@ -64,8 +64,8 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
     // Touched only on `queue`.
     private var active: Active?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
-    private var bgraPool: CVPixelBufferPool?
-    private var bgraPoolSize = CGSize.zero
+    private let bgraPool = BufferPool()
+    private let mlKitPool = BufferPool()
     private var faceIds: [UUID: Int] = [:]
     private var nextFaceId = 1
     private var frameIndex = 0
@@ -84,6 +84,8 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         var compareMlKit = false
         var mlKitOrientation = "auto"
         var mlKitBgra = false
+        /// ML Kit input width; 0 keeps the full ARKit frame.
+        var mlKitWidth = 640
         var emitEvery = 1
         var vertexStride = 20
 
@@ -97,6 +99,7 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
             compareMlKit = args["compareMlKit"] as? Bool ?? false
             mlKitOrientation = args["mlKitOrientation"] as? String ?? "auto"
             mlKitBgra = args["mlKitBgra"] as? Bool ?? false
+            mlKitWidth = max(0, (args["mlKitWidth"] as? NSNumber)?.intValue ?? 640)
             emitEvery = max(1, (args["emitEvery"] as? NSNumber)?.intValue ?? 1)
             vertexStride = max(1, (args["vertexStride"] as? NSNumber)?.intValue ?? 20)
         }
@@ -110,6 +113,8 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         var mlKitSkipped = 0
         var mlKitBusyUs: Int64 = 0
         var mlKitErrors = 0
+        var mlKitWidth = 0
+        var mlKitHeight = 0
     }
 
     init(textures: FlutterTextureRegistry) {
@@ -245,7 +250,7 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
             }
         }
         frameIndex += 1
-        if let mlKit = active.mlKit { analyseWithMlKit(frame, runner: mlKit, bgraInput: options.mlKitBgra) }
+        if let mlKit = active.mlKit { analyseWithMlKit(frame, runner: mlKit, options: options) }
         guard frameIndex % options.emitEvery == 0 else { return }
 
         let capturedUs = Self.us(frame.timestamp)
@@ -355,6 +360,10 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         ]
         if device.batteryLevel >= 0 { event["battery"] = Double(device.batteryLevel) }
         if let mlKit = main?.mlKit { event["mlKitOrientation"] = mlKit.orientationName }
+        if c.mlKitWidth > 0 {
+            event["mlKitWidth"] = c.mlKitWidth
+            event["mlKitHeight"] = c.mlKitHeight
+        }
         sink?(event)
     }
 
@@ -376,17 +385,32 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
 
     // MARK: ML Kit on the same frame
 
-    private func analyseWithMlKit(_ frame: ARFrame, runner: MlKitRunner, bgraInput: Bool) {
+    private func analyseWithMlKit(_ frame: ARFrame, runner: MlKitRunner, options: Options) {
         guard runner.tryBegin() else {
             countersLock.lock(); counters.mlKitSkipped += 1; countersLock.unlock()
             return
         }
         let capturedUs = Self.us(frame.timestamp)
         let arkitHasFace = frame.anchors.contains { ($0 as? ARFaceAnchor)?.isTracked == true }
-        guard let buffer = bgraInput ? bgra(frame.capturedImage) : frame.capturedImage else {
+        let source = frame.capturedImage
+        let sourceWidth = CVPixelBufferGetWidth(source), sourceHeight = CVPixelBufferGetHeight(source)
+        let input: CVPixelBuffer?
+        if options.mlKitWidth > 0 && sourceWidth > options.mlKitWidth {
+            // Closer to the 640-wide frames of the camera-plugin ML Kit path;
+            // the aspect ratio (field of view) of the ARKit frame is kept.
+            let height = Int((Double(sourceHeight) * Double(options.mlKitWidth) / Double(sourceWidth) / 2).rounded()) * 2
+            input = mlKitPool.render(source, size: CGSize(width: options.mlKitWidth, height: height), context: ciContext)
+        } else {
+            input = options.mlKitBgra ? bgra(source) : source
+        }
+        guard let buffer = input else {
             runner.end()
             return
         }
+        countersLock.lock()
+        counters.mlKitWidth = CVPixelBufferGetWidth(buffer)
+        counters.mlKitHeight = CVPixelBufferGetHeight(buffer)
+        countersLock.unlock()
         mlQueue.async { [weak self] in
             let started = Self.uptimeUs()
             let outcome = runner.analyse(buffer, timestampUs: capturedUs, arkitHasFace: arkitHasFace)
@@ -420,26 +444,8 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
     /// Converts the camera's YCbCr buffer to BGRA (fallback for the preview
     /// texture or ML Kit if they reject the native format).
     private func bgra(_ source: CVPixelBuffer) -> CVPixelBuffer? {
-        let size = CGSize(width: CVPixelBufferGetWidth(source), height: CVPixelBufferGetHeight(source))
-        if bgraPool == nil || bgraPoolSize != size {
-            let attributes: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: Int(size.width),
-                kCVPixelBufferHeightKey as String: Int(size.height),
-                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-            ]
-            var pool: CVPixelBufferPool?
-            CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool)
-            bgraPool = pool
-            bgraPoolSize = size
-        }
-        guard let pool = bgraPool else { return nil }
-        var output: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
-        guard let output else { return nil }
-        ciContext.render(CIImage(cvPixelBuffer: source), to: output)
-        return output
+        bgraPool.render(source, size: CGSize(width: CVPixelBufferGetWidth(source),
+                                             height: CVPixelBufferGetHeight(source)), context: ciContext)
     }
 
     static func flat(_ m: simd_float4x4) -> [Double] {
@@ -474,6 +480,39 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         case .unknown: return "unknown"
         @unknown default: return "unknown"
         }
+    }
+}
+
+/// BGRA buffers of one size, filled from a camera buffer by Core Image
+/// (format conversion and scaling). Used only on the frame queue.
+final class BufferPool {
+    private var pool: CVPixelBufferPool?
+    private var size = CGSize.zero
+
+    func render(_ source: CVPixelBuffer, size target: CGSize, context: CIContext) -> CVPixelBuffer? {
+        if pool == nil || size != target {
+            let attributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(target.width),
+                kCVPixelBufferHeightKey as String: Int(target.height),
+                kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ]
+            var created: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &created)
+            pool = created
+            size = target
+        }
+        guard let pool else { return nil }
+        var output: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &output)
+        guard let output else { return nil }
+        var image = CIImage(cvPixelBuffer: source)
+        let sx = target.width / CGFloat(CVPixelBufferGetWidth(source))
+        let sy = target.height / CGFloat(CVPixelBufferGetHeight(source))
+        if sx != 1 || sy != 1 { image = image.transformed(by: CGAffineTransform(scaleX: sx, y: sy)) }
+        context.render(image, to: output)
+        return output
     }
 }
 
