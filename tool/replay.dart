@@ -12,7 +12,7 @@ const _usage = '''
 Прогон записи:
   dart run tool/replay.dart <file.jsonl> [--engine <id>] [--mode both|acceptance|lab] [--recalibrate] [--out report.md]
 Синтетическая запись:
-  dart run tool/replay.dart --synthetic arkit|mlkit --write <file.jsonl>
+  dart run tool/replay.dart --synthetic arkit|mlkit|arkit-mlkit --write <file.jsonl>
 ''';
 
 Future<void> main(List<String> args) async {
@@ -50,7 +50,8 @@ Future<void> main(List<String> args) async {
     final style = switch (synthetic) {
       'arkit' => SyntheticStyle.arkit,
       'mlkit' => SyntheticStyle.mlKit,
-      _ => _fail('--synthetic принимает arkit или mlkit'),
+      'arkit-mlkit' => SyntheticStyle.arkitMlKit,
+      _ => _fail('--synthetic принимает arkit, mlkit или arkit-mlkit'),
     };
     final text = SyntheticScenario(style).toJsonl();
     if (write == null) {
@@ -71,14 +72,30 @@ Future<void> main(List<String> args) async {
     _ => _fail('--mode принимает both, acceptance или lab'),
   };
   final runner = ReplayRunner(recording);
-  final results = [
-    for (final e in engines)
-      for (final m in modes)
-        runner.run(
-          ReplayOptions(engine: e, attention: m, recalibrate: recalibrate),
-        ),
-  ];
-  final report = replayReport(recording, results);
+  final results = <ReplayResult>[];
+  final errors = <String>[];
+  for (final e in engines) {
+    for (final m in modes) {
+      try {
+        results.add(
+          runner.run(
+            ReplayOptions(engine: e, attention: m, recalibrate: recalibrate),
+          ),
+        );
+      } catch (error) {
+        // One engine that cannot be replayed must not hide the others.
+        errors.add(
+          '- $e, ${m.isAcceptance ? 'приёмка' : 'расширения'}: $error',
+        );
+        stderr.writeln('$e: $error');
+      }
+    }
+  }
+  if (results.isEmpty) _fail('Ни один движок не удалось прогнать.');
+  var report = replayReport(recording, results);
+  if (errors.isNotEmpty) {
+    report += '\n## Не прогнано\n\n${errors.join('\n')}\n';
+  }
   if (out == null) {
     stdout.write(report);
   } else {
