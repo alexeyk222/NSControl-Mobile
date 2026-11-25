@@ -35,6 +35,7 @@ class FaceSignals {
     this.eyeOpenLeft,
     this.eyeOpenRight,
     this.distanceM,
+    this.box,
     this.blendshapes = const {},
   });
 
@@ -51,6 +52,12 @@ class FaceSignals {
 
   /// Distance from the camera to the face, metres, when the engine knows it.
   final double? distanceM;
+
+  /// Face rectangle in the upright analysed image (after rotation, not
+  /// mirrored), normalized to 0..1 of its width and height, origin top-left.
+  /// Used to keep the driver's identity across tracking-id changes (ФТ-02,
+  /// ФТ-03); null when the engine does not report it.
+  final FaceBox? box;
   final Map<String, double> blendshapes;
 
   bool get hasGaze =>
@@ -93,6 +100,7 @@ class FaceSignals {
     if (distanceM != null && !(distanceM!.isFinite && distanceM! > 0)) {
       throw FormatException('distance out of range: $distanceM');
     }
+    box?.validate();
   }
 
   Map<String, Object?> toJson() => {
@@ -109,6 +117,7 @@ class FaceSignals {
     if (eyeOpenLeft != null) 'eyeOpenLeft': eyeOpenLeft,
     if (eyeOpenRight != null) 'eyeOpenRight': eyeOpenRight,
     if (distanceM != null) 'distanceM': distanceM,
+    if (box != null) 'box': box!.toJson(),
     if (blendshapes.isNotEmpty) 'blendshapes': blendshapes,
   };
 
@@ -129,12 +138,61 @@ class FaceSignals {
       eyeOpenLeft: d('eyeOpenLeft'),
       eyeOpenRight: d('eyeOpenRight'),
       distanceM: d('distanceM'),
+      box: json['box'] == null
+          ? null
+          : FaceBox.fromJson(Map<String, dynamic>.from(json['box'] as Map)),
       blendshapes: Map.unmodifiable({
         for (final e in shapes.entries) e.key: (e.value as num).toDouble(),
       }),
     );
     result.validate();
     return result;
+  }
+}
+
+/// Normalized face rectangle, see [FaceSignals.box]. A face partly outside
+/// the image may extend a little beyond 0..1.
+class FaceBox {
+  const FaceBox({
+    required this.left,
+    required this.top,
+    required this.width,
+    required this.height,
+  });
+  final double left, top, width, height;
+
+  double get centerX => left + width / 2;
+  double get centerY => top + height / 2;
+
+  void validate() {
+    if (![left, top, width, height].every((v) => v.isFinite) ||
+        width <= 0 ||
+        height <= 0 ||
+        width > 1.5 ||
+        height > 1.5 ||
+        left < -1 ||
+        top < -1 ||
+        left + width > 2 ||
+        top + height > 2) {
+      throw FormatException('face box out of range: ${toJson()}');
+    }
+  }
+
+  Map<String, Object?> toJson() => {
+    'left': left,
+    'top': top,
+    'width': width,
+    'height': height,
+  };
+
+  factory FaceBox.fromJson(Map<String, dynamic> json) {
+    double d(String key) => (json[key] as num).toDouble();
+    return FaceBox(
+      left: d('left'),
+      top: d('top'),
+      width: d('width'),
+      height: d('height'),
+    );
   }
 }
 
