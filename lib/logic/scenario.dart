@@ -214,6 +214,16 @@ Scenario signsV1() {
   ]) {
     b.glance(step, prompt, backAt: 4, window: 4.5, rest: 3, back: 'Прямо');
   }
+  // One eye only: no event by ФТ-04 (both eyes); shows which eye the engine
+  // calls left (ML Kit leftEyeOpenProbability, ARKit eyeBlinkLeft).
+  b.timed(
+    'sign_wink_left',
+    'Закройте левый глаз на две секунды, правый открыт',
+    2,
+    go: 'Закрыть',
+    stop: 'Открыть',
+    rest: 3,
+  );
   b.say('Готово', 2);
   b.cues.add(ScenarioCue(atUs: b.t));
   return Scenario(

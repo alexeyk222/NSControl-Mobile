@@ -74,6 +74,7 @@ void main() {
         'sign_roll_right',
         'sign_eyes_left',
         'sign_eyes_down',
+        'sign_wink_left',
       ]),
     );
     expect(Scenario.byId('signs-v1').id, 'signs-v1');
