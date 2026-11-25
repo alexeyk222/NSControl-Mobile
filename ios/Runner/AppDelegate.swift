@@ -247,8 +247,14 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
 }
 
 /// Voice prompts of the developer lab scenarios (Russian system voice).
-final class LabSpeech {
+/// The audio session is taken only while a phrase is spoken and released with
+/// notifyOthersOnDeactivation afterwards, so other audio is not left ducked.
+final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
     private let synthesizer = AVSpeechSynthesizer()
+    override init() {
+        super.init()
+        synthesizer.delegate = self
+    }
     func say(_ text: String) {
         guard !text.isEmpty else { return }
         let session = AVAudioSession.sharedInstance()
@@ -259,7 +265,19 @@ final class LabSpeech {
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
         synthesizer.speak(utterance)
     }
-    func stop() { synthesizer.stopSpeaking(at: .immediate) }
+    func stop() {
+        synthesizer.stopSpeaking(at: .immediate)
+        release()
+    }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) { release() }
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didCancel utterance: AVSpeechUtterance) { release() }
+    private func release() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.synthesizer.isSpeaking else { return }
+            // The lab never runs together with a trip, so no alarm is playing here.
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+    }
 }
 
 final class PhoneAlert {

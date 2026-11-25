@@ -26,6 +26,7 @@ void main() {
         'eyes_closed_3s',
         'head_down_3s',
         'nod',
+        'distraction_4s',
       ]),
     );
   });
@@ -51,6 +52,7 @@ void main() {
       ('eyes_closed_2s', 2000000),
       ('eyes_closed_3s', 3000000),
       ('head_down_3s', 3000000),
+      ('distraction_4s', 4000000),
     ]) {
       final starts = s.cues.where((c) => c.step == step && c.edge == 'start');
       expect(starts, hasLength(3));

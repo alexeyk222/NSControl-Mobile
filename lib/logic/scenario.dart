@@ -119,7 +119,7 @@ class _Builder {
   }
 }
 
-/// About 10.5 minutes; steps and expectations as in the contract table.
+/// About 11 minutes; steps and expectations as in the contract table.
 Scenario benchV1() {
   final b = _Builder();
   b.say('Сценарий бенч один. Смотрите на дорогу, как за рулём.', 5);
@@ -180,10 +180,24 @@ Scenario benchV1() {
   for (var i = 0; i < 3; i++) {
     b.glance('nod', 'Кивните', backAt: 2, window: 2.5, back: 'Хорошо');
   }
+  for (var i = 0; i < 3; i++) {
+    b.timed(
+      'distraction_4s',
+      'Посмотрите на телефон или магнитолу четыре секунды',
+      4,
+      go: 'Смотрите',
+      stop: 'Дорога',
+    );
+  }
   b.hold('road', 'Смотрите на дорогу', 30);
   b.say('Сценарий завершён. Спасибо', 3);
   b.cues.add(ScenarioCue(atUs: b.t));
-  return Scenario(id: 'bench-v1', title: 'bench-v1 · 10,5 мин', cues: b.cues);
+  final minutes = (b.t / 60000000).toStringAsFixed(1).replaceAll('.', ',');
+  return Scenario(
+    id: 'bench-v1',
+    title: 'bench-v1 · $minutes мин',
+    cues: b.cues,
+  );
 }
 
 /// One minute: proves the sign of every angle (contract: signs are checked on
