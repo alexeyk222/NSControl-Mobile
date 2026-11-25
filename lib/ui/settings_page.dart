@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../logic/detection_profile.dart';
 import '../logic/domain.dart';
 import '../services/lab_controller.dart';
 import '../services/trip_controller.dart';
@@ -52,8 +53,9 @@ class _SettingsPageState extends State<SettingsPage> {
     double max,
     int divisions,
     ValueChanged<double> change,
-    String unit,
-  ) => Column(
+    String unit, {
+    bool enabled = true,
+  }) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       Text('$title · ${value.toStringAsFixed(unit == 'с' ? 1 : 0)} $unit'),
@@ -62,7 +64,7 @@ class _SettingsPageState extends State<SettingsPage> {
         min: min,
         max: max,
         divisions: divisions,
-        onChanged: (v) => setState(() => change(v)),
+        onChanged: enabled ? (v) => setState(() => change(v)) : null,
       ),
     ],
   );
@@ -77,8 +79,34 @@ class _SettingsPageState extends State<SettingsPage> {
         icon: Icons.tune,
         child: Column(
           children: [
-            slider('Закрытие глаз', eyes, 1, 3, 20, (v) => eyes = v, 'с'),
-            slider('Наклон головы', head, 1, 5, 40, (v) => head = v, 'с'),
+            // The tuned profile sets the thresholds; the user's ТЗ
+            // thresholds apply in the ТЗ 2.2 reference.
+            if (!widget.trip.tzReference)
+              Notice(
+                'Пороги задаёт профиль ${widget.trip.profile.id}: '
+                '${widget.trip.profile.summary}. Ползунки действуют в '
+                'режиме «ТЗ 2.2 (эталон)».',
+              ),
+            slider(
+              'Закрытие глаз',
+              eyes,
+              1,
+              3,
+              20,
+              (v) => eyes = v,
+              'с',
+              enabled: widget.trip.tzReference,
+            ),
+            slider(
+              'Наклон головы',
+              head,
+              1,
+              5,
+              40,
+              (v) => head = v,
+              'с',
+              enabled: widget.trip.tzReference,
+            ),
             slider(
               'Угол наклона вниз',
               pitch,
@@ -87,6 +115,7 @@ class _SettingsPageState extends State<SettingsPage> {
               25,
               (v) => pitch = v,
               '°',
+              enabled: widget.trip.tzReference,
             ),
             slider(
               'Допустимый поворот головы',
@@ -96,6 +125,7 @@ class _SettingsPageState extends State<SettingsPage> {
               25,
               (v) => yaw = v,
               '°',
+              enabled: widget.trip.tzReference,
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -285,18 +315,23 @@ class _SettingsPageState extends State<SettingsPage> {
                   builder: (context, _) => SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Поездка: ТЗ 2.2 (эталон)'),
-                    subtitle: const Text(
-                      'Строгая калибровка по ТЗ: телефон прямо перед лицом. '
-                      'Выключено — калибровка на любом креплении, '
-                      'углы головы от позы «дорога». Со следующей калибровки.',
+                    subtitle: Text(
+                      'Строгая калибровка по ТЗ: телефон прямо перед лицом, '
+                      'пороги ТЗ из настроек. Выключено — профиль '
+                      '${DetectionProfile.current.id}: калибровка на любом '
+                      'креплении, углы головы от позы «дорога», пороги '
+                      'профиля. Со следующей калибровки.',
                     ),
                     value: widget.trip.tzReference,
                     onChanged: widget.trip.active
                         ? null
                         : (value) {
-                            widget.trip.tzReference = value;
+                            final next = value
+                                ? DetectionProfile.tz22
+                                : DetectionProfile.current;
+                            widget.trip.profile = next;
                             widget.trip.journal(
-                              (db) => db.setSetting('trip_tz_reference', value),
+                              (db) => db.setSetting('trip_profile', next.id),
                             );
                             setState(() {});
                           },

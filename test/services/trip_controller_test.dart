@@ -1,9 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/data/trip_repository.dart';
+import 'package:nscontrol/logic/detection_profile.dart';
 import 'package:nscontrol/logic/domain.dart';
+import 'package:nscontrol/logic/mount.dart';
 import 'package:nscontrol/services/camera_service.dart';
 import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/services/detector.dart';
@@ -630,7 +633,7 @@ void main() {
       expect(trip.snapshot!.head.activeEvent, isNotNull);
     });
 
-    test('in front the eyes stay with the ТЗ thresholds', () {
+    test('in front the eyes are watched', () {
       calibrateOn(() => mlKitFace(yaw: 2));
       expect(trip.calibration!.hiddenEyes, isFalse);
       expect(trip.calibrationNote, isNull);
@@ -665,6 +668,8 @@ void main() {
       expect(reader.meta['source'], 'trip');
       expect(reader.meta['mount'], {'position': 'vent_left'});
       expect(reader.meta['attentionSettings']['mountRelative'], isTrue);
+      expect(reader.meta['attentionSettings']['roadAdaptDegPerMin'], 1);
+      expect(reader.meta['detectionProfile']['id'], 'v1');
       expect(reader.meta['engines'], ['mlkit_face_detection']);
       final calibration = reader.ofType('calibration').single;
       expect(calibration['zones']['mountRelative'], isTrue);
@@ -684,7 +689,7 @@ void main() {
     });
 
     test('«ТЗ 2.2 (эталон)» keeps the strict calibration', () {
-      trip.tzReference = true;
+      trip.profile = DetectionProfile.tz22;
       calibrateOn(() => mlKitFace(yaw: 38));
       expect(trip.phase, TripPhase.findingFace);
       expect(trip.error, isNotNull);
@@ -693,8 +698,63 @@ void main() {
       calibrateOn(() => mlKitFace(yaw: 2));
       expect(trip.phase, TripPhase.observing);
       expect(trip.engine!.calibration.neutralYaw, closeTo(2, 1e-6));
-      observe(2, () => mlKitFace(yaw: 2, eyes: .05));
+      // The user's ТЗ thresholds, the ТЗ T rule.
+      expect(trip.engine!.settings.pitchThreshold, 20);
+      expect(trip.engine!.settings.headDownUs, 2000000);
+      expect(trip.engine!.settings.eyesClosedUs, 1500000);
+      expect(trip.calibration!.eyeThreshold, .4);
+      observe(1.3, () => mlKitFace(yaw: 2, eyes: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNull);
+      observe(0.7, () => mlKitFace(yaw: 2, eyes: .05));
       expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+    });
+
+    /// Camera pitch (ML Kit) at [yaw] that gives [road] degrees down
+    /// relative to the trip's road pose.
+    double cameraPitchFor(double road, {double yaw = 38}) {
+      final frame = RoadFrame.fromProfile(trip.calibration!);
+      var best = 0.0, error = double.infinity;
+      for (var p = 0.0; p <= 60; p += .05) {
+        final head = frame.head(mlKitFace(yaw: yaw, pitch: p).signals!);
+        final e = (head!.$2 - road).abs();
+        if (e < error) (best, error) = (p, e);
+      }
+      return best;
+    }
+
+    test('profile v1 on a 38° vent: eyes off, head over 19° for 1.5 s', () {
+      expect(trip.profile.id, 'v1');
+      calibrateOn(() => mlKitFace(yaw: 38));
+      expect(trip.phase, TripPhase.observing);
+      // ML Kit sees the eyes only within 10° of the camera in v1.
+      expect(trip.calibration!.detector.eyeYawLimit, 10);
+      expect(trip.calibration!.hiddenEyes, isTrue);
+      expect(trip.engine!.settings.hiddenEyes, isTrue);
+      expect(trip.engine!.settings.pitchThreshold, 19);
+      expect(trip.engine!.settings.headDownUs, 1500000);
+      observe(3, () => mlKitFace(yaw: 38, eyes: .05));
+      expect(trip.snapshot!.eyes.available, isFalse);
+      expect(trip.snapshot!.eyes.activeEvent, isNull);
+
+      final low = cameraPitchFor(17), high = cameraPitchFor(21);
+      observe(3, () => mlKitFace(yaw: 38, pitch: low));
+      expect(trip.snapshot!.head.activeEvent, isNull);
+      observe(1, () => mlKitFace(yaw: 38));
+      observe(1.2, () => mlKitFace(yaw: 38, pitch: high));
+      expect(trip.snapshot!.head.activeEvent, isNull);
+      observe(0.6, () => mlKitFace(yaw: 38, pitch: high));
+      expect(trip.snapshot!.head.activeEvent?.type.code, 'head_pitch_down');
+    });
+
+    test('the profile goes to the session journal', () async {
+      calibrateOn(() => mlKitFace(yaw: 38));
+      await trip.pendingWrites;
+      final session = (await repository.listSessions()).singleWhere(
+        (r) => r['id'] == trip.sessionId,
+      );
+      final row = jsonDecode(session['settings_json'] as String) as Map;
+      expect(row['detectionProfile']['id'], 'v1');
+      expect(row['mountRelative'], isTrue);
     });
   });
 }
