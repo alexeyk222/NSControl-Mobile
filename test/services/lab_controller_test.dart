@@ -129,6 +129,7 @@ void main() {
 
   test('calibration, an eyes event and the recording file', () async {
     expect(lab.phase, LabPhase.uncalibrated);
+    lab.setMount(position: 'vent_left', angleDeg: 35, distanceCm: 55);
     await lab.startRecording();
     lab.calibrate();
     expect(lab.phase, LabPhase.calibrating);
@@ -151,6 +152,11 @@ void main() {
     expect(calibration['profile']['trackingId'], 1);
     expect(calibration['zones']['mirrorsCalibrated'], isFalse);
     expect(reader.meta['attentionSettings'], isNotNull);
+    expect(reader.meta['mount'], {
+      'position': 'vent_left',
+      'angleDeg': 35,
+      'distanceCm': 55,
+    });
     final signals = reader.signals().toList();
     expect(signals.length, greaterThan(400));
     expect(signals.first.eyeOpenLeft, .9);

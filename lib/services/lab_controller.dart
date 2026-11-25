@@ -115,6 +115,32 @@ class LabController extends ChangeNotifier {
   String? recordingId;
   DateTime? recordingStartedAt;
   String subject = 'S1';
+
+  /// Where the phone is mounted, for the `meta.mount` field: `front`,
+  /// `vent_left` or `vent_right`, with the rough angle towards the driver
+  /// (degrees) and distance to the face (cm) when known.
+  String mountPosition = 'front';
+  int? mountAngleDeg, mountDistanceCm;
+
+  static const mountNames = {
+    'front': 'Прямо',
+    'vent_left': 'Решётка слева',
+    'vent_right': 'Решётка справа',
+  };
+
+  void setMount({String? position, int? angleDeg, int? distanceCm}) {
+    if (recording) return;
+    if (position != null) mountPosition = position;
+    mountAngleDeg = angleDeg ?? mountAngleDeg;
+    mountDistanceCm = distanceCm ?? mountDistanceCm;
+    _notify(force: true);
+  }
+
+  Map<String, Object?> get mount => {
+    'position': mountPosition,
+    'angleDeg': ?mountAngleDeg,
+    'distanceCm': ?mountDistanceCm,
+  };
   ScenarioRunner? scenario;
   Scenario? _pendingScenario;
   String? prompt;
@@ -224,6 +250,7 @@ class LabController extends ChangeNotifier {
       'attention': attention.id,
       if (attentionSettings != null)
         'attentionSettings': attentionSettings!.toJson(),
+      'mount': mount,
       'algorithm': ObservationEngine.algorithmVersion,
       'settings': settings.toJson(),
     },
