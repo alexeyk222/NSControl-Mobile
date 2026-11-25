@@ -1,6 +1,7 @@
 import 'attention_zones.dart';
 import 'calibration.dart';
 import 'face.dart';
+import 'holder_shift.dart';
 import 'settings.dart';
 
 /// Every detection threshold in one versioned set.
@@ -22,6 +23,7 @@ class DetectionProfile {
     this.maximumGapUs = 300000,
     this.eyeYawLimits = const {},
     this.attention = const AttentionSettings(),
+    this.holderShift = const HolderShiftSettings(),
     this.basis,
   });
 
@@ -65,6 +67,9 @@ class DetectionProfile {
   /// What the numbers were chosen on (people, episodes, recordings), shown
   /// in reports; null for the reference.
   final String? basis;
+
+  /// Sudden holder shift (FR-CAL-08): when to suggest a new calibration.
+  final HolderShiftSettings holderShift;
 
   /// ТЗ 2.2 as written: the reference for comparison only.
   static const tz22 = DetectionProfile(
@@ -168,6 +173,7 @@ class DetectionProfile {
     int? maximumGapUs,
     Map<String, double>? eyeYawLimits,
     AttentionSettings? attention,
+    HolderShiftSettings? holderShift,
     String? basis,
   }) => DetectionProfile(
     id: id ?? this.id,
@@ -179,6 +185,7 @@ class DetectionProfile {
     maximumGapUs: maximumGapUs ?? this.maximumGapUs,
     eyeYawLimits: eyeYawLimits ?? this.eyeYawLimits,
     attention: attention ?? this.attention,
+    holderShift: holderShift ?? this.holderShift,
     basis: basis ?? this.basis,
   );
 
@@ -206,6 +213,7 @@ class DetectionProfile {
     'maximumGapUs': maximumGapUs,
     if (eyeYawLimits.isNotEmpty) 'eyeYawLimits': eyeYawLimits,
     'attention': attention.toJson(),
+    'holderShift': holderShift.toJson(),
     if (basis != null) 'basis': basis,
   };
 
@@ -224,6 +232,11 @@ class DetectionProfile {
                 Map<String, dynamic>.from(json['attention'] as Map),
               )
             : const AttentionSettings(),
+        holderShift: json['holderShift'] is Map
+            ? HolderShiftSettings.fromJson(
+                Map<String, dynamic>.from(json['holderShift'] as Map),
+              )
+            : const HolderShiftSettings(),
         basis: json['basis'] as String?,
       );
 }
