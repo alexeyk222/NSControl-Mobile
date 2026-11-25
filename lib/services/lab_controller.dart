@@ -141,8 +141,9 @@ class LabController extends ChangeNotifier {
     _newSession();
     _note(
       next.isAcceptance
-          ? 'Режим приёмки: только ТЗ'
-          : 'Режим Лаборатории: расширения включены',
+          ? 'Режим приёмки: только ТЗ (ракурс глаз до 18° — после новой калибровки)'
+          : 'Режим Лаборатории: расширения включены, ракурс глаз до 45° '
+                'для бокового крепления — после новой калибровки',
     );
   }
 
@@ -572,9 +573,29 @@ class LabController extends ChangeNotifier {
     _anchorFace = null;
     _collector = CalibrationCollector(
       trackingId: trackingId,
-      detector: source!.engines.first,
+      detector: calibrationDetector(source!.engines.first),
       hiddenEyes: settings.hiddenEyes,
       startedUs: atUs,
+    );
+  }
+
+  /// Eye-validity range for a side mount (phone on a vent, turned towards
+  /// the driver): a lab-mode extension. Acceptance keeps the engine's own
+  /// range (ML Kit 18°). The profile carries the range it was made with, so
+  /// the observation engine and the replay use the same one.
+  static const sideMountEyeYawLimit = 45.0;
+
+  DetectorCapabilities calibrationDetector(DetectorCapabilities engine) {
+    final settings = attentionSettings;
+    if (settings == null ||
+        settings.isAcceptance ||
+        engine.eyeYawLimit >= sideMountEyeYawLimit) {
+      return engine;
+    }
+    return DetectorCapabilities(
+      id: engine.id,
+      version: engine.version,
+      eyeYawLimit: sideMountEyeYawLimit,
     );
   }
 

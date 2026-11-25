@@ -296,4 +296,19 @@ void main() {
     expect(calibrations.last['zones']['mirrorsCalibrated'], isTrue);
     expect(lab.notes.map((n) => n.text), contains('Зеркала откалиброваны'));
   });
+
+  test('side mount: lab mode calibrates at 35°, acceptance does not', () async {
+    lab.calibrate();
+    run(10.5, () => face(yaw: 35));
+    expect(lab.calibration, isNotNull);
+    expect(lab.calibration!.detector.eyeYawLimit, 45);
+    run(2, () => face(yaw: 35, eyes: .05));
+    expect(lab.engine!.snapshot.eyes.activeEvent, isNotNull);
+
+    lab.setAttentionSettings(const AttentionSettings.acceptance());
+    lab.calibrate();
+    run(10.5, () => face(yaw: 35));
+    expect(lab.error, isNotNull);
+    expect(lab.notes.first.text, startsWith('Калибровка не удалась'));
+  });
 }
