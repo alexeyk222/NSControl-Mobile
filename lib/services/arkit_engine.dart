@@ -170,10 +170,16 @@ DetectedFace mlKitFaceFromMap(
   }
 
   final x = d('eulerX');
+  // ML Kit names the eyes by the side of the image it analyses. With a
+  // mirrored orientation of ARKit's frame its "left" eye is the driver's
+  // right: on `signs-v1` in «ARKit + ML Kit» (left vent, 20261126-001559)
+  // "close the left eye" gave leftEyeOpen 0.99 / rightEyeOpen 0.02, while
+  // ARKit eye geometry shows the left eye was closed. Yaw, pitch and roll
+  // were ✓ on the same recording.
   final measurement = FaceMeasurement(
     trackingId: (map['trackingId'] as num?)?.toInt(),
-    leftEye: d('leftEyeOpen'),
-    rightEye: d('rightEyeOpen'),
+    leftEye: d(mirrored ? 'rightEyeOpen' : 'leftEyeOpen'),
+    rightEye: d(mirrored ? 'leftEyeOpen' : 'rightEyeOpen'),
     pitchDown: x == null ? null : -x,
     yaw: d('eulerY'),
     roll: d('eulerZ'),

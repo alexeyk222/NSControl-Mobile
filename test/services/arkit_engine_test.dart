@@ -244,6 +244,10 @@ void main() {
       final ml = results[2].faces.single;
       expect(ml.measurement.pitchDown, -5);
       expect(ml.measurement.yaw, -12);
+      // leftMirrored: ML Kit's "left" eye is the driver's right.
+      expect(ml.measurement.leftEye, .7);
+      expect(ml.measurement.rightEye, .8);
+      expect(ml.signals!.eyeOpenLeft, .7);
       expect(ml.signals!.engineId, 'mlkit_face_detection');
       expect(ml.signals!.headYawLeft, -12);
       // Analysed mirrored: the contract box is flipped back.

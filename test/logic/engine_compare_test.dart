@@ -194,6 +194,38 @@ void main() {
     expect(line[1], contains('"eyeOpenLeft":0.1'));
   });
 
+  test('side mount: ML Kit recalibrates with the lab eye limit', () {
+    final lines = <String>[];
+    for (final line in const LineSplitter().convert(
+      SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
+    )) {
+      final json = jsonDecode(line) as Map<String, dynamic>;
+      final s = json['signals'] as Map<String, dynamic>?;
+      if (json['type'] == 'frame' && s?['headYawLeft'] is num) {
+        s!['headYawLeft'] = (s['headYawLeft'] as num) - 35;
+      }
+      final profile = json['profile'] as Map<String, dynamic>?;
+      if (json['type'] == 'calibration' && profile != null) {
+        profile['neutralYaw'] = (profile['neutralYaw'] as num) - 35;
+        (profile['detector'] as Map<String, dynamic>)['eyeYawLimit'] = 45;
+      }
+      lines.add(jsonEncode(json));
+    }
+    final compare = EngineComparison('${lines.join('\n')}\n');
+    expect(compare.mlKitRecalibrationEyeYawLimit, 45);
+    final report = compare.report();
+    expect(report, contains('с пределом глаз 45°'));
+    expect(report, isNot(contains('ошибка:')));
+    expect(report, contains('| mlkit_face_detection | приёмка | пересчитана'));
+    // Without a wider recorded limit ML Kit keeps the ТЗ 18°.
+    expect(
+      EngineComparison(
+        SyntheticScenario(SyntheticStyle.mlKit).toJsonl(),
+      ).mlKitRecalibrationEyeYawLimit,
+      isNull,
+    );
+  });
+
   test('a scaled ML Kit frame is compared by its own size', () {
     final report = EngineComparison(_comparison(scaled: true)).report();
     expect(report, contains('Кадр ARKit: 1280×720; ML Kit'));
