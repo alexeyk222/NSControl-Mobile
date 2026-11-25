@@ -434,16 +434,18 @@ class ReplayRunner {
       options,
     );
     final zones = _zones(profile, calibrationLine, frames, calibrationEndUs);
-    final pipeline = AttentionPipeline(
-      calibration: profile,
-      zones: zones,
+    // The same entry point as the lab: reset, anchor, updateFaces with
+    // every face of the frame, lastMeasurements into the automaton.
+    final provider = ZoneAttentionProvider(
       settings: options.attention,
-    );
+      zones: zones,
+    )..reset(profile);
+    final pipeline = provider.pipeline!;
     // Where the driver was at the end of calibration, as the app does it.
     for (final f in frames.reversed) {
       if (f.capturedUs > calibrationEndUs) continue;
       if (f.faceCount == 1 && f.signals != null && f.signals!.tracked) {
-        pipeline.anchorDriver(f.signals!, f.capturedUs);
+        provider.anchorDriver(f.signals!, f.capturedUs);
       }
       break;
     }
@@ -503,12 +505,11 @@ class ReplayRunner {
       } else if (frame.faceCount == 1 && frame.signals != null) {
         faces.add(frame.signals!);
       }
-      final attention = pipeline.process(
-        frame.capturedUs,
-        faces,
-        tzSignActive: tzSign,
-        eyesEventActive: eyesEvent,
-      );
+      provider
+        ..tzSignActive = tzSign
+        ..eyesEventActive = eyesEvent
+        ..updateFaces(faces, frame.capturedUs);
+      final attention = provider.lastFrame!;
       if (attention.state.driver == ContinuityDecision.restored) restored++;
       final zone = attention.state.zone;
       if (zone != runZone) {
