@@ -214,6 +214,15 @@ Scenario signsV1() {
   ]) {
     b.glance(step, prompt, backAt: 4, window: 4.5, rest: 3, back: 'Прямо');
   }
+  // A second, deeper nod: the first one is often about 12°, below the ТЗ 20°.
+  b.glance(
+    'sign_head_down',
+    'Опустите голову сильнее, подбородок к груди',
+    backAt: 4,
+    window: 4.5,
+    rest: 3,
+    back: 'Прямо',
+  );
   // One eye only: no event by ФТ-04 (both eyes); shows which eye the engine
   // calls left (ML Kit leftEyeOpenProbability, ARKit eyeBlinkLeft).
   b.timed(
