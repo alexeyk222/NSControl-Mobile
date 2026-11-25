@@ -8,6 +8,7 @@ import '../logic/arkit_geometry.dart' show arkitCapabilities;
 import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
+import '../logic/driver_continuity.dart' show ContinuityDecision;
 import '../logic/mount.dart';
 import '../logic/mount_shift.dart';
 import '../logic/replay.dart' show tzSignActive;
@@ -31,11 +32,13 @@ typedef CameraFactory =
     );
 
 /// ARKit for the trip: a source started with [options]; [onStats] gets the
-/// once-a-second `device` numbers (thermal state, battery, frame rate).
+/// once-a-second `device` numbers (thermal state, battery, frame rate),
+/// [onRaw] the engine numbers of each result just before the result.
 typedef ArkitSourceFactory =
     FaceSource Function(
       ArkitOptions options,
       void Function(ArkitStats stats) onStats,
+      void Function(FaceResult result, Map<String, Object?> raw) onRaw,
     );
 
 enum TripPhase { idle, findingFace, calibrating, observing, paused }
@@ -195,6 +198,10 @@ class TripController extends ChangeNotifier {
   /// «Телефон сдвинулся» while the new calibration is collected.
   String? movedText;
 
+  /// More than one face and no single driver: observation is paused until
+  /// the driver is alone in the frame again.
+  bool multipleFaces = false;
+
   /// The profile and settings the automata and the fatigue monitor run on:
   /// the road-frame profile in mount mode, [calibration] itself otherwise.
   CalibrationProfile? engineCalibration;
@@ -327,6 +334,7 @@ class TripController extends ChangeNotifier {
     drive.active(clock.elapsedMicroseconds);
     fatigue = FatigueSnapshot.empty;
     heat = HeatPolicy();
+    _heatSpeech = null;
     _arkitRestartWanted = false;
     final id = tripId!;
     _write(
@@ -393,7 +401,7 @@ class TripController extends ChangeNotifier {
     if (engineInUse != TripEngine.arkit) return camera.start();
     if (_arkit != null) return;
     final options = _arkitOptionsNow();
-    final source = arkitFactory!(options, _onArkitStats);
+    final source = arkitFactory!(options, _onArkitStats, _onArkitRaw);
     _arkit = source;
     arkitOptions = options;
     try {
@@ -428,14 +436,32 @@ class TripController extends ChangeNotifier {
     if (engineInUse != TripEngine.arkit || camera.running) await camera.stop();
   }
 
+  /// `gravityUp` of the ARKit result being delivered, for its frame line.
+  (FaceResult, List<Object?>)? _pendingGravity;
+  List<Object?>? _frameGravity;
+
+  void _onArkitRaw(FaceResult result, Map<String, Object?> raw) {
+    final up = raw['gravityUp'];
+    _pendingGravity = up is List && up.length == 3 ? (result, up) : null;
+  }
+
   void _onArkitResult(FaceResult result) {
+    final pending = _pendingGravity;
+    _pendingGravity = null;
     if (result.engineId != arkitCapabilities.id) return;
+    _frameGravity = pending != null && identical(pending.$1, result)
+        ? pending.$2
+        : null;
     _arkitCompletions.add(result.completedUs);
     final old = clock.elapsedMicroseconds - 120000000;
     while (_arkitCompletions.isNotEmpty && _arkitCompletions.first < old) {
       _arkitCompletions.removeAt(0);
     }
-    _onFaces(result.faces, result.capturedUs, result.completedUs);
+    try {
+      _onFaces(result.faces, result.capturedUs, result.completedUs);
+    } finally {
+      _frameGravity = null;
+    }
   }
 
   /// A `device` line of ARKit: kept for the screen and the recording, and
@@ -451,22 +477,10 @@ class TripController extends ChangeNotifier {
       thermal: stats.thermal,
       sent: stats.sent,
     );
-    if (decision.sayEconomy) {
-      _say('Телефон нагрелся. Продолжаю в экономном режиме');
-    }
-    if (decision.warnCritical) {
-      // Not the alarm: a short tone and a light vibration, never on top of
-      // an alarm that sounds (docs/ux/states.md S-12).
-      if (!_audioRequested) {
-        unawaited(
-          _safe(
-            () =>
-                platform.testAlert(volume: settings.volume * .6, vibrate: true),
-          ),
-        );
-      }
-      _say('Телефон перегрелся. Уберите его от горячего воздуха');
-    }
+    if (decision.sayEconomy) _heatSpeech = _HeatSpeech.economy;
+    // Critical replaces a pending economy phrase.
+    if (decision.warnCritical) _heatSpeech = _HeatSpeech.critical;
+    _sayHeat();
     if (wasEconomy != heat.economy || wasReduced != heat.rateReduced) {
       if (recording) {
         _record({
@@ -483,6 +497,34 @@ class TripController extends ChangeNotifier {
       _notify();
     }
     _wantArkitOptions();
+  }
+
+  /// Heat phrase waiting for a moment without an alarm.
+  _HeatSpeech? _heatSpeech;
+
+  /// Says the pending heat phrase unless an alarm sounds or an event is
+  /// active: the phrase never talks over the alarm (states.md S-11, S-12).
+  /// The tick retries.
+  void _sayHeat() {
+    final speech = _heatSpeech;
+    if (speech == null) return;
+    if (_audioRequested || (snapshot?.activeEvents.isNotEmpty ?? false)) {
+      return;
+    }
+    _heatSpeech = null;
+    switch (speech) {
+      case _HeatSpeech.economy:
+        _say('Телефон нагрелся. Продолжаю в экономном режиме');
+      case _HeatSpeech.critical:
+        // Not the alarm: a short tone and a light vibration.
+        unawaited(
+          _safe(
+            () =>
+                platform.testAlert(volume: settings.volume * .6, vibrate: true),
+          ),
+        );
+        _say('Телефон перегрелся. Уберите его от горячего воздуха');
+    }
   }
 
   /// Asks for an ARKit restart when the wanted options differ from the
@@ -622,9 +664,30 @@ class TripController extends ChangeNotifier {
           at,
         );
       }
-      final measurements =
-          pipeline?.lastMeasurements ??
-          result.map((f) => f.measurement).toList();
+      // Several faces and no single driver: the automata pause (ФТ-02) and
+      // go on by themselves once the driver is alone again, with the same
+      // calibration (docs/ux/states.md S-05). Only «ТЗ 2.2 (эталон)» keeps
+      // the strict ТЗ rule: stop until the face is confirmed again.
+      final ambiguous =
+          pipeline != null &&
+          !tzReference &&
+          attentionState.details['driver'] == ContinuityDecision.ambiguous.code;
+      if (ambiguous != multipleFaces) {
+        multipleFaces = ambiguous;
+        _notify();
+      }
+      if (result.length == 1 &&
+          (attentionState.details['driver'] == ContinuityDecision.same.code ||
+              attentionState.details['driver'] ==
+                  ContinuityDecision.restored.code)) {
+        // Where the driver was last seen, for a resume after a pause.
+        _anchorFace = _signalsOf(result.single);
+        _anchorUs = captured;
+      }
+      final measurements = ambiguous
+          ? const <FaceMeasurement>[]
+          : pipeline?.lastMeasurements ??
+                result.map((f) => f.measurement).toList();
       final engine = this.engine!;
       _apply(
         engine.process(
@@ -939,6 +1002,7 @@ class TripController extends ChangeNotifier {
       _lastReconnectUs = now;
       unawaited(_startCamera());
     }
+    if (active) _sayHeat();
     if (_arkitRestartWanted &&
         !_arkitRestarting &&
         active &&
@@ -1212,6 +1276,7 @@ class TripController extends ChangeNotifier {
     _collector = null;
     _mountCollector = null;
     _shiftCollector = null;
+    multipleFaces = false;
     attention = null;
     attentionState = AttentionState.unknown;
     _fatigueMonitor = null;
@@ -1269,22 +1334,64 @@ class TripController extends ChangeNotifier {
     _notify();
   }
 
+  /// A pause up to this long goes on with the same calibration.
+  static const resumeWithinUs = 10 * 60 * 1000000;
+
+  /// The calibration to go on with after a pause, and when it began.
+  CalibrationProfile? _resumeCalibration;
+  int _pausedAtUs = 0;
+
   Future<void> foreground(bool value) async {
+    if (value && _foreground && phase != TripPhase.paused) {
+      // Back from a short inactive state that did not pause the trip. iOS
+      // stopped the alarm sound and the keep-awake on resigning active
+      // (AppDelegate), so both are asked for again.
+      if (active) {
+        unawaited(_safe(() => platform.keepAwake(true)));
+        if (_audioRequested) _syncAudio(true);
+      }
+      return;
+    }
     final generation = ++_lifecycleGeneration;
     _foreground = value;
     if (!active) return;
     if (!value) {
       faces = [];
+      // The calibration outlives a pause: the driver and the holder are
+      // usually where they were (ПЗ: the previous parameters are used after
+      // the return if the phone was not moved).
+      if (phase != TripPhase.paused) {
+        _resumeCalibration = phase == TripPhase.observing ? calibration : null;
+        _pausedAtUs = clock.elapsedMicroseconds;
+      }
       phase = TripPhase.paused;
       await _endSession(EventEndReason.cameraStopped);
       await _stopCamera();
       if (generation != _lifecycleGeneration) return;
       await _safe(() => platform.keepAwake(false));
     } else {
-      phase = TripPhase.findingFace;
-      error = 'Подтвердите лицо после возврата и повторите калибровку.';
+      final resume = _resumeCalibration;
+      _resumeCalibration = null;
+      final now = clock.elapsedMicroseconds;
+      final goOn =
+          resume != null &&
+          identical(resume, calibration) &&
+          now - _pausedAtUs <= resumeWithinUs;
       await _safe(() => platform.keepAwake(true));
       if (generation != _lifecycleGeneration || !active || !_foreground) return;
+      if (goOn) {
+        // A new session on the same calibration. Driver continuity takes
+        // the driver back only where the driver was (box, distance) within
+        // its gap from now; another face or a moved phone stops it, and the
+        // trip asks to confirm the face (ФТ-02).
+        error = null;
+        _anchorUs = now;
+        _newSession();
+        _say('Продолжаю');
+      } else {
+        phase = TripPhase.findingFace;
+        error = 'Подтвердите лицо после возврата и повторите калибровку.';
+      }
       if (!cameraPermissionBlocked) await _startCamera();
     }
     _notify();
@@ -1441,6 +1548,9 @@ class TripController extends ChangeNotifier {
 
   void _platformEvent(Map<String, Object?> event) {
     if (event['type'] == 'platform_interruption') {
+      // A system sheet over the app (HealthKit permission, Control Centre)
+      // only makes it inactive: the camera goes on, the trip too.
+      if (event['reason'] == 'inactive') return;
       unawaited(foreground(false));
     } else if (event['type'] == 'platform_resumed') {
       unawaited(foreground(true));
@@ -1652,6 +1762,9 @@ class TripController extends ChangeNotifier {
           for (final f in result)
             if (!identical(f, driver)) _signalsOf(f).toJson(),
         ],
+      // The phone's tilt to gravity: moves when the holder moves, hardly
+      // when the car turns (a sudden holder shift, thread 3).
+      'gravityUp': ?_frameGravity,
     });
   }
 
@@ -1695,3 +1808,5 @@ class TripController extends ChangeNotifier {
     super.dispose();
   }
 }
+
+enum _HeatSpeech { economy, critical }

@@ -76,8 +76,11 @@ Future<void> main() async {
           settings: settings,
           // ARKit is the trip's engine on iPhone; ML Kit is the fallback.
           arkitFactory: Platform.isIOS
-              ? (options, onStats) =>
-                    ArkitFaceSource(options: options, onStats: onStats)
+              ? (options, onStats, onRaw) => ArkitFaceSource(
+                  options: options,
+                  onStats: onStats,
+                  onRaw: onRaw,
+                )
               : null,
           arkitSupported: Platform.isIOS
               ? () => ArkitEngine().isSupported()
@@ -169,6 +172,9 @@ class _NSControlAppState extends State<NSControlApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // inactive is a system sheet or Control Centre over the app: the camera
+    // goes on, so the trip does not pause (hidden/paused do pause it).
+    if (state == AppLifecycleState.inactive) return;
     unawaited(widget.trip.foreground(state == AppLifecycleState.resumed));
   }
 
