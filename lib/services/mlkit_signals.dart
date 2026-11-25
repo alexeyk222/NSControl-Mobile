@@ -20,6 +20,7 @@ abstract final class MlKitSignals {
     double? eulerX,
     double? eulerY,
     double? eulerZ,
+    FaceBox? box,
   }) => FaceSignals(
     engineId: engineId,
     trackingId: trackingId,
@@ -28,5 +29,36 @@ abstract final class MlKitSignals {
     headRollRight: eulerZ == null ? null : rollSign * eulerZ,
     eyeOpenLeft: leftEyeOpen,
     eyeOpenRight: rightEyeOpen,
+    box: box,
   );
+
+  /// [FaceSignals.box] from an ML Kit bounding box. ML Kit reports it in the
+  /// upright (rotated) image, not mirrored, so only the size has to follow
+  /// the rotation: a quarter turn swaps width and height.
+  static FaceBox? boxOf({
+    required double left,
+    required double top,
+    required double width,
+    required double height,
+    required int imageWidth,
+    required int imageHeight,
+    required int rotation,
+  }) {
+    final quarter = rotation % 180 != 0;
+    final w = (quarter ? imageHeight : imageWidth).toDouble();
+    final h = (quarter ? imageWidth : imageHeight).toDouble();
+    if (w <= 0 || h <= 0) return null;
+    final box = FaceBox(
+      left: left / w,
+      top: top / h,
+      width: width / w,
+      height: height / h,
+    );
+    try {
+      box.validate();
+      return box;
+    } on FormatException {
+      return null;
+    }
+  }
 }

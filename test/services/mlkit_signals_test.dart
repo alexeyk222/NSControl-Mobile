@@ -30,4 +30,34 @@ void main() {
     expect(s.headYawLeft, isNull);
     expect(s.eyeOpenLeft, isNull);
   });
+
+  test('face box is normalized to the upright frame', () {
+    final box = MlKitSignals.boxOf(
+      left: 48,
+      top: 64,
+      width: 240,
+      height: 320,
+      imageWidth: 640,
+      imageHeight: 480,
+      rotation: 270,
+    )!;
+    expect(box.left, .1);
+    expect(box.top, .1);
+    expect(box.width, .5);
+    expect(box.height, .5);
+    final s = MlKitSignals.from(trackingId: 1, box: box);
+    expect(s.toJson()['box'], box.toJson());
+    expect(
+      MlKitSignals.boxOf(
+        left: 0,
+        top: 0,
+        width: 0,
+        height: 10,
+        imageWidth: 640,
+        imageHeight: 480,
+        rotation: 0,
+      ),
+      isNull,
+    );
+  });
 }
