@@ -18,6 +18,9 @@ import MLKitVision
 ///
 /// Frames never leave memory (ФТ-01): `capturedImage` is only shown through a
 /// Flutter texture and, in comparison mode, analysed by ML Kit on device.
+/// The one exception is the developer debug video (`debugVideo`, off by
+/// default): small JPEGs for the live page on the Mac and alarm clips kept
+/// on the phone; Dart decides where they go (docs/trip-debug.md).
 ///
 /// Time: every timestamp is in microseconds of the system uptime clock, the
 /// same clock as `ARFrame.timestamp` and `CACurrentMediaTime()`. Dart maps it
@@ -40,6 +43,7 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
     private let textures: FlutterTextureRegistry
     private let queue = DispatchQueue(label: "nscontrol.arkit.frames", qos: .userInteractive)
     private let mlQueue = DispatchQueue(label: "nscontrol.arkit.mlkit", qos: .userInitiated)
+    private let jpegQueue = DispatchQueue(label: "nscontrol.arkit.jpeg", qos: .utility)
 
     /// Everything one running session needs; replaced as a whole.
     final class Active {
@@ -71,6 +75,13 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
     private var frameIndex = 0
     private var pendingEvents = 0
     private var sentDisplay = false
+    // Debug video, touched only on `queue` (the JPEG itself is encoded on
+    // `jpegQueue`, one at a time).
+    private var debugVideo = DebugVideo()
+    private var lastJpegUs: Int64 = 0
+    private var jpegBusy = false
+    private let jpegPool = BufferPool()
+    private let jpegContext = CIContext(options: [.cacheIntermediates: false])
     // Counters for the 1 s stats event; guarded by `countersLock`.
     private let countersLock = NSLock()
     private var counters = Counters()
@@ -105,6 +116,21 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         }
     }
 
+    /// Developer debug video: `fps` 0 is off. `width` is the long side of
+    /// the JPEG (the sensor image is landscape), `quality` 0..1.
+    struct DebugVideo {
+        var fps = 0.0
+        var width = 480
+        var quality = 0.5
+
+        init() {}
+        init(_ args: [String: Any]) {
+            fps = min(15, max(0, (args["fps"] as? NSNumber)?.doubleValue ?? 0))
+            width = min(1440, max(96, (args["width"] as? NSNumber)?.intValue ?? 480))
+            quality = min(1, max(0.1, (args["quality"] as? NSNumber)?.doubleValue ?? 0.5))
+        }
+    }
+
     struct Counters {
         var arFrames = 0
         var sent = 0
@@ -115,6 +141,8 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         var mlKitErrors = 0
         var mlKitWidth = 0
         var mlKitHeight = 0
+        var jpegs = 0
+        var jpegBytes = 0
     }
 
     init(textures: FlutterTextureRegistry) {
@@ -155,6 +183,10 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
             start(Options(args), result: result)
         case "stop":
             stop()
+            result(nil)
+        case "debugVideo":
+            let video = DebugVideo(args)
+            queue.async { self.debugVideo = video; self.lastJpegUs = 0 }
             result(nil)
         default:
             result(FlutterMethodNotImplemented)
@@ -198,6 +230,7 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
             frameIndex = 0
             pendingEvents = 0
             sentDisplay = false
+            lastJpegUs = 0
         }
         countersLock.lock(); counters = Counters(); countersLock.unlock()
 
@@ -230,7 +263,11 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         session?.delegate = nil
         session = nil
         // After this no frame callback touches the old texture or runner.
-        queue.sync { active = nil }
+        queue.sync {
+            active = nil
+            // Dart turns the debug video on again after each start.
+            debugVideo = DebugVideo()
+        }
         if let previewId = main?.previewId { textures.unregisterTexture(previewId) }
         main = nil
     }
@@ -251,6 +288,7 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
         }
         frameIndex += 1
         if let mlKit = active.mlKit { analyseWithMlKit(frame, runner: mlKit, options: options) }
+        if debugVideo.fps > 0 { encodeDebugJpeg(frame) }
         guard frameIndex % options.emitEvery == 0 else { return }
 
         let capturedUs = Self.us(frame.timestamp)
@@ -364,6 +402,10 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
             event["mlKitWidth"] = c.mlKitWidth
             event["mlKitHeight"] = c.mlKitHeight
         }
+        if c.jpegs > 0 {
+            event["jpegs"] = c.jpegs
+            event["jpegBytes"] = c.jpegBytes
+        }
         sink?(event)
     }
 
@@ -435,6 +477,54 @@ final class FaceTrackingPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, A
                     "orientation": runner.orientationName,
                     "faces": faces,
                 ])
+            }
+        }
+    }
+
+    // MARK: Debug video
+
+    /// A small JPEG of the frame for the developer debug video, at most
+    /// `debugVideo.fps` a second and one at a time: the frame queue only
+    /// scales the image into a pool buffer (GPU), the JPEG is encoded on
+    /// `jpegQueue`, and a frame arriving while one is encoded is skipped.
+    /// The JPEG keeps the sensor orientation; Dart and the page rotate it
+    /// with the preview's `displayTransform`.
+    private func encodeDebugJpeg(_ frame: ARFrame) {
+        let video = debugVideo
+        let capturedUs = Self.us(frame.timestamp)
+        guard !jpegBusy, capturedUs - lastJpegUs >= Int64(1_000_000 / video.fps) - 5_000 else { return }
+        let source = frame.capturedImage
+        let sourceWidth = CVPixelBufferGetWidth(source), sourceHeight = CVPixelBufferGetHeight(source)
+        guard sourceWidth > 0 && sourceHeight > 0 else { return }
+        let width = min(video.width, sourceWidth)
+        let height = Int((Double(sourceHeight) * Double(width) / Double(sourceWidth) / 2).rounded()) * 2
+        guard let small = jpegPool.render(source, size: CGSize(width: width, height: height), context: ciContext) else { return }
+        jpegBusy = true
+        lastJpegUs = capturedUs
+        let quality = video.quality
+        jpegQueue.async { [weak self] in
+            guard let self else { return }
+            let data = self.jpegContext.jpegRepresentation(
+                of: CIImage(cvPixelBuffer: small),
+                colorSpace: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality])
+            self.queue.async {
+                self.jpegBusy = false
+                guard let data, self.active != nil else { return }
+                self.countersLock.lock()
+                self.counters.jpegs += 1
+                self.counters.jpegBytes += data.count
+                self.countersLock.unlock()
+                let event: [String: Any] = [
+                    "type": "jpeg",
+                    "capturedUptimeUs": NSNumber(value: capturedUs),
+                    "width": width,
+                    "height": height,
+                    "data": FlutterStandardTypedData(bytes: data),
+                ]
+                // Not through `send`: a JPEG must never push a face event
+                // out of the 4-event budget.
+                DispatchQueue.main.async { self.sink?(event) }
             }
         }
     }

@@ -13,115 +13,157 @@ class TripPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: Listenable.merge([trip, sleep]),
-    builder: (context, _) => ListView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
-      children: [
-        Text(
-          trip.active ? 'Текущая поездка' : 'Перед поездкой',
-          style: Theme.of(context).textTheme.headlineMedium,
+    builder: (context, _) => GestureDetector(
+      // Developer live debug: a double tap anywhere marks the moment for
+      // the review without looking for a button (docs/trip-debug.md).
+      behavior: HitTestBehavior.translucent,
+      onDoubleTap: trip.active && (trip.liveDebug || trip.recording)
+          ? trip.mark
+          : null,
+      child: _list(context),
+    ),
+  );
+
+  Widget _list(BuildContext context) => ListView(
+    padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+    children: [
+      Text(
+        trip.active ? 'Текущая поездка' : 'Перед поездкой',
+        style: Theme.of(context).textTheme.headlineMedium,
+      ),
+      const SizedBox(height: 6),
+      Text(
+        trip.active
+            ? 'Камера и рекомендации работают независимо.'
+            : 'Закрепите телефон. Проверьте состояние и оповещение.',
+        style: Theme.of(context).textTheme.bodyMedium,
+      ),
+      const SizedBox(height: 20),
+      if (trip.journalIncomplete) ...[
+        const Notice(
+          'Журнал неполный: запись в хранилище недоступна. Оповещение продолжает работать.',
+          error: true,
         ),
-        const SizedBox(height: 6),
-        Text(
-          trip.active
-              ? 'Камера и рекомендации работают независимо.'
-              : 'Закрепите телефон. Проверьте состояние и оповещение.',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 20),
-        if (trip.journalIncomplete) ...[
-          const Notice(
-            'Журнал неполный: запись в хранилище недоступна. Оповещение продолжает работать.',
-            error: true,
-          ),
-          const SizedBox(height: 12),
-        ],
-        if (trip.alertError != null) ...[
-          Notice(trip.alertError!, error: true),
-          const SizedBox(height: 12),
-        ],
-        if (trip.snapshot?.activeEvents.isNotEmpty ?? false) _warning(context),
-        LayoutBuilder(
-          builder: (context, box) {
-            final camera = _cameraCard(context);
-            final rec = _recommendation(context);
-            return box.maxWidth > 760
-                ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(flex: 5, child: camera),
-                      const SizedBox(width: 12),
-                      Expanded(flex: 4, child: rec),
-                    ],
-                  )
-                : Column(children: [camera, const SizedBox(height: 12), rec]);
-          },
-        ),
-        if (trip.active && trip.phase == TripPhase.observing) ...[
-          const SizedBox(height: 12),
-          VigilanceCard(trip: trip),
-        ],
         const SizedBox(height: 12),
-        SectionCard(
-          title: 'Как вы себя чувствуете?',
-          icon: Icons.self_improvement,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: SelfAssessment.values
-                    .map(
-                      (value) => ChoiceChip(
-                        label: Text(switch (value) {
-                          SelfAssessment.unknown => 'Не оценивал',
-                          SelfAssessment.notSleepy => 'Сонливость не ощущаю',
-                          SelfAssessment.sleepy => 'Есть сонливость',
-                        }),
-                        selected: sleep.assessment == value,
-                        onSelected: (_) => sleep.setAssessment(value),
-                      ),
-                    )
-                    .toList(),
-              ),
-              const SizedBox(height: 12),
-              const Text(
-                'Ответ относится к этой поездке. Данные часов не отменяют ощущение сонливости.',
-              ),
-            ],
+      ],
+      if (trip.alertError != null) ...[
+        Notice(trip.alertError!, error: true),
+        const SizedBox(height: 12),
+      ],
+      if (trip.snapshot?.activeEvents.isNotEmpty ?? false) _warning(context),
+      LayoutBuilder(
+        builder: (context, box) {
+          final camera = _cameraCard(context);
+          final rec = _recommendation(context);
+          return box.maxWidth > 760
+              ? Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(flex: 5, child: camera),
+                    const SizedBox(width: 12),
+                    Expanded(flex: 4, child: rec),
+                  ],
+                )
+              : Column(children: [camera, const SizedBox(height: 12), rec]);
+        },
+      ),
+      if (trip.active && trip.phase == TripPhase.observing) ...[
+        const SizedBox(height: 12),
+        VigilanceCard(trip: trip),
+      ],
+      if (trip.active && (trip.liveDebug || trip.recording)) ...[
+        const SizedBox(height: 12),
+        _debugCard(context),
+      ],
+      const SizedBox(height: 12),
+      SectionCard(
+        title: 'Как вы себя чувствуете?',
+        icon: Icons.self_improvement,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: SelfAssessment.values
+                  .map(
+                    (value) => ChoiceChip(
+                      label: Text(switch (value) {
+                        SelfAssessment.unknown => 'Не оценивал',
+                        SelfAssessment.notSleepy => 'Сонливость не ощущаю',
+                        SelfAssessment.sleepy => 'Есть сонливость',
+                      }),
+                      selected: sleep.assessment == value,
+                      onSelected: (_) => sleep.setAssessment(value),
+                    ),
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Ответ относится к этой поездке. Данные часов не отменяют ощущение сонливости.',
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 14),
+      if (!trip.active)
+        FilledButton.icon(
+          key: const Key('start-trip'),
+          onPressed: () => unawaited(trip.start()),
+          icon: const Icon(Icons.play_arrow_rounded),
+          label: const Padding(
+            padding: EdgeInsets.all(16),
+            child: Text('Начать поездку'),
+          ),
+        )
+      else
+        OutlinedButton.icon(
+          onPressed: () => unawaited(trip.finish()),
+          icon: const Icon(Icons.stop_circle_outlined),
+          label: const Padding(
+            padding: EdgeInsets.all(14),
+            child: Text('Завершить поездку'),
           ),
         ),
-        const SizedBox(height: 14),
-        if (!trip.active)
-          FilledButton.icon(
-            key: const Key('start-trip'),
-            onPressed: () => unawaited(trip.start()),
-            icon: const Icon(Icons.play_arrow_rounded),
-            label: const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('Начать поездку'),
-            ),
-          )
-        else
-          OutlinedButton.icon(
-            onPressed: () => unawaited(trip.finish()),
-            icon: const Icon(Icons.stop_circle_outlined),
-            label: const Padding(
-              padding: EdgeInsets.all(14),
-              child: Text('Завершить поездку'),
-            ),
+      if (trip.lastFinishedTrip != null)
+        const Padding(
+          padding: EdgeInsets.only(top: 14),
+          child: Notice(
+            'Поездка завершена. Итог и события доступны в журнале.',
           ),
-        if (trip.lastFinishedTrip != null)
-          const Padding(
-            padding: EdgeInsets.only(top: 14),
-            child: Notice(
-              'Поездка завершена. Итог и события доступны в журнале.',
-            ),
+        ),
+      const SizedBox(height: 20),
+      const Text(
+        'NSControl описывает наблюдаемые признаки и не подтверждает отсутствие сонливости. Испытания выполняются только на неподвижном стенде.',
+        textAlign: TextAlign.center,
+      ),
+    ],
+  );
+
+  Widget _debugCard(BuildContext context) => SectionCard(
+    title: 'Дебаг поездки',
+    icon: Icons.bug_report_outlined,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (trip.debugUrls.isNotEmpty)
+          SelectableText('Mac: ${trip.debugUrls.first}'),
+        if (trip.recording)
+          Text(
+            'Запись ${trip.recordingId}'
+            '${trip.clips != null ? ', клипы тревог' : ''}',
           ),
-        const SizedBox(height: 20),
+        const SizedBox(height: 8),
         const Text(
-          'NSControl описывает наблюдаемые признаки и не подтверждает отсутствие сонливости. Испытания выполняются только на неподвижном стенде.',
-          textAlign: TextAlign.center,
+          'Двойное касание в любом месте экрана ставит метку «здесь что-то '
+          'не так». Разобрать тревоги можно после поездки.',
+        ),
+        const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: trip.mark,
+          icon: const Icon(Icons.flag_outlined),
+          label: const Text('Отметить момент'),
         ),
       ],
     ),

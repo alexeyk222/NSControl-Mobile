@@ -410,6 +410,56 @@ class _SettingsPageState extends State<SettingsPage> {
                                 setState(() {});
                               },
                       ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Живой дебаг на Mac'),
+                        subtitle: Text(
+                          widget.trip.debugUrls.isEmpty
+                              ? 'Страница в браузере Mac: видео с камеры, '
+                                    'сигналы, пороги профиля, автоматы и '
+                                    'тревоги, кнопки меток. Mac в той же '
+                                    'Wi-Fi или в режиме модема телефона. '
+                                    'Видео не записывается и не уходит в '
+                                    'интернет.'
+                              : 'Откройте на Mac: '
+                                    '${widget.trip.debugUrls.first}\n'
+                                    'Разбор поездок: тот же адрес с /review '
+                                    'вместо /.',
+                        ),
+                        value: widget.trip.liveDebug,
+                        onChanged: (value) async {
+                          await widget.trip.setLiveDebug(value);
+                          widget.trip.journal(
+                            (db) => db.setSetting('trip_debug_live', value),
+                          );
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                      if (widget.trip.recordTrips)
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('Клипы тревог'),
+                          subtitle: const Text(
+                            'Только ARKit. Телефон хранит короткие клипы '
+                            '(10 с до и 5 с после) каждой тревоги и метки '
+                            'в низком разрешении, для разбора ложных '
+                            'тревог. Хранятся только на телефоне. Со '
+                            'следующей поездки.',
+                          ),
+                          value: widget.trip.debugClips,
+                          onChanged: widget.trip.active
+                              ? null
+                              : (value) {
+                                  widget.trip.debugClips = value;
+                                  widget.trip.journal(
+                                    (db) => db.setSetting(
+                                      'trip_debug_clips',
+                                      value,
+                                    ),
+                                  );
+                                  setState(() {});
+                                },
+                        ),
                       if (widget.trip.recordTrips)
                         Padding(
                           padding: const EdgeInsets.only(bottom: 8),

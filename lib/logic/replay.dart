@@ -265,6 +265,14 @@ abstract final class ScenarioExpectations {
     'head_down_3s': {headPitchDown},
     // Extension step: looking at the console / phone for 4 s.
     'distraction_4s': {distraction},
+    // Reviewed trips (lib/logic/trip_review.dart, docs/trip-debug.md): an
+    // alarm the reviewer called right, a sign the system missed. The other
+    // review steps (`trip_drive`, `trip_alarm_false`) expect nothing.
+    'trip_eyes_true': {eyesClosed},
+    'trip_head_true': {headPitchDown},
+    'trip_distraction_true': {distraction},
+    'trip_eyes_missed': {eyesClosed},
+    'trip_head_missed': {headPitchDown},
   };
 
   /// Steps that only change the conditions of the main steps.
@@ -279,6 +287,11 @@ abstract final class ScenarioExpectations {
   /// phone with the head down more than 20° is a real head_pitch_down.
   static const Map<String, Set<String>> allowed = {
     'distraction_4s': {headPitchDown},
+    // A drowsy driver may close the eyes and drop the head together.
+    'trip_eyes_true': {headPitchDown},
+    'trip_head_true': {eyesClosed},
+    'trip_eyes_missed': {headPitchDown},
+    'trip_head_missed': {eyesClosed},
   };
 
   /// Steps whose glance durations the report lists (mirror limit, ПМИ).
