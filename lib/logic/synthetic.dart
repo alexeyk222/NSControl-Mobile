@@ -267,6 +267,8 @@ class SyntheticScenario {
     final out = <String>[];
     final frames = <(int, int, FaceSignals?)>[];
     var nextBlinkUs = 2000000;
+    var wasLost = false;
+    _id = 1;
     for (var t = 0; t <= endUs; t += frameUs) {
       final captured = t + noise(2000).round().abs();
       var pose = _road;
@@ -282,6 +284,9 @@ class SyntheticScenario {
         nextBlinkUs += 3500000 + rnd.nextInt(1500000);
       }
       final visible = pose.visible && pose.yaw.abs() <= (_arkit ? 60 : 55);
+      // ML Kit gives the face a new tracking id after every loss.
+      if (!_arkit && visible && wasLost) _id++;
+      wasLost = !visible;
       frames.add((
         captured,
         captured + latencyUs + noise(5000).round().abs(),
@@ -392,7 +397,18 @@ class SyntheticScenario {
     return result.profile!;
   }
 
+  int _id = 1;
+
   FaceSignals _signals(_Pose p, double Function(double) noise) {
+    // The face box moves and narrows as the head turns.
+    final yawRad = p.yaw * math.pi / 180;
+    final width = .3 * (.75 + .25 * math.cos(yawRad)) + noise(.004);
+    final box = FaceBox(
+      left: .5 - p.yaw * .004 + noise(.004) - width / 2,
+      top: .45 + p.pitch * .003 + noise(.004) - .2,
+      width: width,
+      height: .4 + noise(.004),
+    );
     double clamp01(double v) => v.clamp(0.0, 1.0).toDouble();
     // The lid follows the eye down: about 0.035 openness per degree below 5°.
     final lidDrop = p.eyeDown > 5 ? (p.eyeDown - 5) * .035 : 0.0;
@@ -406,8 +422,9 @@ class SyntheticScenario {
     if (!_arkit) {
       return FaceSignals(
         engineId: style.engineId,
-        trackingId: 1,
+        trackingId: _id,
         headYawLeft: yaw,
+        box: box,
         headPitchDown: pitch,
         headRollRight: roll,
         eyeOpenLeft: left,
@@ -422,8 +439,9 @@ class SyntheticScenario {
     final lookDown = clamp01(eyeDown / 30 + (closed ? .4 : 0));
     return FaceSignals(
       engineId: style.engineId,
-      trackingId: 1,
+      trackingId: _id,
       headYawLeft: yaw,
+      box: box,
       headPitchDown: pitch,
       headRollRight: roll,
       gazeLeft: yaw + eyeLeft,
