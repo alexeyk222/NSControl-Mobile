@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
+import 'package:nscontrol/logic/replay.dart' show channelSignActive;
 
 final profile = CalibrationProfile(
   trackingId: 1,
@@ -288,6 +289,107 @@ void main() {
     });
   });
 
+  group('closure latch', () {
+    /// Road, then a real closure at openness 0.2–0.3 while eyeSquint jumps
+    /// between 0.4 and 0.5 and eyeLookDown grows (ARKit-like artefacts).
+    ({ObservationEvent? event, int closedAtUs, bool cut}) run(EyeGate gate) {
+      final engine = ObservationEngine(sessionId: 's', calibration: profile);
+      final p = AttentionPipeline(
+        calibration: profile,
+        settings: AttentionSettings.lab,
+        eyeGate: gate,
+      );
+      var us = 0;
+      var eyesSign = false, cut = false;
+      ObservationEvent? event;
+      void frame(FaceSignals f) {
+        us += 33333;
+        final u = engine.process(
+          sessionId: 's',
+          capturedUs: us,
+          completedUs: us + 20000,
+          faces: p.process(us, [f], eyesSignActive: eyesSign).measurements,
+        );
+        if (u.started.isNotEmpty) event ??= u.started.first;
+        if (u.ended.isNotEmpty) cut = true;
+        eyesSign = channelSignActive(u.snapshot.eyes);
+      }
+
+      for (var i = 0; i < 30; i++) {
+        frame(arkit());
+      }
+      final closedAt = us + 33333;
+      for (var i = 0; i < 75; i++) {
+        frame(
+          arkit(
+            open: i.isEven ? .2 : .3,
+            squint: i % 3 == 0 ? .5 : .4,
+            eyeDown: i < 15 ? i.toDouble() : 15,
+            lookDown: (.3 + i * .01).clamp(0, .8).toDouble(),
+          ),
+        );
+      }
+      return (event: event, closedAtUs: closedAt, cut: cut);
+    }
+
+    test('a flickering squint does not reset the 1.5 s count', () {
+      final r = run(EyeGate());
+      expect(r.event, isNotNull);
+      expect(r.event!.type, EventType.eyesClosed);
+      expect(
+        r.event!.thresholdUs - r.closedAtUs,
+        inInclusiveRange(1500000, 1700000),
+      );
+      expect(r.cut, isFalse, reason: 'the active event must not be cut');
+    });
+
+    test('without the latch the same closure would be lost', () {
+      final r = run(EyeGate(latchUs: 1 << 40));
+      expect(r.event, isNull);
+    });
+
+    test('the latch releases when both eyes are open again', () {
+      final gate = EyeGate();
+      final map = ZoneMap.fromCalibration(profile);
+      var us = 0;
+      EyeGateReason step(FaceSignals f) {
+        us += 33333;
+        return gate.evaluate(
+          face: f,
+          zone: map.classify(map.directionOf(f)!),
+          threshold: .4,
+          headOnly: false,
+          atUs: us,
+        );
+      }
+
+      for (var i = 0; i < 6; i++) {
+        step(arkit(open: .3, squint: i.isEven ? .5 : .4));
+      }
+      expect(gate.latched, isTrue);
+      expect(step(arkit(open: .3, squint: .7)), EyeGateReason.none);
+      step(arkit());
+      expect(gate.latched, isFalse);
+      expect(step(arkit(open: .3, squint: .7)), EyeGateReason.squint);
+    });
+
+    test('the eyes channel sign latches at once', () {
+      final gate = EyeGate();
+      final map = ZoneMap.fromCalibration(profile);
+      final f = arkit(open: .3, squint: .7);
+      expect(
+        gate.evaluate(
+          face: f,
+          zone: map.classify(map.directionOf(f)!),
+          threshold: .4,
+          headOnly: false,
+          eyesSignActive: true,
+        ),
+        EyeGateReason.none,
+      );
+    });
+  });
+
   group('pipeline', () {
     test('acceptance passes exactly the ТЗ measurement', () {
       final p = AttentionPipeline(calibration: profile);
@@ -422,6 +524,22 @@ void main() {
           m.update(us += 100000, GazeZone.road);
         }
       }
+    });
+
+    test('the long-glance limit is set per zone', () {
+      expect(DistractionMonitor().longFor(GazeZone.mirrorLeft), 3000000);
+      final m = DistractionMonitor(
+        longUsByZone: const {GazeZone.mirrorLeft: 6000000},
+      );
+      for (var us = 0; us <= 4000000; us += 100000) {
+        expect(m.update(us, GazeZone.mirrorLeft).started, isNull);
+      }
+      m.update(4100000, GazeZone.road);
+      DistractionEvent? event;
+      for (var us = 4200000; us <= 8000000 && event == null; us += 100000) {
+        event = m.update(us, GazeZone.console).started;
+      }
+      expect(event?.thresholdUs, 7200000);
     });
 
     test('a ТЗ sign has priority', () {

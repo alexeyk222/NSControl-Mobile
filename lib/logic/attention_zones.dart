@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'attention.dart';
 import 'calibration.dart';
+import 'driver_continuity.dart';
 import 'face.dart';
 import 'signals.dart';
 
@@ -537,12 +538,18 @@ enum EyeGateReason {
 ///   even if the engine reports the closed eye as "looking down".
 /// - Squint: a strong squint blendshape (sun, laughter, yawn).
 /// - A deep closure (both eyes open ≤ [deepOpen]) always counts.
+/// - Closure latch: once both eyes have been below T for [latchUs] with at
+///   least one frame the gate let through, or the eyes channel already has a
+///   sign, the gate stays open until both eyes are back at or above T. A
+///   squint coefficient flickering around [squintBlend] during a real closure
+///   then can neither reset the 1.5 s count nor cut an active event.
 class EyeGate {
   EyeGate({
     this.lookDownGaze = 12,
     this.lookDownBlend = .35,
     this.squintBlend = .45,
     this.deepOpen = .15,
+    this.latchUs = 100000,
   });
 
   /// Eye-in-head downward angle, degrees, treated as looking down.
@@ -552,21 +559,55 @@ class EyeGate {
   /// Both eyes at or below this openness are a closure whatever the gaze.
   final double deepOpen;
 
-  bool _armed = false;
+  /// How long an ungated closure must last before the latch holds it.
+  final int latchUs;
+
+  bool _armed = false, _latched = false, _runHadUngated = false;
+  int? _runStartUs;
+
+  /// True while a closure is latched and the gate is held open.
+  bool get latched => _latched;
 
   EyeGateReason evaluate({
     required FaceSignals face,
     required GazeZone zone,
     required double threshold,
     required bool headOnly,
+    int atUs = 0,
+    bool eyesSignActive = false,
   }) {
     final left = face.eyeOpenLeft, right = face.eyeOpenRight;
     if (left == null || right == null) {
-      _armed = false;
+      reset();
       return EyeGateReason.none;
     }
-    final deep = left <= deepOpen && right <= deepOpen;
     final open = left >= threshold && right >= threshold;
+    final closed = left < threshold && right < threshold;
+    final reason = _reason(face, zone, left, right, open, headOnly);
+    if (!closed) {
+      _runStartUs = null;
+      _runHadUngated = false;
+      if (open) _latched = false;
+    } else {
+      _runStartUs ??= atUs;
+      if (reason == EyeGateReason.none) _runHadUngated = true;
+      if (eyesSignActive ||
+          (_runHadUngated && atUs - _runStartUs! >= latchUs)) {
+        _latched = true;
+      }
+    }
+    return _latched ? EyeGateReason.none : reason;
+  }
+
+  EyeGateReason _reason(
+    FaceSignals face,
+    GazeZone zone,
+    double left,
+    double right,
+    bool open,
+    bool headOnly,
+  ) {
+    final deep = left <= deepOpen && right <= deepOpen;
     final gazeEngine =
         face.eyeGazeDown != null ||
         face.blendshape(Blendshape.eyeLookDownLeft) != null;
@@ -601,7 +642,12 @@ class EyeGate {
     return EyeGateReason.none;
   }
 
-  void reset() => _armed = false;
+  void reset() {
+    _armed = false;
+    _latched = false;
+    _runHadUngated = false;
+    _runStartUs = null;
+  }
 
   static double? _mean(double? a, double? b) =>
       a == null || b == null ? null : (a + b) / 2;
@@ -672,12 +718,24 @@ class DistractionEvent {
 class DistractionMonitor {
   DistractionMonitor({
     this.longUs = 3000000,
+    this.longUsByZone = const {
+      GazeZone.mirrorLeft: 3000000,
+      GazeZone.mirrorRight: 3000000,
+      GazeZone.mirrorRear: 3000000,
+    },
     this.windowUs = 30000000,
     this.cumulativeUs = 10000000,
     this.cumulativeZones = const {GazeZone.console},
     this.idPrefix = 'distraction',
   });
   final int longUs, windowUs, cumulativeUs;
+
+  /// Long-glance threshold per zone; zones not listed use [longUs]. Mirrors
+  /// are separate so their limit can be set from session 1 recordings.
+  final Map<GazeZone, int> longUsByZone;
+
+  /// Long-glance threshold that applies while the driver looks at [zone].
+  int longFor(GazeZone zone) => longUsByZone[zone] ?? longUs;
   final Set<GazeZone> cumulativeZones;
   final String idPrefix;
 
@@ -726,13 +784,14 @@ class DistractionMonitor {
     }
     _offSinceUs ??= atUs;
     if (_event != null || suppress) return (started: null, ended: null);
-    if (atUs - _offSinceUs! >= longUs) {
+    final limit = longFor(zone);
+    if (atUs - _offSinceUs! >= limit) {
       _event = DistractionEvent(
         id: '$idPrefix:${++_sequence}',
         kind: DistractionKind.longGlance,
         zone: zone,
         signStartedUs: _offSinceUs!,
-        thresholdUs: _offSinceUs! + longUs,
+        thresholdUs: _offSinceUs! + limit,
       );
       started = _event;
     } else if (cumulativeZones.contains(zone) &&
@@ -767,8 +826,12 @@ class AttentionDecision {
     this.direction,
     this.eyeGate = EyeGateReason.none,
     this.distraction,
+    this.driver = ContinuityDecision.noFace,
   });
   static const unknown = AttentionDecision(zone: GazeZone.unknown);
+
+  /// How the driver's face was identified in this frame (ФТ-02).
+  final ContinuityDecision driver;
 
   final GazeZone zone;
   final int? zoneSinceUs;
@@ -785,6 +848,7 @@ class AttentionDecision {
     if (direction != null) 'direction': direction!.toJson(),
     'eyeGate': eyeGate.code,
     if (distraction != null) 'distraction': distraction!.toJson(),
+    'driver': driver.code,
   };
 }
 
@@ -812,9 +876,12 @@ class AttentionPipeline {
     this.settings = const AttentionSettings(),
     EyeGate? eyeGate,
     DistractionMonitor? distraction,
+    DriverContinuity? continuity,
   }) : zones = zones ?? ZoneMap.fromCalibration(calibration),
        eyeGate = eyeGate ?? EyeGate(),
-       distractionMonitor = distraction ?? DistractionMonitor() {
+       distractionMonitor = distraction ?? DistractionMonitor(),
+       continuity =
+           continuity ?? DriverContinuity(trackingId: calibration.trackingId) {
     tracker = GazeZoneTracker(this.zones);
   }
 
@@ -823,18 +890,28 @@ class AttentionPipeline {
   final AttentionSettings settings;
   final EyeGate eyeGate;
   final DistractionMonitor distractionMonitor;
+
+  /// Keeps the calibrated driver across tracking-id changes (ФТ-02/03);
+  /// active in every mode.
+  final DriverContinuity continuity;
   late final GazeZoneTracker tracker;
 
   AttentionDecision attention = AttentionDecision.unknown;
 
   /// [tzSignActive]: a ТЗ automaton had a sign or an event on the previous
   /// frame (`ChannelPhase.signPresent` or later); distraction then waits.
+  /// [eyesSignActive]: the same for the eyes channel alone; it latches the
+  /// eye gate open (see [EyeGate]).
   AttentionFrame process(
     int capturedUs,
     List<FaceSignals> faces, {
     bool tzSignActive = false,
+    bool eyesSignActive = false,
   }) {
-    final usable = faces.where((f) => f.tracked).toList();
+    final usable = continuity.resolve(
+      capturedUs,
+      faces.where((f) => f.tracked).toList(),
+    );
     final driver =
         usable.length == 1 &&
             (usable.single.trackingId ?? calibration.trackingId) ==
@@ -850,6 +927,8 @@ class AttentionPipeline {
         zone: zone,
         threshold: threshold,
         headOnly: settings.headOnlyLookDown,
+        atUs: capturedUs,
+        eyesSignActive: eyesSignActive,
       );
     } else {
       eyeGate.reset();
@@ -883,6 +962,7 @@ class AttentionPipeline {
       direction: tracker.direction,
       eyeGate: gate,
       distraction: settings.distraction ? distractionMonitor.active : null,
+      driver: continuity.decision,
     );
     return AttentionFrame(
       measurements: measurements,
@@ -931,6 +1011,10 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   /// event is present); distraction does not start meanwhile.
   bool tzSignActive = false;
 
+  /// Set by the caller: the eyes channel has a sign or an event; latches the
+  /// eye gate open.
+  bool eyesSignActive = false;
+
   AttentionPipeline? get pipeline => _pipeline;
   FaceMeasurement? get lastMeasurement {
     final m = _last?.measurements;
@@ -946,6 +1030,7 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   void reset(CalibrationProfile? calibration) {
     _last = null;
     tzSignActive = false;
+    eyesSignActive = false;
     _pipeline = calibration == null
         ? null
         : AttentionPipeline(
@@ -959,9 +1044,12 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   AttentionState update(FaceSignals? signals, int atUs) {
     final pipeline = _pipeline;
     if (pipeline == null) return AttentionState.unknown;
-    final frame = pipeline.process(atUs, [
-      ?signals,
-    ], tzSignActive: tzSignActive);
+    final frame = pipeline.process(
+      atUs,
+      [?signals],
+      tzSignActive: tzSignActive,
+      eyesSignActive: eyesSignActive,
+    );
     _last = frame;
     final details = frame.state.toJson()..remove('zone');
     if (frame.distractionStarted != null) {
