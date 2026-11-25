@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import '../logic/domain.dart';
 import '../services/trip_controller.dart';
@@ -202,7 +201,7 @@ class TripPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (trip.camera.controller?.value.isInitialized ?? false)
+          if (trip.preview() case final preview?)
             if (trip.settings.showPreview)
               ClipRRect(
                 borderRadius: BorderRadius.circular(16),
@@ -215,9 +214,7 @@ class TripPage extends StatelessWidget {
                     // (portrait on a phone held upright); an outer
                     // AspectRatio with the controller's landscape ratio
                     // squeezed it and stretched the face.
-                    child: Center(
-                      child: CameraPreview(trip.camera.controller!),
-                    ),
+                    child: Center(child: preview),
                   ),
                 ),
               )
@@ -289,6 +286,10 @@ class TripPage extends StatelessWidget {
                   ? 'Смотрите на дорогу, как обычно. ${(trip.calibrationProgress * 10).floor()}/10 с · ${trip.calibrationSamples} кадров'
                   : 'Смотрите вперёд, глаза открыты. ${(trip.calibrationProgress * 10).floor()}/10 с · ${trip.calibrationSamples} пригодных измерений',
             ),
+          ],
+          if (trip.active && trip.engineNote != null) ...[
+            Notice(trip.engineNote!),
+            const SizedBox(height: 8),
           ],
           if (current != null && trip.calibrationNote != null) ...[
             Notice(trip.calibrationNote!),

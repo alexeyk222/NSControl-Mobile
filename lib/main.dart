@@ -34,6 +34,7 @@ Future<void> main() async {
   var developerMode = false;
   var recordTrips = false;
   var tripProfile = DetectionProfile.current;
+  var tripEngine = TripEngine.arkit;
   String? tripMount;
   try {
     db = await TripRepository.open();
@@ -55,6 +56,10 @@ Future<void> main() async {
             ? DetectionProfile.tz22
             : DetectionProfile.current);
     recordTrips = await db.getSetting('trip_recording') == true;
+    final engine = await db.getSetting('trip_engine');
+    tripEngine =
+        TripEngine.values.where((e) => e.name == engine).firstOrNull ??
+        TripEngine.arkit;
     final mount = await db.getSetting('trip_mount');
     if (mount is String) tripMount = mount;
   } catch (_) {
@@ -69,8 +74,17 @@ Future<void> main() async {
           platform: const PlatformBridge(),
           detector: registry.create('mlkit_face_detection'),
           settings: settings,
+          // ARKit is the trip's engine on iPhone; ML Kit is the fallback.
+          arkitFactory: Platform.isIOS
+              ? (options, onStats) =>
+                    ArkitFaceSource(options: options, onStats: onStats)
+              : null,
+          arkitSupported: Platform.isIOS
+              ? () => ArkitEngine().isSupported()
+              : null,
         )
         ..profile = tripProfile
+        ..engineChoice = tripEngine
         ..recordTrips = recordTrips
         ..mountPosition = tripMount ?? 'front';
   trip.journalIncomplete = incomplete || db == null;

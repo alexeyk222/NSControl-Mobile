@@ -240,8 +240,12 @@ class _SettingsPageState extends State<SettingsPage> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Детектор: ${widget.trip.detector.capabilities.id} ${widget.trip.detector.capabilities.version}',
+                'Детектор: ${widget.trip.capabilities.id} ${widget.trip.capabilities.version}',
               ),
+              if (widget.trip.lastDevice case final device?)
+                Text(
+                  'ARKit: ${device['arkitFps']} к/с · передано ${device['sent']} · нагрев ${device['thermal']}',
+                ),
               Text(
                 'Алгоритм: ${ObservationEngine.algorithmVersion} · NSControl $appVersion',
               ),
@@ -249,7 +253,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 'Завершено анализов: ${widget.trip.camera.pipeline.completed}',
               ),
               Text(
-                'За последние 60 с: ${widget.trip.camera.pipeline.completedBetween(widget.trip.clock.elapsedMicroseconds - 60000000, widget.trip.clock.elapsedMicroseconds + 1)} анализов',
+                'За последние 60 с: ${widget.trip.completedBetween(widget.trip.clock.elapsedMicroseconds - 60000000, widget.trip.clock.elapsedMicroseconds + 1)} анализов',
               ),
               Text(
                 'Полные минутные интервалы сеанса: ${widget.trip.completedPerMinute.isEmpty ? 'ещё нет' : widget.trip.completedPerMinute.join(', ')}',
@@ -335,6 +339,49 @@ class _SettingsPageState extends State<SettingsPage> {
                             );
                             setState(() {});
                           },
+                  ),
+                ),
+              if (widget.developerMode && widget.trip.arkitFactory != null)
+                AnimatedBuilder(
+                  animation: widget.trip,
+                  builder: (context, _) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Движок поездки'),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            for (final engine in TripEngine.values)
+                              ChoiceChip(
+                                key: Key('trip-engine-${engine.name}'),
+                                label: Text(engine.title),
+                                selected: widget.trip.engineChoice == engine,
+                                onSelected: widget.trip.active
+                                    ? null
+                                    : (_) {
+                                        widget.trip.engineChoice = engine;
+                                        widget.trip.journal(
+                                          (db) => db.setSetting(
+                                            'trip_engine',
+                                            engine.name,
+                                          ),
+                                        );
+                                        setState(() {});
+                                      },
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'ARKit 30 к/с — основной: видит глаза на решётке. '
+                          'ML Kit — запасной: на решётке только голова. '
+                          'Со следующей поездки.',
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               if (widget.developerMode && widget.trip.recorder != null)
