@@ -44,6 +44,13 @@ final class BackgroundSession: NSObject, HKWorkoutSessionDelegate {
         store.authorizationStatus(for: HKObjectType.workoutType()) == .sharingAuthorized
     }
 
+    /// The user already said no. HealthKit never shows the sheet again, so
+    /// requestAuthorization returns at once and a button would do nothing.
+    var deniedBefore: Bool {
+        HKHealthStore.isHealthDataAvailable()
+            && store.authorizationStatus(for: HKObjectType.workoutType()) == .sharingDenied
+    }
+
     var needsAuthorization: Bool {
         HKHealthStore.isHealthDataAvailable()
             && store.authorizationStatus(for: HKObjectType.workoutType()) == .notDetermined

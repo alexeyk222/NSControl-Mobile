@@ -143,7 +143,13 @@ struct StatusView: View {
             VStack(spacing: 4) {
                 Text("Без разрешения часы молчат, когда экран погас")
                     .font(.caption2).foregroundStyle(.orange).multilineTextAlignment(.center)
-                Button("Разрешить", action: link.enableBackground).font(.footnote)
+                if link.workout.deniedBefore {
+                    // HealthKit shows its sheet only once; after a "no" only Settings help.
+                    Text("Включите: iPhone → Здоровье → Профиль → Приложения → NSControl → Тренировки")
+                        .font(.caption2).multilineTextAlignment(.center)
+                } else {
+                    Button("Разрешить", action: link.enableBackground).font(.footnote)
+                }
             }
         case .failed, .unavailable:
             Text("Держите приложение открытым: фоновый режим не запустился")

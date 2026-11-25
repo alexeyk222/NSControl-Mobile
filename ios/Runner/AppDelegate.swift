@@ -15,6 +15,11 @@ import WatchConnectivity
             FaceTrackingPlugin.register(with: registrar)
         }
     }
+    /// The watch app asks for the workout permission; watchOS may hand the sheet
+    /// to the paired iPhone. Without this the request silently goes nowhere.
+    func applicationShouldRequestHealthAuthorization(_ application: UIApplication) {
+        HKHealthStore().handleAuthorizationForExtension { _, _ in }
+    }
     override func application(_ app: UIApplication, open url: URL,
                               options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
         if Self.platform?.handle(url: url) == true { return true }
