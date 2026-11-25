@@ -26,6 +26,13 @@ const arkitCapabilities = DetectorCapabilities(
 class ArkitAxes {
   const ArkitAxes({this.mirror = false, this.swapEyes = false});
   static const standard = ArkitAxes();
+
+  /// What the iPhone needs: ARKit's front-camera space is mirrored. On the
+  /// 25.11 trial recordings (same side mount, minutes apart) ARKit gave
+  /// head yaw +37° where ML Kit, whose signs are confirmed on `signs-v1`,
+  /// gave −44°; the pitch is unaffected. To be confirmed on `signs-v1` in
+  /// the «ARKit + ML Kit» variant.
+  static const device = ArkitAxes(mirror: true);
   final bool mirror, swapEyes;
 
   Map<String, Object?> toJson() => {'mirror': mirror, 'swapEyes': swapEyes};

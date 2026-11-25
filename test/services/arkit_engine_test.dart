@@ -157,6 +157,7 @@ void main() {
       expect(face.measurement.rightEye, closeTo(.9, 1e-12));
       expect(face.measurement.hasHeadAngles, isTrue);
       expect(s.engine.display, (quarterTurns: 1, mirrored: false));
+      expect(s.engine.axes.mirror, isTrue, reason: 'ArkitAxes.device');
       expect(s.previewMirrored, isFalse);
       expect(changes, greaterThanOrEqualTo(2));
       await s.stop();
