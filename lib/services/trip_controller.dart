@@ -141,9 +141,14 @@ class TripController extends ChangeNotifier {
   /// The preview is on the screen: the user's option, off in economy.
   bool get showPreview => settings.showPreview && heat.previewAllowed;
 
+  /// Heat phrases and the heat line on the screen. Off for now at the
+  /// user's request (25.11): the economy still runs, silently, and goes to
+  /// the trip recording.
+  bool announceHeat = false;
+
   /// Heat state for the trip screen (docs/ux/copy.md `trip.heat.*`), null
-  /// when the phone is not hot.
-  String? get heatText => !active || !heat.economy
+  /// when the phone is not hot or [announceHeat] is off.
+  String? get heatText => !announceHeat || !active || !heat.economy
       ? null
       : heat.critical
       ? 'Телефон перегрелся. Уберите от горячего обдува или солнца'
@@ -204,6 +209,27 @@ class TripController extends ChangeNotifier {
   /// More than one face and no single driver: observation is paused until
   /// the driver is alone in the frame again.
   bool multipleFaces = false;
+
+  /// How long the driver may be unseen before the screen says so
+  /// (docs/ux/states.md S-04: 10 s, not less than 3.5 s).
+  static const notSeenUs = 10000000;
+
+  /// One calm line for the trip screen while observing: short losses, gaps
+  /// and the technical reasons of the channels stay off the main screen
+  /// (developer mode shows them). Null outside observation.
+  String? get watchText {
+    final current = snapshot;
+    if (phase != TripPhase.observing || current == null) return null;
+    if (multipleFaces) {
+      return 'В кадре кто-то ещё. Слежу, когда останетесь одни';
+    }
+    final seen = _anchorUs;
+    final lost = seen == null || _lastCapturedUs - seen > notSeenUs;
+    if (lost && faces.isEmpty) return 'Не вижу вас';
+    return engineCalibration?.hiddenEyes ?? calibration?.hiddenEyes ?? false
+        ? 'Слежу за головой'
+        : 'Слежу';
+  }
 
   /// The profile and settings the automata and the fatigue monitor run on:
   /// the road-frame profile in mount mode, [calibration] itself otherwise.
@@ -554,6 +580,10 @@ class TripController extends ChangeNotifier {
   void _sayHeat() {
     final speech = _heatSpeech;
     if (speech == null) return;
+    if (!announceHeat) {
+      _heatSpeech = null;
+      return;
+    }
     if (_audioRequested || (snapshot?.activeEvents.isNotEmpty ?? false)) {
       return;
     }

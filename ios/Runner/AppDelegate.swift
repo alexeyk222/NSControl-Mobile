@@ -324,8 +324,11 @@ final class PhoneAlert {
         onSessionChanged?()
         try session.setCategory(.playback, mode: .default, options: [.duckOthers]); try session.setActive(true)
         let audio = try AVAudioPlayer(data: Self.wave())
-        audio.numberOfLoops = -1; audio.volume = volume; audio.prepareToPlay()
+        // The alarm starts at once, softer, and rises to its volume over
+        // 1.5 s instead of breaking in at full volume (user, 25.11).
+        audio.numberOfLoops = -1; audio.volume = test ? volume : volume * 0.35; audio.prepareToPlay()
         guard audio.play() else { throw NSError(domain: "NSControl", code: 2, userInfo: [NSLocalizedDescriptionKey: "Audio playback could not start"]) }
+        if !test { audio.setVolume(volume, fadeDuration: 1.5) }
         player = audio
         if vibrate {
             AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
@@ -338,9 +341,23 @@ final class PhoneAlert {
     }
     func stop() {
         testStop?.cancel(); testStop = nil; vibration?.invalidate(); vibration = nil
-        player?.stop(); player = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
-        onSessionChanged?()
+        let current = player
+        player = nil
+        guard let fading = current, fading.isPlaying else {
+            current?.stop()
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            onSessionChanged?()
+            return
+        }
+        // Fades out over 0.4 s instead of breaking off. A new alarm started
+        // meanwhile keeps the audio session.
+        fading.setVolume(0, fadeDuration: 0.4)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            fading.stop()
+            guard let self = self, self.player == nil else { return }
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            self.onSessionChanged?()
+        }
     }
     private static func wave() -> Data {
         var data = Data()
