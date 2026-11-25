@@ -58,8 +58,18 @@ class RecordedLabel {
 }
 
 class RecordedCalibration {
-  const RecordedCalibration({required this.atUs, this.profile, this.zones});
+  const RecordedCalibration({
+    required this.atUs,
+    this.profile,
+    this.zones,
+    this.engine,
+  });
   final int atUs;
+
+  /// The engine this line calibrates (compare mode writes one line per
+  /// engine); older recordings have no field, the profile's detector says.
+  final String? engine;
+  String? get engineId => engine ?? profile?.detector.id;
   final CalibrationProfile? profile;
   final Map<String, dynamic>? zones;
 }
@@ -136,6 +146,7 @@ class Recording {
                         Map<String, dynamic>.from(profile),
                       ),
                 zones: (json['zones'] as Map?)?.cast<String, dynamic>(),
+                engine: json['engine'] as String?,
               ),
             );
           case 'frame':
@@ -657,9 +668,7 @@ class ReplayRunner {
       return before ?? first;
     }
 
-    final line =
-        pick((c) => c.profile?.detector.id == options.engine) ??
-        pick((c) => true);
+    final line = pick((c) => c.engineId == options.engine) ?? pick((c) => true);
     final profile = line?.profile;
     if (!options.recalibrate &&
         profile != null &&

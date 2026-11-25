@@ -72,6 +72,17 @@ class LabController extends ChangeNotifier {
 
   CalibrationProfile? calibration;
   _LabCollector? _collector;
+
+  /// Compare mode: the other engines calibrate over the same window as the
+  /// primary one, each from its own frames, and get their own `calibration`
+  /// line (field `engine`). The live automata run on the primary engine; the
+  /// replay of another engine takes its own line. Null until that engine
+  /// sees exactly one face in the window.
+  final Map<String, _LabCollector?> _otherCollectors = {};
+  final Map<String, List<FaceSignals>> _otherGaze = {};
+
+  /// The other engines' calibrations of the current window, with zones.
+  final Map<String, (CalibrationProfile, ZoneMap)> otherCalibrations = {};
   int? _calibrationStartUs;
   bool _calibrationRequested = false;
   ObservationEngine? engine;
@@ -333,6 +344,7 @@ class LabController extends ChangeNotifier {
     if (recording || next.id == option.id) return;
     option = next;
     calibration = null;
+    otherCalibrations.clear();
     zones = null;
     zoneProvider?.zones = null;
     _cancelCalibration();
@@ -423,6 +435,9 @@ class LabController extends ChangeNotifier {
       if (pending != null && identical(pending.$1, result)) 'raw': pending.$2,
     });
     if (result.engineId != primaryEngine) {
+      if (_otherCollectors.containsKey(result.engineId)) {
+        _collectOther(result, captured, all, signals);
+      }
       _notify();
       return;
     }
@@ -600,10 +615,24 @@ class LabController extends ChangeNotifier {
     _calibrationStartUs = atUs;
     _calibrationGaze.clear();
     _anchorFace = null;
-    final detector = calibrationDetector(source!.engines.first);
+    _collector = _newCollector(source!.engines.first, trackingId, atUs);
+    _otherCollectors.clear();
+    _otherGaze.clear();
+    for (final other in source!.engines.skip(1)) {
+      _otherCollectors[other.id] = null;
+      _otherGaze[other.id] = [];
+    }
+  }
+
+  _LabCollector _newCollector(
+    DetectorCapabilities engine,
+    int trackingId,
+    int atUs,
+  ) {
+    final detector = calibrationDetector(engine);
     // Side mount (lab mode): angles relative to the road pose, the eyes
     // only within the engine's range (attention-method.md § 9).
-    _collector = attentionSettings?.mountRelative ?? false
+    return attentionSettings?.mountRelative ?? false
         ? _MountCollector(
             MountCalibrationCollector(
               trackingId: trackingId,
@@ -621,6 +650,52 @@ class LabController extends ChangeNotifier {
             ),
           );
   }
+
+  /// A frame of another engine inside the calibration window: its collector
+  /// starts at the primary window's start, on that engine's own tracking id.
+  void _collectOther(
+    FaceResult result,
+    int captured,
+    List<FaceSignals> all,
+    FaceSignals? signals,
+  ) {
+    final start = _calibrationStartUs;
+    if (start == null || captured < start) return;
+    var collector = _otherCollectors[result.engineId];
+    if (collector == null) {
+      final id = result.faces.length == 1
+          ? result.faces.single.measurement.trackingId
+          : null;
+      final caps = source!.engines
+          .where((e) => e.id == result.engineId)
+          .firstOrNull;
+      if (id == null || caps == null) return;
+      collector = _otherCollectors[result.engineId] = _newCollector(
+        caps,
+        id,
+        start,
+      );
+    }
+    collector.add(
+      captured,
+      result.faces.map((f) => f.measurement).toList(),
+      all,
+    );
+    if (result.faces.length == 1 && signals != null && signals.hasGaze) {
+      _otherGaze[result.engineId]!.add(signals);
+    }
+  }
+
+  /// Zones of a calibration: the road gaze is the median gaze of the
+  /// window, as the replay does.
+  static ZoneMap _zonesOf(CalibrationProfile profile, List<FaceSignals> gaze) =>
+      gaze.length < 10
+      ? ZoneMap.fromCalibration(profile)
+      : ZoneMap.fromCalibration(
+          profile,
+          roadGazeLeft: median(gaze.map((s) => s.gazeLeft!)),
+          roadGazeDown: median(gaze.map((s) => s.gazeDown!)),
+        );
 
   /// Measurement option «Замер: предел глаз 45°» (off by default): the eyes
   /// are evaluated up to 45° to the camera, to measure how far an engine's
@@ -658,15 +733,21 @@ class LabController extends ChangeNotifier {
 
   void _cancelCalibration() {
     _collector = null;
+    _otherCollectors.clear();
+    _otherGaze.clear();
     _calibrationRequested = false;
     _calibrationStartUs = null;
   }
 
   void _finishCalibration() {
     final collector = _collector!;
-    final result = collector.finish(nowUs);
+    final finishedUs = nowUs;
+    final result = collector.finish(finishedUs);
     final gaze = List.of(_calibrationGaze);
+    final others = Map.of(_otherCollectors);
+    final otherGaze = Map.of(_otherGaze);
     _cancelCalibration();
+    otherCalibrations.clear();
     final profile = result.profile;
     if (profile == null) {
       error = result.issues.join('\n');
@@ -685,14 +766,7 @@ class LabController extends ChangeNotifier {
       _say('При этом креплении глаза не оцениваются');
       _note(restriction, important: true);
     }
-    // Road gaze: median gaze of the calibration window, as the replay does.
-    final map = gaze.length < 10
-        ? ZoneMap.fromCalibration(profile)
-        : ZoneMap.fromCalibration(
-            profile,
-            roadGazeLeft: median(gaze.map((s) => s.gazeLeft!)),
-            roadGazeDown: median(gaze.map((s) => s.gazeDown!)),
-          );
+    final map = _zonesOf(profile, gaze);
     zones = map;
     zoneProvider?.zones = map;
     _emit(
@@ -700,8 +774,30 @@ class LabController extends ChangeNotifier {
         atUs: nowUs,
         profile: profile,
         zones: map.toJson(),
+        engine: others.isEmpty ? null : profile.detector.id,
       ),
     );
+    for (final MapEntry(key: id, value: other) in others.entries) {
+      final r = other?.finish(finishedUs);
+      final p = r?.profile;
+      if (p == null) {
+        _note(
+          'Калибровка $id не удалась: '
+          '${r?.issues.join(' ') ?? 'нет одного лица в окне'}',
+        );
+        continue;
+      }
+      final m = _zonesOf(p, otherGaze[id] ?? const []);
+      otherCalibrations[id] = (p, m);
+      _emit(
+        RecordingSchema.calibration(
+          atUs: nowUs,
+          profile: p,
+          zones: m.toJson(),
+          engine: id,
+        ),
+      );
+    }
     _newSession();
     _say('Калибровка завершена');
     _note(
@@ -771,6 +867,7 @@ class LabController extends ChangeNotifier {
         atUs: nowUs,
         profile: calibration!,
         zones: map.toJson(),
+        engine: otherCalibrations.isEmpty ? null : calibration!.detector.id,
       ),
     );
     _newSession();
@@ -866,8 +963,20 @@ class LabController extends ChangeNotifier {
           atUs: 0,
           profile: calibration!,
           zones: zones?.toJson(),
+          engine: otherCalibrations.isEmpty ? null : calibration!.detector.id,
         ),
       );
+      for (final MapEntry(key: id, value: (p, m))
+          in otherCalibrations.entries) {
+        _emit(
+          RecordingSchema.calibration(
+            atUs: 0,
+            profile: p,
+            zones: m.toJson(),
+            engine: id,
+          ),
+        );
+      }
       _newSession();
     }
     if (wasCalibrating) calibrate();

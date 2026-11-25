@@ -3,6 +3,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
+import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/services/detector.dart';
 import 'package:nscontrol/services/face_source.dart';
 import 'package:nscontrol/services/lab_controller.dart';
@@ -35,6 +36,20 @@ class FakeSource implements FaceSource {
   Widget? preview() => null;
   @override
   Future<void> dispose() async => started = false;
+}
+
+/// «ARKit + ML Kit»: a primary engine and ML Kit on the same frames.
+class CompareSource extends FakeSource {
+  static const primary = DetectorCapabilities(
+    id: 'arkit_face_tracking',
+    version: 'test',
+    eyeYawLimit: 45,
+  );
+  @override
+  List<DetectorCapabilities> get engines => [
+    primary,
+    DetectorCapabilities.mlKit,
+  ];
 }
 
 class FakePlatform extends PlatformBridge {
@@ -328,5 +343,73 @@ void main() {
     run(10.5, () => face(yaw: 35));
     expect(lab.error, isNotNull);
     expect(lab.notes.first.text, startsWith('Калибровка не удалась'));
+  });
+  test('compare mode: one calibration line per engine, same window', () async {
+    await lab.close();
+    final compare = CompareSource();
+    lab = LabController(
+      options: [
+        LabEngineOption(
+          id: 'compare',
+          title: 'Compare',
+          engineIds: const ['arkit_face_tracking', 'mlkit_face_detection'],
+          create: () => compare,
+        ),
+      ],
+      platform: platform,
+      settings: AlgorithmSettings(),
+      recordingsDirectory: dir,
+      startServer: false,
+      clockUs: () => now,
+    );
+    await lab.open();
+    // The same camera frame: the primary sees the face straight, ML Kit
+    // 8° turned and 3° lower, with another tracking id.
+    void both(double seconds) {
+      final end = now + (seconds * 1000000).round();
+      while (now < end) {
+        now += 33000;
+        for (final (engine, f) in [
+          ('arkit_face_tracking', face()),
+          ('mlkit_face_detection', face(yaw: 8, pitch: 3, id: 7)),
+        ]) {
+          compare.onResult!(
+            FaceResult(
+              engineId: engine,
+              capturedUs: now - 20000,
+              completedUs: now,
+              faces: [f],
+              imageSize: const Size(480, 640),
+            ),
+          );
+        }
+        lab.tick();
+      }
+    }
+
+    await lab.startRecording();
+    lab.calibrate();
+    both(10.5);
+    expect(lab.calibration, isNotNull);
+    final ml = lab.otherCalibrations['mlkit_face_detection'];
+    expect(ml, isNotNull);
+    expect(ml!.$1.trackingId, 7);
+    expect(ml.$1.neutralYaw - lab.calibration!.neutralYaw, closeTo(8, 1e-6));
+    both(1);
+    final file = await lab.stopRecording();
+    final text = await file!.readAsString();
+    final lines = RecordingReader.parse(text).ofType('calibration').toList();
+    expect(lines.map((l) => l['engine']), [
+      'arkit_face_tracking',
+      'mlkit_face_detection',
+    ]);
+    expect(lines.first['atUs'], lines.last['atUs']);
+    expect(lines.last['profile']['detector']['id'], 'mlkit_face_detection');
+    expect(lines.last['zones'], isNotNull);
+    final recording = Recording.parse(text);
+    expect(recording.calibrations.map((c) => c.engineId), [
+      'arkit_face_tracking',
+      'mlkit_face_detection',
+    ]);
   });
 }

@@ -39,9 +39,11 @@ abstract final class RecordingSchema {
     required int atUs,
     required CalibrationProfile profile,
     Map<String, Object?>? zones,
+    String? engine,
   }) => {
     'type': 'calibration',
     'atUs': atUs,
+    'engine': ?engine,
     'profile': profile.toJson(),
     'zones': ?zones,
   };
