@@ -111,6 +111,29 @@ FaceSignals arkitFace({
   },
 );
 
+/// A trip clock the test moves by hand.
+class FakeClock implements Stopwatch {
+  int us = 0;
+  @override
+  int get elapsedMicroseconds => us;
+  @override
+  int get elapsedMilliseconds => us ~/ 1000;
+  @override
+  int get elapsedTicks => us;
+  @override
+  Duration get elapsed => Duration(microseconds: us);
+  @override
+  int get frequency => 1000000;
+  @override
+  bool get isRunning => false;
+  @override
+  void start() {}
+  @override
+  void stop() {}
+  @override
+  void reset() => us = 0;
+}
+
 void main() {
   late TripRepository repository;
   late TripController trip;
@@ -120,7 +143,7 @@ void main() {
   var supported = true, failStart = false;
   setUpAll(sqfliteFfiInit);
 
-  Future<void> open() async {
+  Future<void> open({Stopwatch? clock}) async {
     repository = await TripRepository.open(
       factory: databaseFactoryFfi,
       path: inMemoryDatabasePath,
@@ -143,6 +166,7 @@ void main() {
         return s;
       },
       arkitSupported: () async => supported,
+      clock: clock,
     );
   }
 
@@ -464,6 +488,53 @@ void main() {
     expect(trip.watchText, 'Не вижу вас');
     observe(.5, arkitFace);
     expect(trip.watchText, 'Слежу');
+  });
+
+  test('a stopped frame stream says observation is off', () async {
+    trip.dispose();
+    await trip.pendingWrites;
+    await repository.close();
+    final clock = FakeClock()..us = 1000000;
+    await open(clock: clock);
+    await trip.start();
+    calibrateOn(arkitFace);
+    observe(1, arkitFace);
+    expect(trip.cameraSilent, isFalse);
+    expect(trip.watchText, 'Слежу');
+    var notified = 0;
+    trip.addListener(() => notified++);
+    // ARKit stops delivering: faces and capture times freeze, the clock goes on.
+    clock.us = lastUs + 2000000;
+    trip.tick();
+    expect(trip.cameraSilent, isFalse);
+    expect(trip.watchText, 'Слежу');
+    clock.us = lastUs + 3100000;
+    trip.tick();
+    expect(trip.cameraSilent, isTrue);
+    expect(trip.watchText, 'Камера не отвечает, наблюдение остановлено');
+    expect(notified, greaterThan(0));
+    // Frames come back.
+    arkit().emit([arkitFace()], clock.us);
+    trip.tick();
+    expect(trip.cameraSilent, isFalse);
+    expect(trip.watchText, 'Слежу');
+  });
+
+  test('the driver unseen is counted on the trip clock', () async {
+    trip.dispose();
+    await trip.pendingWrites;
+    await repository.close();
+    final clock = FakeClock()..us = 1000000;
+    await open(clock: clock);
+    await trip.start();
+    calibrateOn(arkitFace);
+    observe(1, arkitFace);
+    // A frame without the driver whose capture time lags far behind: the
+    // capture times alone would still count only 5 s.
+    clock.us = lastUs + 11000000;
+    arkit().emit([], lastUs + 5000000);
+    expect(trip.cameraSilent, isFalse);
+    expect(trip.watchText, 'Не вижу вас');
   });
 
   test('the trip runs on ARKit at 30 fps by default', () async {

@@ -67,7 +67,9 @@ class TripController extends ChangeNotifier {
     CameraFactory? cameraFactory,
     this.arkitFactory,
     this.arkitSupported,
-  }) : settings = settings ?? AlgorithmSettings() {
+    Stopwatch? clock,
+  }) : settings = settings ?? AlgorithmSettings(),
+       clock = clock ?? (Stopwatch()..start()) {
     camera =
         (cameraFactory ??
         ((d, n, f, e, c) => CameraService(
@@ -78,13 +80,13 @@ class TripController extends ChangeNotifier {
           onChanged: c,
         )))(
           detector,
-          () => clock.elapsedMicroseconds,
+          () => this.clock.elapsedMicroseconds,
           _onFaces,
           _cameraError,
           _notify,
         );
     wearable = WearableGateway(
-      nowUs: () => clock.elapsedMicroseconds,
+      nowUs: () => this.clock.elapsedMicroseconds,
       send: platform.send,
       onDelivery: _delivery,
       onVitals: _onVitals,
@@ -158,7 +160,9 @@ class TripController extends ChangeNotifier {
   DetectorCapabilities get capabilities => engineInUse == TripEngine.arkit
       ? arkitCapabilities
       : detector.capabilities;
-  final clock = Stopwatch()..start();
+
+  /// The trip clock (microseconds); tests may pass their own.
+  final Stopwatch clock;
   final _ids = const Uuid();
   AlgorithmSettings settings;
   CalibrationProfile? calibration;
@@ -214,6 +218,27 @@ class TripController extends ChangeNotifier {
   /// (docs/ux/states.md S-04: 10 s, not less than 3.5 s).
   static const notSeenUs = 10000000;
 
+  /// No frames at all for this long while observing: the camera or ARKit
+  /// has stopped and the automata get nothing, so the screen says that
+  /// observation is off. Short gaps (a restart for heat) stay under it.
+  static const silentCameraUs = 3000000;
+
+  /// When the last frame of any kind reached the trip.
+  int _lastFrameAtUs = 0;
+  bool _wasSilent = false;
+
+  /// The trip clock, never behind the last frame (tests feed frames with
+  /// their own capture times on a stopped clock).
+  int get _nowUs {
+    final now = clock.elapsedMicroseconds;
+    return now > _lastCapturedUs ? now : _lastCapturedUs;
+  }
+
+  /// Observing, but no frame has come for [silentCameraUs]: nothing is
+  /// watched and no alarm can start.
+  bool get cameraSilent =>
+      phase == TripPhase.observing && _nowUs - _lastFrameAtUs > silentCameraUs;
+
   /// One calm line for the trip screen while observing: short losses, gaps
   /// and the technical reasons of the channels stay off the main screen
   /// (developer mode shows them). Null outside observation.
@@ -223,8 +248,11 @@ class TripController extends ChangeNotifier {
     if (multipleFaces) {
       return 'В кадре кто-то ещё. Слежу, когда останетесь одни';
     }
+    if (cameraSilent) return 'Камера не отвечает, наблюдение остановлено';
+    // The driver was last seen at [_anchorUs]; counted on the trip clock so
+    // a stopped frame stream does not freeze the line at «Слежу».
     final seen = _anchorUs;
-    final lost = seen == null || _lastCapturedUs - seen > notSeenUs;
+    final lost = seen == null || _nowUs - seen > notSeenUs;
     if (lost && faces.isEmpty) return 'Не вижу вас';
     return engineCalibration?.hiddenEyes ?? calibration?.hiddenEyes ?? false
         ? 'Слежу за головой'
@@ -715,6 +743,7 @@ class TripController extends ChangeNotifier {
     if (!active || !_foreground) return;
     faces = result;
     _lastCapturedUs = captured;
+    _lastFrameAtUs = _nowUs;
     _recordFrame(result, captured, completed);
     if (phase == TripPhase.calibrating) {
       _collector?.add(
@@ -1038,6 +1067,12 @@ class TripController extends ChangeNotifier {
         _finishCalibration(now);
       }
     }
+    final silent = cameraSilent;
+    if (silent != _wasSilent) {
+      // Frames stopped (or came back): no frame will repaint the screen.
+      _wasSilent = silent;
+      _notify();
+    }
     if (phase == TripPhase.observing && engine != null) {
       _apply(engine!.tick(sessionNowUs));
       if (sessionNowUs - _lastCheckpointUs >= 1000000 && sessionId != null) {
@@ -1152,6 +1187,8 @@ class TripController extends ChangeNotifier {
     _lastCheckpointUs = 0;
     sessionId = _ids.v4();
     sessionBaseUs = clock.elapsedMicroseconds;
+    // The silence of the camera counts from the session start.
+    _lastFrameAtUs = _nowUs;
     sessionStartedAt = DateTime.now().toUtc();
     final profile = calibration!;
     // The pipeline of the profile. Mount mode: the measurements carry

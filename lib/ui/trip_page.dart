@@ -237,20 +237,23 @@ class TripPage extends StatelessWidget {
     final current = trip.snapshot;
     // Outside developer mode the title follows the trip phase only, so
     // short gaps of the camera do not make it flicker.
-    final label = switch (developerMode ? current?.cameraStatus : null) {
-      CameraStatus.warning => 'Предупреждение',
-      CameraStatus.limited => 'Наблюдение ограничено',
-      CameraStatus.observing => 'Наблюдение',
-      _ => switch (trip.phase) {
-        TripPhase.observing when current?.activeEvents.isNotEmpty ?? false =>
-          'Предупреждение',
-        TripPhase.observing => 'Наблюдение',
-        TripPhase.idle => 'Камера выключена',
-        TripPhase.findingFace => 'Подтверждение лица',
-        TripPhase.calibrating => 'Калибровка',
-        TripPhase.paused => 'Наблюдение приостановлено',
-      },
-    };
+    final label = trip.cameraSilent
+        ? 'Наблюдение недоступно'
+        : switch (developerMode ? current?.cameraStatus : null) {
+            CameraStatus.warning => 'Предупреждение',
+            CameraStatus.limited => 'Наблюдение ограничено',
+            CameraStatus.observing => 'Наблюдение',
+            _ => switch (trip.phase) {
+              TripPhase.observing
+                  when current?.activeEvents.isNotEmpty ?? false =>
+                'Предупреждение',
+              TripPhase.observing => 'Наблюдение',
+              TripPhase.idle => 'Камера выключена',
+              TripPhase.findingFace => 'Подтверждение лица',
+              TripPhase.calibrating => 'Калибровка',
+              TripPhase.paused => 'Наблюдение приостановлено',
+            },
+          };
     return SectionCard(
       title: label,
       icon: Icons.center_focus_strong,
@@ -363,7 +366,15 @@ class TripPage extends StatelessWidget {
             Notice(trip.calibrationNote!),
             const SizedBox(height: 8),
           ],
-          if (current != null && developerMode) ...[
+          if (trip.cameraSilent) ...[
+            // A real stop of observation, shown in every mode.
+            Text(
+              trip.watchText ?? '',
+              key: const Key('trip-watch'),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 12),
+          ] else if (current != null && developerMode) ...[
             _channel(context, 'Глаза', current.eyes),
             const SizedBox(height: 8),
             _channel(context, 'Положение головы', current.head),
