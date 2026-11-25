@@ -20,9 +20,10 @@ import 'trip_controller_test.dart' as fixtures;
 
 /// ARKit stand-in: the test pushes results through [emit].
 class FakeArkit implements FaceSource {
-  FakeArkit(this.options, this.onStats, {this.failStart = false});
+  FakeArkit(this.options, this.onStats, this.onRaw, {this.failStart = false});
   final ArkitOptions options;
   final void Function(ArkitStats) onStats;
+  final void Function(FaceResult, Map<String, Object?>) onRaw;
   final bool failStart;
   void Function(FaceResult)? _onResult;
   void Function(Object)? onError;
@@ -46,6 +47,8 @@ class FakeArkit implements FaceSource {
     this.onError = onError;
     _running = true;
   }
+
+  void deliver(FaceResult result) => _onResult!(result);
 
   void emit(List<FaceSignals> faces, int captured, {int? completed}) =>
       _onResult!(
@@ -134,8 +137,8 @@ void main() {
         onError: e,
         onChanged: c,
       ),
-      arkitFactory: (options, onStats) {
-        final s = FakeArkit(options, onStats, failStart: failStart);
+      arkitFactory: (options, onStats, onRaw) {
+        final s = FakeArkit(options, onStats, onRaw, failStart: failStart);
         sources.add(s);
         return s;
       },
@@ -335,6 +338,103 @@ void main() {
     });
   });
 
+  test('frame lines carry ARKit gravityUp', () async {
+    final dir = await Directory.systemTemp.createTemp('trip');
+    addTearDown(() => dir.delete(recursive: true));
+    trip
+      ..recorder = LabRecorder(dir)
+      ..recordTrips = true;
+    await trip.start();
+    final face = arkitFace();
+    final result = FaceResult(
+      engineId: arkitCapabilities.id,
+      capturedUs: 1000,
+      completedUs: 21000,
+      faces: [DetectedFace(face.toMeasurement(), Rect.zero, signals: face)],
+    );
+    arkit().onRaw(result, {
+      'gravityUp': [0.1, 0.9, -0.2],
+    });
+    arkit().deliver(result);
+    arkit().emit([face], 40000);
+    await trip.finish();
+    final text = await (await LabRecorder(dir).list()).single.readAsString();
+    final frames = RecordingReader.parse(text).ofType('frame').toList();
+    expect(frames.first['gravityUp'], [0.1, 0.9, -0.2]);
+    expect(frames.last.containsKey('gravityUp'), isFalse);
+  });
+
+  test('heat phrases wait until the alarm is over', () async {
+    await trip.start();
+    calibrateOn(arkitFace);
+    observe(1, arkitFace);
+    observe(2, () => arkitFace(open: .05));
+    expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+    arkit().onStats(stats('critical'));
+    expect(platform.spoken.where((t) => t.startsWith('Телефон')), isEmpty);
+    expect(platform.testAlertCalls, 0);
+    trip.acknowledge(trip.snapshot!.activeEvents.map((e) => e.id).toSet());
+    observe(3, arkitFace);
+    expect(trip.snapshot!.activeEvents, isEmpty);
+    trip.tick();
+    expect(
+      platform.spoken.last,
+      'Телефон перегрелся. Уберите его от горячего воздуха',
+    );
+    expect(platform.testAlertCalls, 1);
+  });
+
+  group('pause and return', () {
+    test('the trip goes on with the same calibration', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      final calibration = trip.calibration, session = trip.sessionId;
+      observe(1, arkitFace);
+      await trip.foreground(false);
+      expect(trip.phase, TripPhase.paused);
+      await trip.foreground(true);
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.calibration, same(calibration));
+      expect(trip.sessionId, isNot(session));
+      expect(trip.error, isNull);
+      expect(platform.spoken.last, 'Продолжаю');
+      // The new ARKit session gives the face a new id: the same place, so
+      // it is the driver.
+      lastUs = trip.clock.elapsedMicroseconds;
+      observe(.5, () => arkitFace(id: 30));
+      expect(trip.attentionState.details['driver'], 'same');
+      observe(2, () => arkitFace(id: 30, open: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+    });
+
+    test('another face after the return is not taken for the driver', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      await trip.foreground(false);
+      await trip.foreground(true);
+      lastUs = trip.clock.elapsedMicroseconds;
+      observe(
+        .3,
+        () => arkitFace(
+          id: 31,
+          box: const FaceBox(left: .02, top: .5, width: .15, height: .15),
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(trip.phase, TripPhase.findingFace);
+    });
+
+    test('a resumed after a short inactive state changes nothing', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      final session = trip.sessionId;
+      await trip.foreground(true);
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.sessionId, session);
+    });
+  });
+
   test('the trip runs on ARKit at 30 fps by default', () async {
     await trip.start();
     expect(trip.engineInUse, TripEngine.arkit);
@@ -420,24 +520,53 @@ void main() {
     expect(trip.snapshot!.eyes.activeEvent, isNotNull);
   });
 
-  test('a second face pauses the automata (ФТ-02)', () async {
+  test(
+    'a second face pauses observation, the driver alone resumes it',
+    () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      for (var t = lastUs + 33000; t < lastUs + 2000000; t += 33000) {
+        arkit().emit([
+          arkitFace(open: .05),
+          arkitFace(
+            id: 20,
+            box: const FaceBox(left: .7, top: .1, width: .2, height: .2),
+          ),
+        ], t);
+      }
+      // No alarm on an ambiguous driver, and the calibration stays.
+      expect(platform.alertCalls, 0);
+      expect(trip.multipleFaces, isTrue);
+      expect(trip.phase, TripPhase.observing);
+      final session = trip.sessionId;
+      // The passenger leaves: observation goes on by itself.
+      lastUs += 2000000;
+      observe(.5, arkitFace);
+      expect(trip.multipleFaces, isFalse);
+      observe(2, () => arkitFace(open: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+      expect(trip.sessionId, session);
+      expect(trip.error, isNull);
+    },
+  );
+
+  test('«ТЗ 2.2 (эталон)»: a second face stops until confirmed', () async {
+    trip.profile = DetectionProfile.tz22;
     await trip.start();
-    calibrateOn(arkitFace);
-    observe(1, arkitFace);
-    for (var t = lastUs + 33000; t < lastUs + 2000000; t += 33000) {
+    calibrateOn(() => arkitFace(view: 2));
+    expect(trip.phase, TripPhase.observing);
+    observe(1, () => arkitFace(view: 2));
+    for (var t = lastUs + 33000; t < lastUs + 500000; t += 33000) {
       arkit().emit([
-        arkitFace(open: .05),
+        arkitFace(view: 2),
         arkitFace(
           id: 20,
           box: const FaceBox(left: .7, top: .1, width: .2, height: .2),
         ),
       ], t);
     }
-    // No alarm on an ambiguous driver; the trip asks to confirm the face.
-    expect(platform.alertCalls, 0);
     expect(trip.phase, TripPhase.findingFace);
-    await Future<void>.delayed(Duration.zero);
-    expect(trip.error, contains('Лицо изменилось'));
   });
 
   test('the trip recording has the ARKit engine and device lines', () async {

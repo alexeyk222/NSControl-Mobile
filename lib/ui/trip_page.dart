@@ -201,6 +201,10 @@ class TripPage extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (trip.multipleFaces) ...[
+            const Notice('В кадре кто-то ещё. Слежу, когда останетесь одни'),
+            const SizedBox(height: 12),
+          ],
           if (trip.movedText != null) ...[
             Notice(trip.movedText!),
             const SizedBox(height: 12),
