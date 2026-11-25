@@ -5,6 +5,8 @@ import 'package:flutter/widgets.dart' show Widget;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/data/trip_repository.dart';
 import 'package:nscontrol/logic/arkit_geometry.dart' show arkitCapabilities;
+import 'package:nscontrol/logic/attention_zones.dart';
+import 'package:nscontrol/logic/detection_profile.dart';
 import 'package:nscontrol/logic/domain.dart';
 import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/services/arkit_engine.dart';
@@ -265,6 +267,71 @@ void main() {
       expect(trip.heatText, contains('Телефон перегрелся'));
       arkit().onStats(stats('critical'));
       expect(platform.testAlertCalls, 1);
+    });
+  });
+
+  group('holder moved (FR-CAL-08)', () {
+    /// Profile v1 with a fast road-pose drift, so the cap is reached in
+    /// about a minute instead of ten.
+    final fast = DetectionProfile.v1.copyWith(
+      attention: const AttentionSettings(
+        gazeAwareEyes: true,
+        mountRelative: true,
+        roadAdaptDegPerMin: 20,
+      ),
+    );
+
+    /// The driver's road pose moves [deg] in camera yaw over [rampS]
+    /// seconds and stays there for [holdS]; 10 frames a second.
+    void drift(double deg, {double rampS = 60, double holdS = 120}) {
+      final from = lastUs + 100000,
+          end = from + ((rampS + holdS) * 1e6).round();
+      for (var t = from; t <= end; t += 100000) {
+        final k = ((t - from) / (rampS * 1e6)).clamp(0.0, 1.0);
+        arkit().emit([arkitFace(view: 38 + deg * k)], t);
+        lastUs = t;
+      }
+    }
+
+    test(
+      'drift past the cap: said once, new road pose, still observing',
+      () async {
+        trip.profile = fast;
+        await trip.start();
+        calibrateOn(arkitFace);
+        final session = trip.sessionId;
+        observe(1, arkitFace);
+        drift(-13);
+        expect(
+          platform.spoken,
+          contains('Телефон сдвинулся. Смотрите на дорогу, перенастроюсь'),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(trip.phase, TripPhase.observing);
+        expect(trip.sessionId, isNot(session));
+        expect(trip.calibration!.neutralYaw, closeTo(25, .5));
+        expect(trip.movedText, isNull);
+        expect(platform.alertCalls, 0);
+        expect(
+          platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+          hasLength(1),
+        );
+      },
+    );
+
+    test('a slow drift within the cap is followed in silence', () async {
+      trip.profile = fast;
+      await trip.start();
+      calibrateOn(arkitFace);
+      final session = trip.sessionId;
+      observe(1, arkitFace);
+      drift(-6);
+      expect(trip.roadAdaptation!.atLimit, isFalse);
+      expect(trip.sessionId, session);
+      expect(
+        platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+        isEmpty,
+      );
     });
   });
 
