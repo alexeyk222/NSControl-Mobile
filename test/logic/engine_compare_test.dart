@@ -147,11 +147,17 @@ void main() {
       SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
     ).report();
     expect(report, isNot(contains('ошибка:')));
+    // Table layout may change; the calibration source per engine may not.
     expect(
-      report,
-      contains('| arkit_face_tracking | строка calibration записи'),
+      RegExp(
+        r'\| arkit_face_tracking \|[^\n]*строка calibration записи',
+      ).hasMatch(report),
+      isTrue,
     );
-    expect(report, contains('| mlkit_face_detection | пересчитана'));
+    expect(
+      RegExp(r'\| mlkit_face_detection \|[^\n]*пересчитана').hasMatch(report),
+      isTrue,
+    );
     expect(report, contains('ML Kit на кадрах ARKit'));
     expect(report, contains('Согласие движков на одних кадрах'));
   });
