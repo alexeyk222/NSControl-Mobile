@@ -285,8 +285,14 @@ class TripPage extends StatelessWidget {
             LinearProgressIndicator(value: trip.calibrationProgress),
             const SizedBox(height: 12),
             Text(
-              'Смотрите вперёд, глаза открыты. ${(trip.calibrationProgress * 10).floor()}/10 с · ${trip.calibrationSamples} пригодных измерений',
+              trip.mountRelative
+                  ? 'Смотрите на дорогу, как обычно. ${(trip.calibrationProgress * 10).floor()}/10 с · ${trip.calibrationSamples} кадров'
+                  : 'Смотрите вперёд, глаза открыты. ${(trip.calibrationProgress * 10).floor()}/10 с · ${trip.calibrationSamples} пригодных измерений',
             ),
+          ],
+          if (current != null && trip.calibrationNote != null) ...[
+            Notice(trip.calibrationNote!),
+            const SizedBox(height: 8),
           ],
           if (current != null) ...[
             _channel(context, 'Глаза', current.eyes),
