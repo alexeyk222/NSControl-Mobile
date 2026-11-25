@@ -303,11 +303,23 @@ void main() {
     expect(lab.notes.map((n) => n.text), contains('Зеркала откалиброваны'));
   });
 
-  test('side mount: lab mode calibrates at 35°, acceptance does not', () async {
+  test('side mount: head only by default, eyes with the 45° option', () async {
     lab.calibrate();
     run(10.5, () => face(yaw: 35));
     expect(lab.calibration, isNotNull);
+    expect(lab.calibration!.hiddenEyes, isTrue);
+    expect(
+      lab.notes.map((n) => n.text),
+      anyElement(contains('глаза не оцениваются')),
+    );
+    // The automata get the road-frame profile: a nod relative to the road.
+    expect(lab.engine!.calibration.neutralYaw, 0);
+
+    lab.setEyeLimit45(true);
+    lab.calibrate();
+    run(10.5, () => face(yaw: 35));
     expect(lab.calibration!.detector.eyeYawLimit, 45);
+    expect(lab.calibration!.hiddenEyes, isFalse);
     run(2, () => face(yaw: 35, eyes: .05));
     expect(lab.engine!.snapshot.eyes.activeEvent, isNotNull);
 

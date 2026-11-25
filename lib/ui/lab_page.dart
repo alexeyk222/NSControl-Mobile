@@ -331,6 +331,18 @@ class _Controls extends StatelessWidget {
             ],
           ),
         ),
+        if (lab.attentionSettings case final settings?
+            when !settings.isAcceptance)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('Замер: предел глаз 45°'),
+            subtitle: const Text(
+              'Только для записей-замеров на боковом креплении',
+            ),
+            value: lab.eyeLimit45,
+            onChanged: lab.recording ? null : lab.setEyeLimit45,
+          ),
         if (lab.attentionSettings case final settings?)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),

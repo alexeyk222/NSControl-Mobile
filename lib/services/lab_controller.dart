@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import '../logic/attention_zones.dart';
 import '../logic/domain.dart';
 import '../logic/driver_continuity.dart';
+import '../logic/mount.dart';
 import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
 import 'detector.dart';
@@ -70,7 +71,7 @@ class LabController extends ChangeNotifier {
   int get nowUs => clockUs() - baseUs;
 
   CalibrationProfile? calibration;
-  CalibrationCollector? _collector;
+  _LabCollector? _collector;
   int? _calibrationStartUs;
   bool _calibrationRequested = false;
   ObservationEngine? engine;
@@ -438,7 +439,7 @@ class LabController extends ChangeNotifier {
     }
     final collector = _collector;
     if (collector != null) {
-      collector.add(capturedUs: captured, faces: measurements);
+      collector.add(captured, measurements, all);
       if (result.faces.length == 1 && signals != null) {
         _anchorFace = signals;
         _driverSeenAbsUs = result.capturedUs;
@@ -491,7 +492,8 @@ class LabController extends ChangeNotifier {
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
-    final monitor = _fatigue, profile = calibration;
+    final monitor = _fatigue,
+        profile = zoneProvider?.engineCalibration ?? calibration;
     if (monitor == null || profile == null) return;
     final face =
         measured.length == 1 && measured.single.trackingId == profile.trackingId
@@ -598,23 +600,51 @@ class LabController extends ChangeNotifier {
     _calibrationStartUs = atUs;
     _calibrationGaze.clear();
     _anchorFace = null;
-    _collector = CalibrationCollector(
-      trackingId: trackingId,
-      detector: calibrationDetector(source!.engines.first),
-      hiddenEyes: settings.hiddenEyes,
-      startedUs: atUs,
-    );
+    final detector = calibrationDetector(source!.engines.first);
+    // Side mount (lab mode): angles relative to the road pose, the eyes
+    // only within the engine's range (attention-method.md § 9).
+    _collector = attentionSettings?.mountRelative ?? false
+        ? _MountCollector(
+            MountCalibrationCollector(
+              trackingId: trackingId,
+              detector: detector,
+              hiddenEyes: settings.hiddenEyes,
+              startedUs: atUs,
+            ),
+          )
+        : _TzCollector(
+            CalibrationCollector(
+              trackingId: trackingId,
+              detector: detector,
+              hiddenEyes: settings.hiddenEyes,
+              startedUs: atUs,
+            ),
+          );
   }
 
-  /// Eye-validity range for a side mount (phone on a vent, turned towards
-  /// the driver): a lab-mode extension. Acceptance keeps the engine's own
-  /// range (ML Kit 18°). The profile carries the range it was made with, so
-  /// the observation engine and the replay use the same one.
+  /// Measurement option «Замер: предел глаз 45°» (off by default): the eyes
+  /// are evaluated up to 45° to the camera, to measure how far an engine's
+  /// lids stay reliable on a side mount. Lab mode only; acceptance keeps the
+  /// engine's own range (ML Kit 18°). The profile carries the range it was
+  /// made with, so the observation engine and the replay use the same one.
   static const sideMountEyeYawLimit = 45.0;
+  bool eyeLimit45 = false;
+
+  void setEyeLimit45(bool value) {
+    if (recording || value == eyeLimit45) return;
+    eyeLimit45 = value;
+    _note(
+      value
+          ? 'Замер: предел глаз 45° — после новой калибровки'
+          : 'Предел глаз движка — после новой калибровки',
+    );
+    _notify(force: true);
+  }
 
   DetectorCapabilities calibrationDetector(DetectorCapabilities engine) {
     final settings = attentionSettings;
-    if (settings == null ||
+    if (!eyeLimit45 ||
+        settings == null ||
         settings.isAcceptance ||
         engine.eyeYawLimit >= sideMountEyeYawLimit) {
       return engine;
@@ -634,7 +664,7 @@ class LabController extends ChangeNotifier {
 
   void _finishCalibration() {
     final collector = _collector!;
-    final result = collector.finish(nowUs: nowUs);
+    final result = collector.finish(nowUs);
     final gaze = List.of(_calibrationGaze);
     _cancelCalibration();
     final profile = result.profile;
@@ -650,6 +680,11 @@ class LabController extends ChangeNotifier {
     }
     error = null;
     calibration = profile;
+    final restriction = result.note;
+    if (restriction != null) {
+      _say('При этом креплении глаза не оцениваются');
+      _note(restriction, important: true);
+    }
     // Road gaze: median gaze of the calibration window, as the replay does.
     final map = gaze.length < 10
         ? ZoneMap.fromCalibration(profile)
@@ -755,12 +790,16 @@ class LabController extends ChangeNotifier {
     final profile = calibration;
     if (profile == null) return;
     _sessionId = 'lab-${++_sessions}';
+    attention.reset(profile);
+    // Side mount: the measurements carry road-frame angles, so the automata
+    // get the road-frame profile (neutral 0) the pipeline made.
+    final automata = zoneProvider?.engineCalibration ?? profile;
     engine = ObservationEngine(
       sessionId: _sessionId!,
-      calibration: profile,
+      calibration: automata,
       settings: AlgorithmSettings.fromJson({
         ...settings.toJson(),
-        'hiddenEyes': profile.hiddenEyes,
+        'hiddenEyes': automata.hiddenEyes,
       }),
     );
     _fatigue = FatigueMonitor(
@@ -770,7 +809,6 @@ class LabController extends ChangeNotifier {
       headEventUs: settings.headDownUs,
     );
     fatigue = FatigueSnapshot.empty;
-    attention.reset(profile);
     // Where the driver was last seen, so a loss right after the start of the
     // session is judged by geometry (ПЗ: the selected face keeps its profile).
     final anchor = _anchorFace, seen = _driverSeenAbsUs;
@@ -1033,4 +1071,48 @@ class LabController extends ChangeNotifier {
 
 extension on Stopwatch {
   int elapsedMicrosecondsOf() => elapsedMicroseconds;
+}
+
+/// The lab's calibration window: the ТЗ collector or, on a side mount, the
+/// mount collector (angles relative to the road pose).
+sealed class _LabCollector {
+  int get trackingId;
+  void add(int capturedUs, List<FaceMeasurement> faces, List<FaceSignals> s);
+  ({CalibrationProfile? profile, List<String> issues, String? note}) finish(
+    int nowUs,
+  );
+}
+
+class _TzCollector implements _LabCollector {
+  _TzCollector(this.c);
+  final CalibrationCollector c;
+  @override
+  int get trackingId => c.trackingId;
+  @override
+  void add(int capturedUs, List<FaceMeasurement> faces, List<FaceSignals> s) =>
+      c.add(capturedUs: capturedUs, faces: faces);
+  @override
+  ({CalibrationProfile? profile, List<String> issues, String? note}) finish(
+    int nowUs,
+  ) {
+    final r = c.finish(nowUs: nowUs);
+    return (profile: r.profile, issues: r.issues, note: null);
+  }
+}
+
+class _MountCollector implements _LabCollector {
+  _MountCollector(this.c);
+  final MountCalibrationCollector c;
+  @override
+  int get trackingId => c.trackingId;
+  @override
+  void add(int capturedUs, List<FaceMeasurement> faces, List<FaceSignals> s) =>
+      c.add(capturedUs: capturedUs, faces: s);
+  @override
+  ({CalibrationProfile? profile, List<String> issues, String? note}) finish(
+    int nowUs,
+  ) {
+    final r = c.finish(nowUs: nowUs);
+    return (profile: r.profile, issues: r.issues, note: r.note);
+  }
 }
