@@ -4,6 +4,7 @@ import 'attention.dart';
 import 'calibration.dart';
 import 'driver_continuity.dart';
 import 'face.dart';
+import 'mount.dart';
 import 'signals.dart';
 
 /// Attention logic on top of the ТЗ automata: where the driver looks
@@ -23,6 +24,7 @@ class AttentionSettings {
     this.gazeAwareEyes = false,
     this.headOnlyLookDown = false,
     this.distraction = false,
+    this.mountRelative = false,
   });
 
   /// ТЗ acceptance mode: no extension is active.
@@ -31,7 +33,11 @@ class AttentionSettings {
   /// Everything the MVP lab turns on by default. [headOnlyLookDown] stays off:
   /// without eye gaze it would also hide a real closure with the head
   /// slightly lowered, see docs/attention-method.md.
-  static const lab = AttentionSettings(gazeAwareEyes: true, distraction: true);
+  static const lab = AttentionSettings(
+    gazeAwareEyes: true,
+    distraction: true,
+    mountRelative: true,
+  );
 
   /// A lowered lid caused by looking down (instruments, console) or by a
   /// squint does not accumulate `eyes_closed` time. Needs eye gaze or
@@ -47,12 +53,22 @@ class AttentionSettings {
   /// 10 s within 30 s (Euro NCAP Driver Engagement 1.1, § 1.2.1, § 1.2.2).
   final bool distraction;
 
-  bool get isAcceptance => !gazeAwareEyes && !headOnlyLookDown && !distraction;
+  /// Side mount: head angles for the ТЗ automata, zones and distraction are
+  /// taken relative to the calibrated road pose by rotation (`R_cal⁻¹·R`),
+  /// the eyes are usable while the face is within the engine's eye limit to
+  /// the camera, and the calibration uses `MountCalibrationCollector`. The
+  /// ТЗ thresholds (20°, 2.0 s, 30°) are unchanged. Off in acceptance until
+  /// the change request is approved. See `lib/logic/mount.dart`.
+  final bool mountRelative;
+
+  bool get isAcceptance =>
+      !gazeAwareEyes && !headOnlyLookDown && !distraction && !mountRelative;
 
   Map<String, Object?> toJson() => {
     'gazeAwareEyes': gazeAwareEyes,
     'headOnlyLookDown': headOnlyLookDown,
     'distraction': distraction,
+    'mountRelative': mountRelative,
   };
 
   factory AttentionSettings.fromJson(Map<String, dynamic> json) =>
@@ -60,6 +76,7 @@ class AttentionSettings {
         gazeAwareEyes: (json['gazeAwareEyes'] as bool?) ?? false,
         headOnlyLookDown: (json['headOnlyLookDown'] as bool?) ?? false,
         distraction: (json['distraction'] as bool?) ?? false,
+        mountRelative: (json['mountRelative'] as bool?) ?? false,
       );
 }
 
@@ -144,27 +161,67 @@ class ZoneMap {
     List<ZoneRegion>? gazeRegions,
     List<ZoneRegion>? headRegions,
     this.mirrorsCalibrated = false,
+    this.roadHeadRoll = 0,
+    this.mountRelative = false,
+    this.mountEngine,
   }) : roadGazeLeft = roadGazeLeft ?? roadHeadLeft,
        roadGazeDown = roadGazeDown ?? roadHeadDown,
        gazeRegions = List.unmodifiable(gazeRegions ?? defaultGazeRegions),
-       headRegions = List.unmodifiable(headRegions ?? defaultHeadRegions);
+       headRegions = List.unmodifiable(headRegions ?? defaultHeadRegions),
+       _frame = RoadFrame.fromAngles(
+         roadHeadLeft,
+         roadHeadDown,
+         roadHeadRoll,
+         engineId: mountEngine,
+       );
 
   /// Road direction from the ТЗ calibration: neutral head yaw/pitch.
   factory ZoneMap.fromCalibration(
     CalibrationProfile profile, {
     double? roadGazeLeft,
     double? roadGazeDown,
+    bool mountRelative = false,
   }) => ZoneMap(
     roadHeadLeft: profile.neutralYaw,
     roadHeadDown: profile.neutralPitch,
+    roadHeadRoll: profile.neutralRoll,
     roadGazeLeft: roadGazeLeft,
     roadGazeDown: roadGazeDown,
+    mountRelative: mountRelative,
+    mountEngine: profile.detector.id,
   );
+
+  /// The same layout with directions taken by rotation relative to the road
+  /// pose (side mount, see [AttentionSettings.mountRelative]).
+  ZoneMap withMount({required double roadHeadRoll, String? engineId}) =>
+      ZoneMap(
+        roadHeadLeft: roadHeadLeft,
+        roadHeadDown: roadHeadDown,
+        roadHeadRoll: roadHeadRoll,
+        roadGazeLeft: roadGazeLeft,
+        roadGazeDown: roadGazeDown,
+        gazeRegions: gazeRegions,
+        headRegions: headRegions,
+        mirrorsCalibrated: mirrorsCalibrated,
+        mountRelative: true,
+        mountEngine: engineId ?? mountEngine,
+      );
 
   /// Absolute head and gaze angles (camera frame) of the road direction.
   final double roadHeadLeft, roadHeadDown, roadGazeLeft, roadGazeDown;
+
+  /// Head roll of the road pose; used only with [mountRelative].
+  final double roadHeadRoll;
   final List<ZoneRegion> gazeRegions, headRegions;
   final bool mirrorsCalibrated;
+
+  /// Directions by rotation relative to the road pose instead of angle
+  /// differences: exact for a camera turned or tilted from the road.
+  final bool mountRelative;
+
+  /// Engine whose Euler order the road angles use (`mount.dart`).
+  final String? mountEngine;
+  final RoadFrame _frame;
 
   /// Starting sectors for a left-hand-drive car with the phone on the dash in
   /// front of the driver, relative to the road direction. They are a first
@@ -256,6 +313,7 @@ class ZoneMap {
   /// Direction of [s] relative to the road, from gaze when the engine
   /// measures it and from the head pose otherwise. Null without usable angles.
   GazeDirection? directionOf(FaceSignals s) {
+    if (mountRelative) return _mountDirectionOf(s);
     if (s.hasGaze) {
       return GazeDirection(
         s.gazeLeft! - roadGazeLeft,
@@ -272,6 +330,17 @@ class ZoneMap {
       );
     }
     return null;
+  }
+
+  GazeDirection? _mountDirectionOf(FaceSignals s) {
+    if (s.hasGaze) {
+      final (gl, gd) = _frame.direction(s.gazeLeft!, s.gazeDown!);
+      final (rl, rd) = _frame.direction(roadGazeLeft, roadGazeDown);
+      return GazeDirection(gl - rl, gd - rd, fromGaze: true);
+    }
+    final head = _frame.head(s);
+    if (head == null) return null;
+    return GazeDirection(head.$1, head.$2, fromGaze: false);
   }
 
   /// Zone of a direction without memory. [current] gets [stickiness]: its
@@ -316,8 +385,11 @@ class ZoneMap {
       'headDown': roadHeadDown,
       'gazeLeft': roadGazeLeft,
       'gazeDown': roadGazeDown,
+      if (roadHeadRoll != 0) 'headRoll': roadHeadRoll,
     },
     'mirrorsCalibrated': mirrorsCalibrated,
+    if (mountRelative) 'mountRelative': true,
+    if (mountRelative && mountEngine != null) 'mountEngine': mountEngine,
     'gazeRegions': [for (final r in gazeRegions) r.toJson()],
     'headRegions': [for (final r in headRegions) r.toJson()],
   };
@@ -332,9 +404,12 @@ class ZoneMap {
       roadHeadDown: (road['headDown'] as num).toDouble(),
       roadGazeLeft: (road['gazeLeft'] as num?)?.toDouble(),
       roadGazeDown: (road['gazeDown'] as num?)?.toDouble(),
+      roadHeadRoll: (road['headRoll'] as num?)?.toDouble() ?? 0,
       gazeRegions: regions('gazeRegions'),
       headRegions: regions('headRegions'),
       mirrorsCalibrated: (json['mirrorsCalibrated'] as bool?) ?? false,
+      mountRelative: (json['mountRelative'] as bool?) ?? false,
+      mountEngine: json['mountEngine'] as String?,
     );
   }
 }
@@ -434,6 +509,9 @@ class ZoneCalibrationCollector {
       gazeRegions: merge(base.gazeRegions, true),
       headRegions: merge(base.headRegions, false),
       mirrorsCalibrated: _spans.isNotEmpty,
+      roadHeadRoll: base.roadHeadRoll,
+      mountRelative: base.mountRelative,
+      mountEngine: base.mountEngine,
     );
   }
 }
@@ -446,8 +524,23 @@ class GazeZoneTracker {
     this.dwellUs = 150000,
     this.stickiness = 1.25,
     this.lostGraceUs = 1000000,
+    this.cameraEdgeYaw = 40,
   });
   final ZoneMap map;
+
+  /// Side mount ([ZoneMap.mountRelative]): a face lost while turned at
+  /// least this far from the camera, and away from the road, was turned away
+  /// from the phone. The face is lost earlier on that side (a mirror on the
+  /// far side may already be out of view), so the road-frame turn alone is
+  /// not enough to tell a look away from a tracking failure.
+  final double cameraEdgeYaw;
+
+  /// Side mount: a fast turn away from the camera is lost before the face
+  /// reaches [cameraEdgeYaw] (ML Kit gives a frame every 66 ms). The camera
+  /// yaw is extrapolated from the last two frames for up to this long, and
+  /// the head must already be at least [minTurn] from the road.
+  static const extrapolateUs = 200000;
+  static const minTurn = 6.0;
 
   /// A new zone must hold this long before it replaces the current one.
   final int dwellUs;
@@ -460,6 +553,8 @@ class GazeZoneTracker {
   GazeZone _zone = GazeZone.unknown;
   int? _sinceUs, _awaySinceUs, _lastSeenUs;
   GazeDirection? _direction, _lastDirection;
+  double? _lastCameraYaw, _prevCameraYaw;
+  int? _prevSeenUs;
 
   GazeZone _raw = GazeZone.unknown;
 
@@ -476,18 +571,30 @@ class GazeZoneTracker {
     _direction = d;
     final GazeZone raw;
     if (d != null) {
+      _prevSeenUs = _lastSeenUs;
+      _prevCameraYaw = _lastCameraYaw;
       _lastSeenUs = atUs;
       _lastDirection = d;
+      _lastCameraYaw = face!.headYawLeft;
       raw = map.classify(d, current: _zone, stickiness: stickiness);
     } else {
       final last = _lastDirection;
+      final roadRadius = last == null
+          ? 0.0
+          : (last.fromGaze ? map.gazeRegions : map.headRegions)
+                .firstWhere((r) => r.zone == GazeZone.road)
+                .radiusLeft;
+      final cameraYaw = _lastCameraYaw;
       final turnedAway =
           last != null &&
-          last.left.abs() >
-              (last.fromGaze ? map.gazeRegions : map.headRegions)
-                      .firstWhere((r) => r.zone == GazeZone.road)
-                      .radiusLeft *
-                  2;
+          (last.left.abs() > roadRadius * 2 ||
+              (map.mountRelative &&
+                  cameraYaw != null &&
+                  ((cameraYaw.abs() >= cameraEdgeYaw &&
+                          last.left.abs() > roadRadius) ||
+                      (last.left.abs() >= minTurn &&
+                          _extrapolatedCameraYaw(atUs).abs() >=
+                              cameraEdgeYaw))));
       if (turnedAway) {
         // The face left the camera while the head was turned far: a look over
         // the shoulder or out of a side window, not a tracking failure.
@@ -510,6 +617,24 @@ class GazeZoneTracker {
       if (atUs - _awaySinceUs! >= dwellUs) _set(raw, _awaySinceUs!);
     }
     return _zone;
+  }
+
+  /// The camera yaw the face was turning to when it was lost: the last one
+  /// moved on at the speed of the last two frames when the face was turning
+  /// away from the camera, else the last one.
+  double _extrapolatedCameraYaw(int atUs) {
+    final last = _lastCameraYaw!, prev = _prevCameraYaw;
+    final lastUs = _lastSeenUs!, prevUs = _prevSeenUs;
+    if (prev == null ||
+        prevUs == null ||
+        lastUs - prevUs <= 0 ||
+        lastUs - prevUs > extrapolateUs ||
+        last.abs() <= prev.abs() ||
+        last.sign != prev.sign) {
+      return last;
+    }
+    final speed = (last - prev) / (lastUs - prevUs);
+    return last + speed * math.min(atUs - lastUs, extrapolateUs);
   }
 
   void _set(GazeZone zone, int sinceUs) {
@@ -901,15 +1026,44 @@ class AttentionPipeline {
     EyeGate? eyeGate,
     DistractionMonitor? distraction,
     DriverContinuity? continuity,
-  }) : zones = zones ?? ZoneMap.fromCalibration(calibration),
+  }) : zones = _zonesFor(calibration, zones, settings),
        eyeGate = eyeGate ?? EyeGate(),
        distractionMonitor = distraction ?? DistractionMonitor(),
        continuity =
-           continuity ?? DriverContinuity(trackingId: calibration.trackingId) {
+           continuity ?? DriverContinuity(trackingId: calibration.trackingId),
+       road = settings.mountRelative
+           ? RoadFrame.fromProfile(calibration)
+           : null,
+       engineCalibration = settings.mountRelative
+           ? roadProfile(calibration)
+           : calibration {
     tracker = GazeZoneTracker(this.zones);
   }
 
+  static ZoneMap _zonesFor(
+    CalibrationProfile calibration,
+    ZoneMap? zones,
+    AttentionSettings settings,
+  ) {
+    final map = zones ?? ZoneMap.fromCalibration(calibration);
+    return settings.mountRelative && !map.mountRelative
+        ? map.withMount(
+            roadHeadRoll: calibration.neutralRoll,
+            engineId: calibration.detector.id,
+          )
+        : map;
+  }
+
   final CalibrationProfile calibration;
+
+  /// The profile to create `ObservationEngine` with: [calibration] itself,
+  /// or with [AttentionSettings.mountRelative] its road-frame form
+  /// ([roadProfile]: neutral angles 0), because then the measurements carry
+  /// angles relative to the road.
+  final CalibrationProfile engineCalibration;
+
+  /// Road pose for [AttentionSettings.mountRelative], else null.
+  final RoadFrame? road;
   final ZoneMap zones;
   final AttentionSettings settings;
   final EyeGate eyeGate;
@@ -965,15 +1119,10 @@ class AttentionPipeline {
     }
     final measurements = [
       for (final f in usable)
-        if (identical(f, driver) && gate != EyeGateReason.none)
-          FaceMeasurement(
-            trackingId: f.trackingId ?? calibration.trackingId,
-            pitchDown: f.headPitchDown,
-            yaw: f.headYawLeft,
-            roll: f.headRollRight,
-          )
-        else
-          _measurement(f),
+        _measurement(
+          f,
+          withEyes: !identical(f, driver) || gate == EyeGateReason.none,
+        ),
     ];
     DistractionEvent? started, ended;
     if (settings.distraction) {
@@ -1002,17 +1151,35 @@ class AttentionPipeline {
     );
   }
 
-  FaceMeasurement _measurement(FaceSignals f) {
+  FaceMeasurement _measurement(FaceSignals f, {required bool withEyes}) {
     final m = f.toMeasurement();
-    if (m.trackingId != null) return m;
-    // Engines without face ids (one face only) inherit the calibrated id.
+    final road = this.road;
+    var eyes = withEyes;
+    double? yaw = m.yaw, pitch = m.pitchDown, roll = m.roll;
+    if (road != null) {
+      // Eyes by the view of the camera (the far eye leaves the view), head
+      // angles relative to the road pose.
+      final view = f.headYawLeft;
+      eyes =
+          eyes &&
+          view != null &&
+          view.abs() <= calibration.detector.eyeYawLimit;
+      final head = road.head(f);
+      if (head == null) {
+        yaw = pitch = roll = null;
+      } else {
+        (yaw, pitch, roll) = head;
+      }
+    }
+    if (eyes && road == null && m.trackingId != null) return m;
     return FaceMeasurement(
-      trackingId: calibration.trackingId,
-      leftEye: m.leftEye,
-      rightEye: m.rightEye,
-      pitchDown: m.pitchDown,
-      yaw: m.yaw,
-      roll: m.roll,
+      // Engines without face ids (one face only) inherit the calibrated id.
+      trackingId: m.trackingId ?? calibration.trackingId,
+      leftEye: eyes ? m.leftEye : null,
+      rightEye: eyes ? m.rightEye : null,
+      pitchDown: pitch,
+      yaw: yaw,
+      roll: roll,
     );
   }
 }
@@ -1048,6 +1215,11 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   bool eyesEventActive = false;
 
   AttentionPipeline? get pipeline => _pipeline;
+
+  /// The profile to create `ObservationEngine` with after [reset]: with
+  /// [AttentionSettings.mountRelative] the road-frame profile (neutral 0),
+  /// because [lastMeasurements] then carry road-frame angles.
+  CalibrationProfile? get engineCalibration => _pipeline?.engineCalibration;
 
   /// Input for `ObservationEngine.process` for the latest frame, one per
   /// usable face, same order as the pipeline decided; empty before

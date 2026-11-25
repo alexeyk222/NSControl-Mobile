@@ -194,7 +194,7 @@ void main() {
     expect(line[1], contains('"eyeOpenLeft":0.1'));
   });
 
-  test('side mount: ML Kit recalibrates with the lab eye limit', () {
+  test('side mount: replays run mount-relative', () {
     final lines = <String>[];
     for (final line in const LineSplitter().convert(
       SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
@@ -212,18 +212,59 @@ void main() {
       lines.add(jsonEncode(json));
     }
     final compare = EngineComparison('${lines.join('\n')}\n');
-    expect(compare.mlKitRecalibrationEyeYawLimit, 45);
+    expect(compare.sideMount, isTrue);
     final report = compare.report();
-    expect(report, contains('с пределом глаз 45°'));
+    expect(
+      report,
+      contains('Боковое крепление: оба режима идут с mountRelative'),
+    );
     expect(report, isNot(contains('ошибка:')));
     expect(report, contains('| mlkit_face_detection | приёмка | пересчитана'));
-    // Without a wider recorded limit ML Kit keeps the ТЗ 18°.
     expect(
       EngineComparison(
         SyntheticScenario(SyntheticStyle.mlKit).toJsonl(),
-      ).mlKitRecalibrationEyeYawLimit,
-      isNull,
+      ).sideMount,
+      isFalse,
     );
+  });
+
+  test('lists steps where an engine loses the face', () {
+    final lines = const LineSplitter().convert(_comparison());
+    int? start, end;
+    for (final l in lines) {
+      final j = jsonDecode(l) as Map<String, dynamic>;
+      if (j['type'] == 'label' && j['step'] == 'laugh') {
+        if (j['edge'] == 'start') start ??= j['capturedUs'] ?? j['atUs'];
+        if (j['edge'] == 'end') end ??= j['capturedUs'] ?? j['atUs'];
+      }
+    }
+    final out = [
+      for (final l in lines)
+        () {
+          final j = jsonDecode(l) as Map<String, dynamic>;
+          final t = j['capturedUs'];
+          if (j['type'] == 'frame' &&
+              j['engine'] == 'arkit_face_tracking' &&
+              t is int &&
+              t >= start! &&
+              t <= end!) {
+            j['faceCount'] = 0;
+            j.remove('signals');
+          }
+          return jsonEncode(j);
+        }(),
+    ];
+    final report = EngineComparison('${out.join('\n')}\n').report();
+    expect(report, contains('## Потеря лица по шагам'));
+    final row = report
+        .split('\n')
+        .firstWhere((l) => l.startsWith('- **laugh**'));
+    expect(row, contains('arkit_face_tracking — углы в 0,0 % кадров'));
+    expect(row, contains('mlkit_face_detection — углы в 100,0 % кадров'));
+    // The synthetic blind spots lose the face on purpose; laugh does not.
+    final plain = EngineComparison(_comparison()).report();
+    expect(plain, contains('- **blind_spot_left**'));
+    expect(plain, isNot(contains('- **laugh**')));
   });
 
   test('a scaled ML Kit frame is compared by its own size', () {

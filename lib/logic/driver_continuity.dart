@@ -196,6 +196,7 @@ class DriverContinuity {
     eyeOpenRight: f.eyeOpenRight,
     distanceM: f.distanceM,
     box: f.box,
+    headRotation: f.headRotation,
     blendshapes: f.blendshapes,
   );
 }

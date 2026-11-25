@@ -142,7 +142,12 @@ void main() {
       final driver = DriverContinuity(trackingId: profile.trackingId);
       final pipeline = AttentionPipeline(
         calibration: profile,
-        settings: lab ? AttentionSettings.lab : const AttentionSettings(),
+        // The lab extensions without the side-mount frame: the ML Kit
+        // measurements then pass unchanged (mountRelative re-expresses the
+        // angles relative to the road, tested separately).
+        settings: lab
+            ? const AttentionSettings(gazeAwareEyes: true, distraction: true)
+            : const AttentionSettings(),
       );
       final out = <String>[];
       for (final f in recording.frames) {
