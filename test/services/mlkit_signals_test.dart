@@ -75,8 +75,9 @@ void main() {
     expect(s.headYawLeft, 34);
     expect(s.headPitchDown, 10);
     expect(s.headRollRight, -5);
-    expect(s.eyeOpenLeft, .9);
-    expect(s.eyeOpenRight, .1);
+    // The eyes keep ML Kit's sides (sign_wink_left, phone on the left vent).
+    expect(s.eyeOpenLeft, .1);
+    expect(s.eyeOpenRight, .9);
     final box = MlKitSignals.boxOf(
       left: 48,
       top: 64,
