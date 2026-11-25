@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart' show Widget;
@@ -50,22 +51,29 @@ class FakeArkit implements FaceSource {
 
   void deliver(FaceResult result) => _onResult!(result);
 
-  void emit(List<FaceSignals> faces, int captured, {int? completed}) =>
-      _onResult!(
-        FaceResult(
-          engineId: arkitCapabilities.id,
-          capturedUs: captured,
-          completedUs: completed ?? captured + 20000,
-          faces: [
-            for (final s in faces)
-              DetectedFace(
-                s.toMeasurement(),
-                const Rect.fromLTWH(0, 0, 100, 100),
-                signals: s,
-              ),
-          ],
-        ),
-      );
+  /// One result; [up] is the frame's `gravityUp`, sent just before it.
+  void emit(
+    List<FaceSignals> faces,
+    int captured, {
+    int? completed,
+    List<double>? up,
+  }) {
+    final result = FaceResult(
+      engineId: arkitCapabilities.id,
+      capturedUs: captured,
+      completedUs: completed ?? captured + 20000,
+      faces: [
+        for (final s in faces)
+          DetectedFace(
+            s.toMeasurement(),
+            const Rect.fromLTWH(0, 0, 100, 100),
+            signals: s,
+          ),
+      ],
+    );
+    if (up != null) onRaw(result, {'gravityUp': up});
+    _onResult!(result);
+  }
 
   @override
   Future<void> stop() async => _running = false;
@@ -360,6 +368,111 @@ void main() {
           platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
           hasLength(1),
         );
+      },
+    );
+
+    /// Calibrates with the phone's "up" [up] on every frame.
+    void calibrateWithUp(List<double> up) {
+      trip.clock.stop();
+      final base = trip.clock.elapsedMicroseconds;
+      arkit().emit([arkitFace()], base, up: up);
+      trip.confirmFace(arkitFace().trackingId!);
+      final start = trip.calibrationStartUs;
+      for (var t = start; t <= start + 10200000; t += 33000) {
+        arkit().emit([arkitFace()], t, up: up);
+      }
+      trip.finishCalibration(start + 10300000);
+    }
+
+    test('a sudden turn of the holder: said, new road pose', () async {
+      await trip.start();
+      calibrateWithUp([0, 1, 0]);
+      final session = trip.sessionId;
+      observe(1, arkitFace);
+      // The holder turns 18° at once: the driver looks at the road, eyes
+      // straight out of the head, but the camera sees the head 18° away.
+      // Gravity does not see a turn around the vertical.
+      for (var i = 0; i < 400; i++) {
+        lastUs += 100000;
+        arkit().emit([arkitFace(view: 20)], lastUs, up: [0, 1, 0]);
+      }
+      expect(
+        platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+        hasLength(1),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.sessionId, isNot(session));
+      expect(trip.calibration!.neutralYaw, closeTo(20, .5));
+      // The sign starts over on the new calibration.
+      expect(trip.holderShift!.suspected, isFalse);
+      expect(platform.alertCalls, 0);
+    });
+
+    /// "Up" of the phone tilted [deg] about the camera x axis.
+    List<double> tiltedUp(double deg) => [
+      0,
+      math.cos(deg * math.pi / 180),
+      math.sin(deg * math.pi / 180),
+    ];
+
+    test('a ramp tilts the phone, not the holder: nothing', () async {
+      await trip.start();
+      calibrateWithUp([0, 1, 0]);
+      final session = trip.sessionId;
+      observe(1, arkitFace);
+      // The car on a ramp: the phone tilts 15° with it, the head does not
+      // move in the camera.
+      for (var i = 0; i < 300; i++) {
+        lastUs += 100000;
+        arkit().emit([arkitFace()], lastUs, up: tiltedUp(15));
+      }
+      expect(trip.holderShift!.suspected, isFalse);
+      expect(trip.sessionId, session);
+      expect(
+        platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+        isEmpty,
+      );
+    });
+
+    test(
+      'the holder tilts and the head follows: recorded, re-calibrated',
+      () async {
+        final dir = await Directory.systemTemp.createTemp('trip');
+        addTearDown(() => dir.delete(recursive: true));
+        trip
+          ..recorder = LabRecorder(dir)
+          ..recordTrips = true;
+        await trip.start();
+        calibrateWithUp([0, 1, 0]);
+        final session = trip.sessionId;
+        observe(1, arkitFace);
+        // The holder sags 15°: the camera now sees the same head 15° lower.
+        for (var i = 0; i < 100; i++) {
+          lastUs += 100000;
+          arkit().emit([arkitFace(pitch: 15)], lastUs, up: tiltedUp(15));
+        }
+        expect(
+          platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+          hasLength(1),
+        );
+        for (var i = 0; i < 120; i++) {
+          lastUs += 100000;
+          arkit().emit([arkitFace(pitch: 15)], lastUs, up: tiltedUp(15));
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(trip.sessionId, isNot(session));
+        expect(trip.calibration!.neutralPitch, closeTo(15, .5));
+        expect(platform.alertCalls, 0);
+        await trip.finish();
+        final text = await (await LabRecorder(
+          dir,
+        ).list()).single.readAsString();
+        final lines = RecordingReader.parse(
+          text,
+        ).ofType('trip').where((l) => l['holderShift'] != null).toList();
+        expect(lines, hasLength(1));
+        expect((lines.single['holderShift'] as Map)['source'], 'gravity');
       },
     );
 
