@@ -229,6 +229,14 @@ class TripController extends ChangeNotifier {
   int _calibrationStart = 0;
   int _lifecycleGeneration = 0;
   int _lastUiUs = 0, _lastReconnectUs = 0, _lastWatchSyncUs = 0;
+  int _lastWatchConnectUs = 0;
+
+  /// Native layer says the watch app is reachable. The Dart handshake may
+  /// still be down after one failed send; `_tick` then retries it.
+  bool _watchReachable = false;
+
+  /// Last status the watch answered with (diagnostics: accepted, expired, ...).
+  String? lastWatchAck;
   int _lastCheckpointUs = 0;
   final List<int> completedPerMinute = [];
   FatigueMonitor? _fatigueMonitor;
@@ -947,6 +955,14 @@ class TripController extends ChangeNotifier {
         _quietForRestart) {
       unawaited(_restartArkit());
     }
+    // One failed or timed-out send drops the handshake, and no new status
+    // event arrives while the watch stays reachable: retry it here.
+    if (_watchReachable &&
+        !wearable.connected &&
+        now - _lastWatchConnectUs >= 5000000) {
+      _lastWatchConnectUs = now;
+      unawaited(wearable.connect());
+    }
     if (wearable.connected && now - _lastWatchSyncUs >= 10000000) {
       _lastWatchSyncUs = now;
       unawaited(wearable.synchronize());
@@ -1464,8 +1480,12 @@ class TripController extends ChangeNotifier {
           : event;
       final status = detail['status'];
       wearableStatus = describeWearable(detail);
-      if (status == 'connected' || detail['reachable'] == true) {
-        if (!wearable.connected) unawaited(wearable.connect());
+      _watchReachable = status == 'connected' || detail['reachable'] == true;
+      if (_watchReachable) {
+        if (!wearable.connected) {
+          _lastWatchConnectUs = clock.elapsedMicroseconds;
+          unawaited(wearable.connect());
+        }
       } else if (detail['connected'] == false || status != 'connected') {
         wearable.disconnect();
       }
@@ -1499,6 +1519,9 @@ class TripController extends ChangeNotifier {
 
   final Map<String, Map<String, Object?>> _deliveries = {};
   void _delivery(Map<String, Object?> message, String status) {
+    if (status.startsWith('received_')) {
+      lastWatchAck = status.substring('received_'.length);
+    }
     if (status == 'failed') {
       wearableStatus = 'Команда часам не доставлена';
       _notify();
