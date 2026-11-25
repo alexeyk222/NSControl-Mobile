@@ -63,7 +63,6 @@
 | `head_down_3s` | опустить голову больше чем на 20° на 3 с | `head_pitch_down` |
 | `nod` | короткий кивок и возврат | нет |
 | `glasses`, `dark` | очки; приглушённый свет | по основному шагу |
-
 | `sign_head_left`, `sign_head_down`, `sign_roll_right` | повернуть голову влево, опустить, наклонить к правому плечу (сценарий `signs-v1`) | нет; проверка знаков `headYawLeft`, `headPitchDown`, `headRollRight` |
 | `sign_eyes_left`, `sign_eyes_down` | голова прямо, глаза влево, глаза вниз (`signs-v1`) | нет; проверка знаков `eyeGazeLeft`, `eyeGazeDown` |
 
