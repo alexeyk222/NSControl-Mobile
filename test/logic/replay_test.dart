@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
+import 'package:nscontrol/logic/driver_continuity.dart';
 import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/logic/synthetic.dart';
 
@@ -65,6 +66,11 @@ void main() {
           }
           expect(r.outsideSteps, isEmpty);
           expect(r.falseAlarms, 0);
+          expect(r.pausedAtUs, isNull);
+          if (style == SyntheticStyle.mlKit) {
+            // Every loss of the face gave a new id that was taken back.
+            expect(r.restoredFrames, greaterThanOrEqualTo(4));
+          }
           expect(r.scores['eyes_closed']!.tp, 2);
           expect(r.scores['head_pitch_down']!.tp, 1);
           expect(r.scores[DistractionEvent.code]!.tp, 1);
@@ -103,6 +109,12 @@ void main() {
         expect(report, contains('приёмка (только ТЗ)'));
         expect(report, contains('| mirror_left #2 |'));
         expect(report, contains('**Итог: ложных тревог ТЗ 0, пропусков 0.**'));
+        expect(report, contains('| intersection_scan | off_road |'));
+        expect(report, contains('наблюдение не приостанавливалось'));
+        expect(
+          RegExp(r'eyes_closed_3s #1 .*\| 0\.0\d; глубоко').hasMatch(report),
+          isTrue,
+        );
       });
 
       test('recalibration from frames gives the recorded profile', () {
@@ -119,13 +131,15 @@ void main() {
     });
   }
 
-  test('ML Kit: the ТЗ events are identical with and without the pipeline', () {
+  test('ML Kit: the ТЗ events are identical with and without the pipeline '
+      '(ids restored the same way)', () {
     final recording = Recording.parse(
       SyntheticScenario(SyntheticStyle.mlKit, seed: 3).toJsonl(),
     );
     final profile = recording.calibrations.single.profile!;
-    List<String> run(bool lab) {
+    List<String> run(bool lab, {bool continuity = true}) {
       final engine = ObservationEngine(sessionId: 's', calibration: profile);
+      final driver = DriverContinuity(trackingId: profile.trackingId);
       final pipeline = AttentionPipeline(
         calibration: profile,
         settings: lab ? AttentionSettings.lab : const AttentionSettings(),
@@ -140,7 +154,9 @@ void main() {
           completedUs: f.completedUs,
           faces: lab
               ? pipeline.process(f.capturedUs, faces).measurements
-              : faces.map((s) => s.toMeasurement()).toList(),
+              : (continuity ? driver.resolve(f.capturedUs, faces) : faces)
+                    .map((s) => s.toMeasurement())
+                    .toList(),
         );
         out.addAll(u.started.map((e) => jsonEncode(e.toJson())));
         out.addAll(u.ended.map((e) => jsonEncode(e.toJson())));
@@ -151,6 +167,9 @@ void main() {
     final direct = run(false);
     expect(direct, isNotEmpty);
     expect(run(true), direct);
+    // Without continuity the first blind-spot check (new ML Kit id) stops
+    // observation for good: no event at all.
+    expect(run(false, continuity: false), isEmpty);
   });
 
   group('matching by ПМИ 7.3', () {
@@ -225,6 +244,21 @@ void main() {
         containsAll(['eyes_closed', 'head_pitch_down']),
       );
       expect(r.falseAlarms, r.outsideSteps.length);
+    });
+
+    test('head_pitch_down while looking at a phone is allowed, not FP', () {
+      // ML Kit head_down_3s starts at 120.4 s; label it as distraction_4s.
+      final r = ReplayRunner(
+        build([
+          label(120.4, 'distraction_4s', 'start', rep: 1),
+          label(124.4, 'distraction_4s', 'end', rep: 1),
+        ]),
+      ).run(const ReplayOptions(engine: 'mlkit_face_detection'));
+      final step = r.episodes.single;
+      expect(step.allowed.map((e) => e.type), ['head_pitch_down']);
+      expect(step.unexpected, isEmpty);
+      expect(r.scores['head_pitch_down']!.fp, 0);
+      expect(replayReport(build([]), [r]), contains('допустимо по ТЗ'));
     });
 
     test('a second event in the same positive step is an FP duplicate', () {

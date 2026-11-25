@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'attention_zones.dart';
 import 'calibration.dart';
+import 'driver_continuity.dart';
 import 'face.dart';
 import 'fatigue.dart';
 import 'observation.dart';
@@ -245,6 +246,18 @@ abstract final class ScenarioExpectations {
   /// as borderline, not counted as FN.
   static const borderline = {'eyes_closed_2s'};
 
+  /// ТЗ events that are acceptable but not expected in a step: looking at a
+  /// phone with the head down more than 20° is a real head_pitch_down.
+  static const Map<String, Set<String>> allowed = {
+    'distraction_4s': {headPitchDown},
+  };
+
+  /// Steps whose glance durations the report lists (mirror limit, ПМИ).
+  static bool glanceStep(String step) =>
+      step.startsWith('mirror_') ||
+      step.startsWith('blind_spot_') ||
+      step == 'intersection_scan';
+
   static Set<String> expected(String step, AttentionSettings settings) {
     final types = table[step] ?? const <String>{};
     return settings.distraction
@@ -302,7 +315,22 @@ class EpisodeResult {
 
   /// Events inside an aborted step: shown, not scored.
   final List<ReplayEvent> ignored = [];
+
+  /// ТЗ events the step allows without expecting them: shown, not FP.
+  final List<ReplayEvent> allowed = [];
   int frames = 0, eyesUsable = 0, headUsable = 0;
+
+  /// Smallest openness of the more open eye over the step: a closure counts
+  /// as deep for the eye gate only when it reaches [EyeGate.deepOpen].
+  double? minOpen;
+
+  /// Frames with both eyes below T, and those of them that were deep.
+  int closedFrames = 0, deepFrames = 0;
+
+  /// Durations (µs) of glances that started in the step, by zone code and
+  /// under [offRoad] for continuous time off the road in any zone.
+  final Map<String, List<int>> glances = {};
+  static const offRoad = 'off_road';
   final Map<GazeZone, int> zones = {};
   final Map<EyeGateReason, int> gates = {};
 
@@ -342,7 +370,16 @@ class ReplayResult {
     required this.rejectedFrames,
     required this.fatigue,
     required this.observedUs,
+    this.restoredFrames = 0,
+    this.pausedAtUs,
   });
+
+  /// Frames whose face got the calibrated id back after a loss (ФТ-02/03).
+  final int restoredFrames;
+
+  /// When the engine suspended observation for a new calibration (another
+  /// face, two faces or a long loss), null when it never did.
+  final int? pausedAtUs;
   final ReplayOptions options;
   final CalibrationProfile profile;
   final String calibrationSource;
@@ -408,8 +445,22 @@ class ReplayRunner {
         ),
     ];
     var ambiguous = 0, rejected = 0, observed = 0;
-    var tzSign = false;
-    int? firstUs, lastUs;
+    var tzSign = false, eyesSign = false, restored = 0;
+    int? firstUs, lastUs, pausedAtUs;
+    GazeZone? runZone;
+    int? runStartUs, offStartUs;
+    EpisodeResult? ownerOf(int atUs) {
+      for (final r in episodes) {
+        if (atUs >= r.episode.startUs && atUs <= r.episode.endUs) return r;
+      }
+      return null;
+    }
+
+    void glance(String key, int startUs, int endUs) {
+      final r = ownerOf(startUs);
+      if (r != null) (r.glances[key] ??= []).add(endUs - startUs);
+    }
+
     for (final frame in frames) {
       if (frame.capturedUs <= calibrationEndUs) continue;
       firstUs ??= frame.capturedUs;
@@ -425,7 +476,29 @@ class ReplayRunner {
         frame.capturedUs,
         faces,
         tzSignActive: tzSign,
+        eyesSignActive: eyesSign,
       );
+      if (attention.state.driver == ContinuityDecision.restored) restored++;
+      final zone = attention.state.zone;
+      if (zone != runZone) {
+        if (runZone != null) {
+          glance(runZone.code, runStartUs!, frame.capturedUs);
+        }
+        runZone = zone;
+        runStartUs = frame.capturedUs;
+      }
+      // As the distraction monitor counts it: a sweep across the road (one
+      // raw road frame) ends a continuous glance.
+      final offRoad =
+          zone != GazeZone.road &&
+          zone != GazeZone.unknown &&
+          pipeline.tracker.raw != GazeZone.road;
+      if (offRoad) {
+        offStartUs ??= frame.capturedUs;
+      } else if (offStartUs != null) {
+        glance(EpisodeResult.offRoad, offStartUs, frame.capturedUs);
+        offStartUs = null;
+      }
       final update = engine.process(
         sessionId: 'replay',
         capturedUs: frame.capturedUs,
@@ -459,12 +532,26 @@ class ReplayRunner {
       _feedFatigue(fatigue, attention, frame, profile, settings);
       final snapshot = update.snapshot;
       tzSign = tzSignActive(snapshot);
+      eyesSign = channelSignActive(snapshot.eyes);
+      if (snapshot.requiresRecalibration) pausedAtUs ??= frame.capturedUs;
       for (final r in episodes) {
         if (frame.capturedUs < r.episode.startUs ||
             frame.capturedUs > r.episode.endUs) {
           continue;
         }
         r.frames++;
+        final sig = faces.length == 1 ? faces.single : null;
+        if (sig?.eyeOpenLeft != null && sig?.eyeOpenRight != null) {
+          final open = sig!.eyeOpenLeft! > sig.eyeOpenRight!
+              ? sig.eyeOpenLeft!
+              : sig.eyeOpenRight!;
+          if (r.minOpen == null || open < r.minOpen!) r.minOpen = open;
+          final t = profile.eyeThreshold;
+          if (t != null && open < t) {
+            r.closedFrames++;
+            if (open <= pipeline.eyeGate.deepOpen) r.deepFrames++;
+          }
+        }
         if (snapshot.eyes.available) r.eyesUsable++;
         if (snapshot.head.available) r.headUsable++;
         r.zones.update(attention.state.zone, (n) => n + 1, ifAbsent: () => 1);
@@ -474,6 +561,12 @@ class ReplayRunner {
           ifAbsent: () => 1,
         );
       }
+    }
+    if (runZone != null && lastUs != null) {
+      glance(runZone.code, runStartUs!, lastUs);
+    }
+    if (offStartUs != null && lastUs != null) {
+      glance(EpisodeResult.offRoad, offStartUs, lastUs);
     }
     final outside = <ReplayEvent>[];
     final scores = _score(episodes, events, outside, settings, options);
@@ -490,6 +583,8 @@ class ReplayRunner {
       rejectedFrames: rejected,
       fatigue: fatigue.snapshot(lastUs ?? 0),
       observedUs: (lastUs ?? 0) - (firstUs ?? 0),
+      restoredFrames: restored,
+      pausedAtUs: pausedAtUs,
     );
   }
 
@@ -668,6 +763,11 @@ class ReplayRunner {
         outside.add(event);
       } else if (owner.episode.aborted) {
         owner.ignored.add(event);
+      } else if (ScenarioExpectations.allowed[owner.episode.step]?.contains(
+            event.type,
+          ) ??
+          false) {
+        owner.allowed.add(event);
       } else if (owner.expected.contains(event.type)) {
         if ((matched[owner]?.contains(event.type) ?? false) ||
             owner.late.any((e) => e.type == event.type)) {
@@ -721,12 +821,14 @@ class ReplayRunner {
 }
 
 /// True while either ТЗ channel has a sign or an active event.
-bool tzSignActive(ObservationSnapshot s) => [s.eyes, s.head].any(
-  (c) =>
-      c.phase == ChannelPhase.signPresent ||
-      c.phase == ChannelPhase.warning ||
-      c.phase == ChannelPhase.recovering,
-);
+bool tzSignActive(ObservationSnapshot s) =>
+    channelSignActive(s.eyes) || channelSignActive(s.head);
+
+/// True while the channel has a sign or an active event.
+bool channelSignActive(ChannelSnapshot c) =>
+    c.phase == ChannelPhase.signPresent ||
+    c.phase == ChannelPhase.warning ||
+    c.phase == ChannelPhase.recovering;
 
 /// Markdown report in Russian for one or more replay runs of one recording.
 String replayReport(Recording recording, List<ReplayResult> results) {
@@ -773,6 +875,11 @@ String replayReport(Recording recording, List<ReplayResult> results) {
       '${r.ambiguousFrames > 0 ? ', несколько лиц в ${r.ambiguousFrames}' : ''}.',
     );
     b.writeln(
+      '- Водитель после потери лица: восстановлен по геометрии в '
+      '${r.restoredFrames} кадрах; '
+      '${r.pausedAtUs == null ? 'наблюдение не приостанавливалось' : '**наблюдение приостановлено до новой калибровки на ${_s(r.pausedAtUs!)} с** (другое или второе лицо, долгая потеря)'}.',
+    );
+    b.writeln(
       '- **Итог: ложных тревог ТЗ ${r.falseAlarms}, пропусков ${r.missed}.**'
       '${r.late > 0 ? ' Найдено позже допуска от метки: ${r.late}.' : ''}'
       '${r.borderline > 0 ? ' Пограничных пропусков (eyes_closed_2s): ${r.borderline}.' : ''}',
@@ -793,9 +900,9 @@ String replayReport(Recording recording, List<ReplayResult> results) {
     b.writeln();
     b.writeln(
       '| Шаг | Начало, с | Ожидалось | Итог | Задержка порога, с | '
-      'Пригодно глаза / голова | Зоны | Глаза не учтены |',
+      'Пригодно глаза / голова | Зоны | Глаза не учтены | Мин. открытость; доля глубоких кадров |',
     );
-    b.writeln('|---|---|---|---|---|---|---|---|');
+    b.writeln('|---|---|---|---|---|---|---|---|---|');
     for (final e in r.episodes) {
       final ep = e.episode;
       final verdict = <String>[
@@ -812,6 +919,8 @@ String replayReport(Recording recording, List<ReplayResult> results) {
           'найдено позже ± 1 с от метки: ${e.late.map((x) => x.type).join(', ')}',
         if (e.duplicates.isNotEmpty)
           '**дубль: ${e.duplicates.map((x) => x.type).join(', ')}**',
+        if (e.allowed.isNotEmpty)
+          'допустимо по ТЗ: ${e.allowed.map((x) => x.type).join(', ')}',
         if (e.unexpected.isNotEmpty)
           '**ложная тревога: ${e.unexpected.map((x) => x.detail == null ? x.type : '${x.type} (${x.detail})').join(', ')}**',
       ];
@@ -828,8 +937,43 @@ String replayReport(Recording recording, List<ReplayResult> results) {
         '| ${_share(e.eyesUsable, e.frames)} / ${_share(e.headUsable, e.frames)} '
         '| ${_top(e.zones.map((k, v) => MapEntry(k.code, v)), e.frames)} '
         '| ${_top({for (final g in e.gates.entries)
-          if (g.key != EyeGateReason.none) g.key.code: g.value}, e.frames)} |',
+          if (g.key != EyeGateReason.none) g.key.code: g.value}, e.frames)} '
+        '| ${e.episode.step.startsWith('eyes_closed') && e.minOpen != null ? '${e.minOpen!.toStringAsFixed(2)}; глубоко ${_share(e.deepFrames, e.closedFrames)}' : '—'} |',
       );
+    }
+    final glanceSteps = <String, Map<String, List<int>>>{};
+    for (final e in r.episodes) {
+      if (!ScenarioExpectations.glanceStep(e.episode.step)) continue;
+      final byZone = glanceSteps[e.episode.step] ??= {};
+      for (final g in e.glances.entries) {
+        (byZone[g.key] ??= []).addAll(g.value);
+      }
+    }
+    if (glanceSteps.isNotEmpty) {
+      b.writeln();
+      b.writeln(
+        'Длительность взглядов на шагах зеркал, слепой зоны и перекрёстка '
+        '(по зоне после фильтра; off_road — непрерывно вне дороги в любых '
+        'зонах, пролёт взгляда через дорогу его прерывает, как в счёте '
+        'отвлечения). Порог долгого взгляда сейчас: зеркала '
+        '${_s(DistractionMonitor().longFor(GazeZone.mirrorLeft))} с, '
+        'остальное ${_s(DistractionMonitor().longUs)} с.',
+      );
+      b.writeln();
+      b.writeln('| Шаг | Зона | Взглядов | Максимум, с | p95, с |');
+      b.writeln('|---|---|---|---|---|');
+      for (final step in glanceSteps.entries) {
+        final zones = step.value.entries.toList()
+          ..sort((a, b) => a.key.compareTo(b.key));
+        for (final z in zones) {
+          if (z.key == GazeZone.road.code) continue;
+          final d = [...z.value]..sort();
+          b.writeln(
+            '| ${step.key} | ${z.key} | ${d.length} | ${_s2(d.last)} '
+            '| ${_s2(d[((d.length * .95).ceil() - 1).clamp(0, d.length - 1)])} |',
+          );
+        }
+      }
     }
     if (r.outsideSteps.isNotEmpty) {
       b.writeln();
@@ -853,6 +997,7 @@ String replayReport(Recording recording, List<ReplayResult> results) {
 }
 
 String _s(int us) => (us / 1e6).toStringAsFixed(1);
+String _s2(int us) => (us / 1e6).toStringAsFixed(2);
 String _deg(double v) => '${v.toStringAsFixed(1)}°';
 String _pct(double? v) => v == null ? '—' : '${(v * 100).round()} %';
 String _share(int n, int total) =>

@@ -1,0 +1,179 @@
+import 'signals.dart';
+
+/// Keeps the calibrated driver across tracking-id changes.
+///
+/// ML Kit gives a face a new tracking id after every loss (a blind-spot check,
+/// a long turn), and `ObservationEngine` treats a new id as a changed face and
+/// stops until a new calibration (ФТ-02). ФТ-02 also says the tracking id must
+/// not be used to establish identity, ТЗ 4.x (calibration) says an ordinary
+/// head turn does not remove the saved profile, and ПЗ adds: after the return
+/// to the working view and unambiguous observation of the selected face, the
+/// previous parameters are used if the phone was not moved.
+///
+/// So the identity of the driver is decided here, from geometry, and the
+/// engine keeps working unchanged:
+/// - one face that reappears within [maxGapUs] where the driver was (face box
+///   centre and size as at calibration or just before the loss; distance for
+///   ARKit) gets the calibrated id back ([ContinuityDecision.restored]);
+/// - without any geometry the face is taken back only within [noGeometryGapUs];
+/// - two or more faces, a face elsewhere or of another size, or a longer loss
+///   pass through unchanged, and the engine suspends observation until the
+///   face is confirmed and calibrated again (ФТ-02).
+///
+/// This is how ФТ-02/ФТ-03 are met, not an extension: it is active in
+/// acceptance mode too.
+class DriverContinuity {
+  DriverContinuity({
+    required this.trackingId,
+    this.maxGapUs = 5000000,
+    this.noGeometryGapUs = 3000000,
+    this.centerTolerance = .6,
+    this.minSizeRatio = .7,
+    this.maxSizeRatio = 1.4,
+    this.distanceToleranceM = .12,
+  });
+
+  /// Tracking id of the calibrated face.
+  final int trackingId;
+
+  /// Longest loss after which a matching face is still the driver.
+  final int maxGapUs;
+
+  /// The same when the engine reports neither a box nor a distance.
+  final int noGeometryGapUs;
+
+  /// Allowed shift of the box centre, in widths of the reference box.
+  final double centerTolerance;
+
+  /// Allowed ratio of box widths, new / reference.
+  final double minSizeRatio, maxSizeRatio;
+
+  /// Allowed difference of the face distance, metres (ARKit).
+  final double distanceToleranceM;
+
+  final Set<int> _aliases = {};
+  FaceBox? _referenceBox, _lastBox;
+  double? _referenceDistance, _lastDistance;
+  int? _lastSeenUs;
+  bool _lost = false;
+  ContinuityDecision _decision = ContinuityDecision.noFace;
+
+  ContinuityDecision get decision => _decision;
+
+  /// Returns [faces] with the calibrated id restored where the face is the
+  /// driver; everything else is passed on as is.
+  List<FaceSignals> resolve(int atUs, List<FaceSignals> faces) {
+    if (faces.isEmpty) {
+      _lost = true;
+      _decision = ContinuityDecision.noFace;
+      return faces;
+    }
+    if (faces.length > 1) {
+      _lost = true;
+      _decision = ContinuityDecision.ambiguous;
+      return faces;
+    }
+    final face = faces.single;
+    final id = face.trackingId;
+    final known =
+        id == trackingId ||
+        _aliases.contains(id) ||
+        (id == null && !_lost && _lastSeenUs != null);
+    if (known || _lastSeenUs == null && (id == null || id == trackingId)) {
+      _confirm(atUs, face);
+      _decision = ContinuityDecision.same;
+      return id == trackingId ? faces : [_withId(face)];
+    }
+    if (_matches(atUs, face)) {
+      if (id != null) _aliases.add(id);
+      _confirm(atUs, face);
+      _decision = ContinuityDecision.restored;
+      return [_withId(face)];
+    }
+    _decision = ContinuityDecision.different;
+    return faces;
+  }
+
+  void _confirm(int atUs, FaceSignals face) {
+    _lastSeenUs = atUs;
+    _lost = false;
+    if (face.box != null) {
+      _referenceBox ??= face.box;
+      _lastBox = face.box;
+    }
+    if (face.distanceM != null) {
+      _referenceDistance ??= face.distanceM;
+      _lastDistance = face.distanceM;
+    }
+  }
+
+  bool _matches(int atUs, FaceSignals face) {
+    final last = _lastSeenUs;
+    if (last == null) return false;
+    final gap = atUs - last;
+    final box = face.box, distance = face.distanceM;
+    final canBox = box != null && _referenceBox != null;
+    final canDistance = distance != null && _referenceDistance != null;
+    if (!canBox && !canDistance) return gap <= noGeometryGapUs;
+    if (gap > maxGapUs) return false;
+    if (canBox &&
+        !(_boxMatches(box, _referenceBox!) ||
+            (_lastBox != null && _boxMatches(box, _lastBox!)))) {
+      return false;
+    }
+    if (canDistance &&
+        !((distance - _referenceDistance!).abs() <= distanceToleranceM ||
+            (_lastDistance != null &&
+                (distance - _lastDistance!).abs() <= distanceToleranceM))) {
+      return false;
+    }
+    return true;
+  }
+
+  bool _boxMatches(FaceBox b, FaceBox ref) {
+    final ratio = b.width / ref.width;
+    final dx = b.centerX - ref.centerX, dy = b.centerY - ref.centerY;
+    final shift = (dx * dx + dy * dy) / (ref.width * ref.width);
+    return ratio >= minSizeRatio &&
+        ratio <= maxSizeRatio &&
+        shift <= centerTolerance * centerTolerance;
+  }
+
+  FaceSignals _withId(FaceSignals f) => FaceSignals(
+    engineId: f.engineId,
+    trackingId: trackingId,
+    tracked: f.tracked,
+    headYawLeft: f.headYawLeft,
+    headPitchDown: f.headPitchDown,
+    headRollRight: f.headRollRight,
+    gazeLeft: f.gazeLeft,
+    gazeDown: f.gazeDown,
+    eyeGazeLeft: f.eyeGazeLeft,
+    eyeGazeDown: f.eyeGazeDown,
+    eyeOpenLeft: f.eyeOpenLeft,
+    eyeOpenRight: f.eyeOpenRight,
+    distanceM: f.distanceM,
+    box: f.box,
+    blendshapes: f.blendshapes,
+  );
+}
+
+enum ContinuityDecision {
+  /// The calibrated face (or an id already taken back).
+  same('same'),
+
+  /// A new id taken back as the driver by geometry after a loss.
+  restored('restored'),
+
+  /// No face in the frame.
+  noFace('no_face'),
+
+  /// More than one face: the engine suspends observation (ФТ-02).
+  ambiguous('ambiguous'),
+
+  /// Another face, or too long a loss: the engine suspends observation.
+  different('different');
+
+  const ContinuityDecision(this.code);
+  final String code;
+}
