@@ -25,6 +25,8 @@ class AttentionSettings {
     this.headOnlyLookDown = false,
     this.distraction = false,
     this.mountRelative = false,
+    this.yawnJaw,
+    this.roadAdaptDegPerMin,
   });
 
   /// ТЗ acceptance mode: no extension is active.
@@ -61,14 +63,32 @@ class AttentionSettings {
   /// the change request is approved. See `lib/logic/mount.dart`.
   final bool mountRelative;
 
+  /// Yawn gate of [EyeGate] (with [gazeAwareEyes]): while the jawOpen
+  /// blendshape is at least this, lids narrowed by the yawn above the deep
+  /// closure do not accumulate `eyes_closed` time. Null: off. Needs
+  /// blendshapes (ARKit).
+  final double? yawnJaw;
+
+  /// Side mount ([mountRelative]): the road pose follows a slow drift of the
+  /// driver's posture at most this many degrees per minute (null: off), see
+  /// [RoadAdaptation].
+  final double? roadAdaptDegPerMin;
+
   bool get isAcceptance =>
-      !gazeAwareEyes && !headOnlyLookDown && !distraction && !mountRelative;
+      !gazeAwareEyes &&
+      !headOnlyLookDown &&
+      !distraction &&
+      !mountRelative &&
+      yawnJaw == null &&
+      roadAdaptDegPerMin == null;
 
   Map<String, Object?> toJson() => {
     'gazeAwareEyes': gazeAwareEyes,
     'headOnlyLookDown': headOnlyLookDown,
     'distraction': distraction,
     'mountRelative': mountRelative,
+    if (yawnJaw != null) 'yawnJaw': yawnJaw,
+    if (roadAdaptDegPerMin != null) 'roadAdaptDegPerMin': roadAdaptDegPerMin,
   };
 
   factory AttentionSettings.fromJson(Map<String, dynamic> json) =>
@@ -77,6 +97,8 @@ class AttentionSettings {
         headOnlyLookDown: (json['headOnlyLookDown'] as bool?) ?? false,
         distraction: (json['distraction'] as bool?) ?? false,
         mountRelative: (json['mountRelative'] as bool?) ?? false,
+        yawnJaw: (json['yawnJaw'] as num?)?.toDouble(),
+        roadAdaptDegPerMin: (json['roadAdaptDegPerMin'] as num?)?.toDouble(),
       );
 }
 
@@ -648,7 +670,8 @@ class GazeZoneTracker {
 enum EyeGateReason {
   none('none'),
   lookDown('look_down'),
-  squint('squint');
+  squint('squint'),
+  yawn('yawn');
 
   const EyeGateReason(this.code);
   final String code;
@@ -686,7 +709,15 @@ class EyeGate {
     this.squintOff = .35,
     this.deepOpen = .15,
     this.latchUs = 100000,
+    this.yawnJaw,
+    this.yawnHoldUs = 500000,
   });
+
+  /// jawOpen that turns the yawn sign on (null: off); it stays on while
+  /// jawOpen is at least 0.6 of it and for [yawnHoldUs] after that, because
+  /// the lids open again later than the jaw closes.
+  final double? yawnJaw;
+  final int yawnHoldUs;
 
   /// Eye-in-head downward angle, degrees, that turns looking down on; it
   /// stays on until the angle is below [lookDownGazeOff].
@@ -705,8 +736,8 @@ class EyeGate {
   final int latchUs;
 
   bool _armed = false, _latched = false, _squinting = false;
-  bool _eyesDown = false;
-  int? _ungatedSinceUs;
+  bool _eyesDown = false, _yawning = false;
+  int? _ungatedSinceUs, _yawnUntilUs;
 
   /// True while a closure is latched and the gate is held open.
   bool get latched => _latched;
@@ -726,7 +757,7 @@ class EyeGate {
     }
     final open = left >= threshold && right >= threshold;
     final closed = left < threshold && right < threshold;
-    final reason = _reason(face, zone, left, right, open, headOnly);
+    final reason = _reason(face, zone, left, right, open, headOnly, atUs);
     if (!closed || reason != EyeGateReason.none) {
       _ungatedSinceUs = null;
       if (open) _latched = false;
@@ -748,8 +779,21 @@ class EyeGate {
     double right,
     bool open,
     bool headOnly,
+    int atUs,
   ) {
     final deep = left <= deepOpen && right <= deepOpen;
+    final jaw = face.blendshape(Blendshape.jawOpen);
+    final yawnOn = yawnJaw;
+    if (yawnOn == null || jaw == null) {
+      _yawning = false;
+      _yawnUntilUs = null;
+    } else if (jaw >= (_yawning ? .6 * yawnOn : yawnOn)) {
+      _yawning = true;
+      _yawnUntilUs = atUs + yawnHoldUs;
+    } else {
+      _yawning = false;
+    }
+    final yawn = _yawning || (_yawnUntilUs != null && atUs <= _yawnUntilUs!);
     final gazeEngine =
         face.eyeGazeDown != null ||
         face.blendshape(Blendshape.eyeLookDownLeft) != null;
@@ -786,6 +830,7 @@ class EyeGate {
         squint != null && squint >= (_squinting ? squintOff : squintBlend);
     if (deep) return EyeGateReason.none;
     if (_squinting) return EyeGateReason.squint;
+    if (yawn) return EyeGateReason.yawn;
     if (lookingDown && _armed) return EyeGateReason.lookDown;
     return EyeGateReason.none;
   }
@@ -795,6 +840,8 @@ class EyeGate {
     _latched = false;
     _squinting = false;
     _eyesDown = false;
+    _yawning = false;
+    _yawnUntilUs = null;
     _ungatedSinceUs = null;
   }
 
@@ -1027,7 +1074,7 @@ class AttentionPipeline {
     DistractionMonitor? distraction,
     DriverContinuity? continuity,
   }) : zones = _zonesFor(calibration, zones, settings),
-       eyeGate = eyeGate ?? EyeGate(),
+       eyeGate = eyeGate ?? EyeGate(yawnJaw: settings.yawnJaw),
        distractionMonitor = distraction ?? DistractionMonitor(),
        continuity =
            continuity ?? DriverContinuity(trackingId: calibration.trackingId),
@@ -1036,7 +1083,11 @@ class AttentionPipeline {
            : null,
        engineCalibration = settings.mountRelative
            ? roadProfile(calibration)
-           : calibration {
+           : calibration,
+       roadAdaptation =
+           settings.mountRelative && settings.roadAdaptDegPerMin != null
+           ? RoadAdaptation(degPerMin: settings.roadAdaptDegPerMin!)
+           : null {
     tracker = GazeZoneTracker(this.zones);
   }
 
@@ -1064,6 +1115,9 @@ class AttentionPipeline {
 
   /// Road pose for [AttentionSettings.mountRelative], else null.
   final RoadFrame? road;
+
+  /// Slow drift of the road pose for the automata, when enabled.
+  final RoadAdaptation? roadAdaptation;
   final ZoneMap zones;
   final AttentionSettings settings;
   final EyeGate eyeGate;
@@ -1103,6 +1157,14 @@ class AttentionPipeline {
         ? usable.single
         : null;
     final zone = tracker.update(capturedUs, driver);
+    final adaptation = roadAdaptation;
+    if (adaptation != null &&
+        driver != null &&
+        zone == GazeZone.road &&
+        !tzSignActive) {
+      final h = road!.head(driver);
+      if (h != null) adaptation.observe(capturedUs, adaptation.apply(h));
+    }
     var gate = EyeGateReason.none;
     final threshold = calibration.eyeThreshold;
     if (driver != null && settings.gazeAwareEyes && threshold != null) {
@@ -1168,7 +1230,7 @@ class AttentionPipeline {
       if (head == null) {
         yaw = pitch = roll = null;
       } else {
-        (yaw, pitch, roll) = head;
+        (yaw, pitch, roll) = roadAdaptation?.apply(head) ?? head;
       }
     }
     if (eyes && road == null && m.trackingId != null) return m;

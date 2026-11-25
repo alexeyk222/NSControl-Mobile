@@ -106,7 +106,7 @@ void main() {
           ),
         ]);
         expect(report, contains('# Прогон записи synthetic-${style.name}'));
-        expect(report, contains('приёмка (только ТЗ)'));
+        expect(report, contains('ТЗ 2.2 (эталон)'));
         expect(report, contains('| mirror_left #2 |'));
         expect(report, contains('**Итог: ложных тревог ТЗ 0, пропусков 0.**'));
         expect(report, contains('| intersection_scan | off_road |'));
@@ -347,7 +347,7 @@ void main() {
             runner.run(ReplayOptions(engine: engine, attention: mode)),
       ]);
       for (final engine in [arkit, mlKit]) {
-        expect(report, contains('## $engine, приёмка (только ТЗ)'));
+        expect(report, contains('## $engine, ТЗ 2.2 (эталон)'));
         expect(report, contains('## $engine, расширения'));
       }
       expect(report, isNot(contains('пропущено строк')));

@@ -10,6 +10,7 @@ class AlgorithmSettings {
     this.vibration = true,
     this.showPreview = true,
     this.escalate = true,
+    this.maximumGapUs = 300000,
   }) {
     if (eyesClosedUs < 1000000 ||
         eyesClosedUs > 3000000 ||
@@ -25,6 +26,9 @@ class AlgorithmSettings {
         headYawLimit < 20 ||
         headYawLimit > 45 ||
         headYawLimit != headYawLimit.roundToDouble() ||
+        maximumGapUs < 100000 ||
+        maximumGapUs >= 1000000 ||
+        maximumGapUs % 50000 != 0 ||
         !volume.isFinite ||
         volume < 0 ||
         volume > 1) {
@@ -43,6 +47,11 @@ class AlgorithmSettings {
   final bool escalate;
   static const escalationDelayUs = 5000000;
 
+  /// A frame gap longer than this resets a channel (ТЗ 2.2: 300 ms). A
+  /// detection profile may allow longer gaps: short tracking losses must
+  /// not reset the timer (ADDW 2023/2590, § 3.3.2.4).
+  final int maximumGapUs;
+
   Map<String, Object?> toJson() => {
     'eyesClosedUs': eyesClosedUs,
     'headDownUs': headDownUs,
@@ -53,6 +62,7 @@ class AlgorithmSettings {
     'vibration': vibration,
     'showPreview': showPreview,
     'escalate': escalate,
+    if (maximumGapUs != 300000) 'maximumGapUs': maximumGapUs,
   };
 
   factory AlgorithmSettings.fromJson(Map<String, dynamic> json) =>
@@ -66,6 +76,7 @@ class AlgorithmSettings {
         vibration: _boolean(json['vibration'], true),
         showPreview: _boolean(json['showPreview'], true),
         escalate: _boolean(json['escalate'], true),
+        maximumGapUs: _integer(json['maximumGapUs'], 300000),
       );
 }
 

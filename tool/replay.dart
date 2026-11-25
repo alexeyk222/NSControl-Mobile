@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:nscontrol/logic/attention_zones.dart';
+import 'package:nscontrol/logic/detection_profile.dart';
 import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/logic/synthetic.dart';
 
@@ -10,13 +12,13 @@ import 'package:nscontrol/logic/synthetic.dart';
 /// Usage: see [_usage] or run with `--help`.
 const _usage = '''
 Прогон записи:
-  dart run tool/replay.dart <file.jsonl> [--engine <id>] [--mode both|acceptance|lab] [--recalibrate] [--out report.md]
+  dart run tool/replay.dart <file.jsonl> [--engine <id>] [--mode both|acceptance|lab|camera|all] [--profile v1] [--recalibrate] [--out report.md]
 Синтетическая запись:
   dart run tool/replay.dart --synthetic arkit|mlkit|arkit-mlkit --write <file.jsonl>
 ''';
 
 Future<void> main(List<String> args) async {
-  String? file, engine, out, synthetic, write;
+  String? file, engine, out, synthetic, write, profileId;
   var mode = 'both';
   var recalibrate = false;
   for (var i = 0; i < args.length; i++) {
@@ -34,6 +36,8 @@ Future<void> main(List<String> args) async {
         out = next();
       case '--recalibrate':
         recalibrate = true;
+      case '--profile':
+        profileId = next();
       case '--synthetic':
         synthetic = next();
       case '--write':
@@ -63,29 +67,50 @@ Future<void> main(List<String> args) async {
     return;
   }
   if (file == null) _fail(_usage);
-  final recording = Recording.parse(await File(file).readAsString());
+  final recording = Recording.parse(await readRecording(file));
+  final profile = profileId == null ? null : DetectionProfile.byId(profileId);
   final engines = engine == null ? recording.engines : [engine];
-  final modes = switch (mode) {
-    'acceptance' => [const AttentionSettings.acceptance()],
-    'lab' => [AttentionSettings.lab],
-    'both' => [const AttentionSettings.acceptance(), AttentionSettings.lab],
-    _ => _fail('--mode принимает both, acceptance или lab'),
-  };
+  final modes = <AttentionSettings>[
+    ...switch (mode) {
+      'acceptance' => [const AttentionSettings.acceptance()],
+      'lab' => [AttentionSettings.lab],
+      'both' => [const AttentionSettings.acceptance(), AttentionSettings.lab],
+      // Lab extensions with angles relative to the camera (lab builds before
+      // the side-mount calibration).
+      'camera' => [_cameraLab],
+      'all' => [
+        const AttentionSettings.acceptance(),
+        _cameraLab,
+        AttentionSettings.lab,
+      ],
+      _ => _fail('--mode принимает both, acceptance, lab, camera или all'),
+    },
+  ];
+  if (profile != null && mode != 'acceptance') {
+    // The reference and the profile.
+    modes
+      ..clear()
+      ..addAll([const AttentionSettings.acceptance(), AttentionSettings.lab]);
+  }
   final runner = ReplayRunner(recording);
   final results = <ReplayResult>[];
   final errors = <String>[];
   for (final e in engines) {
     for (final m in modes) {
+      final options = ReplayOptions(
+        engine: e,
+        attention: m,
+        recalibrate: recalibrate,
+        // With --profile the reference stays as it is and the profile
+        // replaces the other modes.
+        profile: profile != null && !m.isAcceptance ? profile : null,
+      );
       try {
-        results.add(
-          runner.run(
-            ReplayOptions(engine: e, attention: m, recalibrate: recalibrate),
-          ),
-        );
+        results.add(runner.run(options));
       } catch (error) {
         // One engine that cannot be replayed must not hide the others.
         errors.add(
-          '- $e, ${m.isAcceptance ? 'приёмка' : 'расширения'}: $error',
+          '- $e, ${options.profile?.label ?? (m.isAcceptance ? 'ТЗ 2.2 (эталон)' : 'расширения')}: $error',
         );
         stderr.writeln('$e: $error');
       }
@@ -107,4 +132,12 @@ Future<void> main(List<String> args) async {
 Never _fail(String message) {
   stderr.writeln(message);
   exit(64);
+}
+
+const _cameraLab = AttentionSettings(gazeAwareEyes: true, distraction: true);
+
+/// A recording, plain or gzip-compressed (`.gz`).
+Future<String> readRecording(String path) async {
+  final bytes = await File(path).readAsBytes();
+  return utf8.decode(path.endsWith('.gz') ? gzip.decode(bytes) : bytes);
 }

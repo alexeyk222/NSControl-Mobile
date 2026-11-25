@@ -29,7 +29,17 @@ class CalibrationProfile {
     this.leftEyeMedian,
     this.rightEyeMedian,
     this.eyeThreshold,
+    this.eyeShare = defaultEyeShare,
+    this.eyeCap = defaultEyeCap,
   }) {
+    if (!eyeShare.isFinite ||
+        eyeShare <= 0 ||
+        eyeShare > 1 ||
+        !eyeCap.isFinite ||
+        eyeCap <= 0 ||
+        eyeCap > 1) {
+      throw ArgumentError('Некорректное правило глазного порога');
+    }
     if (!detector.valid ||
         !FaceMeasurement.angle(neutralPitch) ||
         !FaceMeasurement.angle(neutralYaw) ||
@@ -52,8 +62,8 @@ class CalibrationProfile {
         !eyeThreshold!.isFinite ||
         (eyeThreshold! -
                     math.min(
-                      .4,
-                      .5 * math.min(leftEyeMedian!, rightEyeMedian!),
+                      eyeCap,
+                      eyeShare * math.min(leftEyeMedian!, rightEyeMedian!),
                     ))
                 .abs() >
             1e-12 ||
@@ -67,6 +77,39 @@ class CalibrationProfile {
   final double neutralPitch, neutralYaw, neutralRoll;
   final double? leftEyeMedian, rightEyeMedian, eyeThreshold;
 
+  /// Eye threshold rule T = min(eyeCap, eyeShare · min(eye medians)). ТЗ 2.2:
+  /// share 0.5, cap 0.4; a detection profile may tune both.
+  final double eyeShare, eyeCap;
+  static const defaultEyeShare = .5, defaultEyeCap = .4;
+
+  /// T of the rule for the given eye medians.
+  static double thresholdFor(
+    double left,
+    double right, {
+    double share = defaultEyeShare,
+    double cap = defaultEyeCap,
+  }) => math.min(cap, share * math.min(left, right));
+
+  /// The same calibration with another eye threshold rule.
+  CalibrationProfile withEyeRule({
+    required double share,
+    required double cap,
+  }) => CalibrationProfile(
+    trackingId: trackingId,
+    detector: detector,
+    hiddenEyes: hiddenEyes,
+    neutralPitch: neutralPitch,
+    neutralYaw: neutralYaw,
+    neutralRoll: neutralRoll,
+    leftEyeMedian: leftEyeMedian,
+    rightEyeMedian: rightEyeMedian,
+    eyeThreshold: hiddenEyes
+        ? null
+        : thresholdFor(leftEyeMedian!, rightEyeMedian!, share: share, cap: cap),
+    eyeShare: share,
+    eyeCap: cap,
+  );
+
   Map<String, Object?> toJson() => {
     'trackingId': trackingId,
     'detector': detector.toJson(),
@@ -77,6 +120,8 @@ class CalibrationProfile {
     'leftEyeMedian': leftEyeMedian,
     'rightEyeMedian': rightEyeMedian,
     'eyeThreshold': eyeThreshold,
+    if (eyeShare != defaultEyeShare) 'eyeShare': eyeShare,
+    if (eyeCap != defaultEyeCap) 'eyeCap': eyeCap,
   };
 
   factory CalibrationProfile.fromJson(Map<String, dynamic> json) =>
@@ -92,6 +137,8 @@ class CalibrationProfile {
         leftEyeMedian: (json['leftEyeMedian'] as num?)?.toDouble(),
         rightEyeMedian: (json['rightEyeMedian'] as num?)?.toDouble(),
         eyeThreshold: (json['eyeThreshold'] as num?)?.toDouble(),
+        eyeShare: (json['eyeShare'] as num?)?.toDouble() ?? defaultEyeShare,
+        eyeCap: (json['eyeCap'] as num?)?.toDouble() ?? defaultEyeCap,
       );
 }
 

@@ -261,6 +261,8 @@ CalibrationProfile roadProfile(CalibrationProfile p) => CalibrationProfile(
   leftEyeMedian: p.leftEyeMedian,
   rightEyeMedian: p.rightEyeMedian,
   eyeThreshold: p.eyeThreshold,
+  eyeShare: p.eyeShare,
+  eyeCap: p.eyeCap,
 );
 
 class MountCalibrationResult {
@@ -458,5 +460,66 @@ class MountCalibrationCollector {
       viewYaw: yaw,
       note: profile == null ? null : note,
     );
+  }
+}
+
+/// Slow drift of the road pose (side mount): over minutes a driver settles
+/// into the seat and the head pose while looking at the road moves away from
+/// the calibrated one (session 1: about 8° in 11 min). The head angles for
+/// the automata are then taken relative to the calibrated road pose turned
+/// by a small correction, which follows the median head pose of the frames
+/// in the road zone while no automaton has a sign.
+///
+/// The correction moves at most [degPerMin] degrees per minute and never
+/// beyond [maxOffset] from the calibration, and only frames within
+/// [sampleLimit] of the current road pose count, so a lowered head or a
+/// glance elsewhere cannot pull it: a slow droop from fatigue is followed
+/// for at most [maxOffset].
+class RoadAdaptation {
+  RoadAdaptation({
+    required this.degPerMin,
+    this.windowUs = 120000000,
+    this.minSpanUs = 30000000,
+    this.updateEveryUs = 5000000,
+    this.maxOffset = 10,
+    this.sampleLimit = 7,
+  });
+  final double degPerMin, maxOffset, sampleLimit;
+  final int windowUs, minSpanUs, updateEveryUs;
+
+  /// The correction (yaw left, pitch down) from the calibrated road pose.
+  double yaw = 0, pitch = 0;
+  final List<(int, double, double)> _samples = [];
+  int? _lastUpdateUs;
+
+  /// Head angles relative to the corrected road pose, from angles relative
+  /// to the calibrated one.
+  (double, double, double) apply((double, double, double) h) {
+    if (yaw == 0 && pitch == 0) return h;
+    final c = Rotation3.fromAngles(yaw, pitch, 0);
+    return (c.transposed * Rotation3.fromAngles(h.$1, h.$2, h.$3)).angles;
+  }
+
+  /// A road-zone frame without a sign: [adjusted] are the head angles
+  /// relative to the corrected road pose.
+  void observe(int atUs, (double, double, double) adjusted) {
+    if (adjusted.$1.abs() > 2 * sampleLimit ||
+        adjusted.$2.abs() > sampleLimit) {
+      return;
+    }
+    _samples.add((atUs, adjusted.$1 + yaw, adjusted.$2 + pitch));
+    while (_samples.isNotEmpty && atUs - _samples.first.$1 > windowUs) {
+      _samples.removeAt(0);
+    }
+    final last = _lastUpdateUs;
+    if (last != null && atUs - last < updateEveryUs) return;
+    if (atUs - _samples.first.$1 < minSpanUs) return;
+    final step =
+        degPerMin * (last == null ? updateEveryUs : atUs - last) / 60e6;
+    double toward(double from, double to) =>
+        (from + (to - from).clamp(-step, step)).clamp(-maxOffset, maxOffset);
+    yaw = toward(yaw, median(_samples.map((s) => s.$2)));
+    pitch = toward(pitch, median(_samples.map((s) => s.$3)));
+    _lastUpdateUs = atUs;
   }
 }

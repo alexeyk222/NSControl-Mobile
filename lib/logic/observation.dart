@@ -231,6 +231,9 @@ class ObservationEngine {
     if (calibration.hiddenEyes) _eyes.reason = ChannelReason.hiddenEyes;
   }
   static const algorithmVersion = '1.0.0';
+
+  /// Processing latency above this rejects the frame (ТЗ 2.2); the gap
+  /// tolerance of the channels is [AlgorithmSettings.maximumGapUs].
   static const maximumGapUs = 300000;
   final String sessionId;
   final CalibrationProfile calibration;
@@ -392,7 +395,7 @@ class ObservationEngine {
     for (final c in [_eyes, _head]) {
       if (c == _eyes && settings.hiddenEyes) continue;
       final gap = nowUs - (c.lastUsableUs ?? 0);
-      if (gap > maximumGapUs && c.available) {
+      if (gap > settings.maximumGapUs && c.available) {
         _invalidate(c, ChannelReason.observationGap, nowUs, ended);
       }
       if (gap >= 1000000) {
