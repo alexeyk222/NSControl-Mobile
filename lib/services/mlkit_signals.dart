@@ -8,11 +8,12 @@ import '../logic/domain.dart';
 ///
 /// [yawSign] and [rollSign] are for an unmirrored image. A mirrored image
 /// (iOS front camera through the camera plugin) flips left and right: yaw and
-/// roll change sign, ML Kit's left eye is the driver's right one, and the box
-/// is flipped. iPhone 11, `signs-v1` 2026-11-25 (mirrored frames): head
+/// roll change sign and the box is flipped. The eyes are not swapped: with
+/// the phone on the left vent the eye ML Kit calls left on the mirrored frame
+/// is the driver's left one (checked against ARKit eye geometry, 2026-11-25). iPhone 11, `signs-v1` 2026-11-25 (mirrored frames): head
 /// turned to the driver's left gave Euler Y ≈ −34°, head down gave pitch
-/// ≈ +34°, so [yawSign] = +1 for unmirrored frames. Roll and the eye side are
-/// still to be confirmed. The ТЗ automata only use |yaw| and yaw relative to
+/// ≈ +34°, so [yawSign] = +1 for unmirrored frames. Roll is still weak in
+/// the recordings. The ТЗ automata only use |yaw| and yaw relative to
 /// the calibration, so a sign flip does not change them.
 abstract final class MlKitSignals {
   static const engineId = 'mlkit_face_detection';
@@ -36,8 +37,8 @@ abstract final class MlKitSignals {
       headPitchDown: eulerX == null ? null : -eulerX,
       headYawLeft: eulerY == null ? null : flip * yawSign * eulerY,
       headRollRight: eulerZ == null ? null : flip * rollSign * eulerZ,
-      eyeOpenLeft: mirrored ? rightEyeOpen : leftEyeOpen,
-      eyeOpenRight: mirrored ? leftEyeOpen : rightEyeOpen,
+      eyeOpenLeft: leftEyeOpen,
+      eyeOpenRight: rightEyeOpen,
       box: box,
     );
   }
