@@ -34,16 +34,20 @@ cd watchos && xcodegen generate
 open NSControlWatch.xcodeproj   # Signing: та же Personal Team, что у Runner
 ```
 
-### Встроить часы в сборку iOS (нужно сделать на Mac)
+### Установка часов при бесплатном профиле (Personal Team)
 
-Быстрый путь без правки `Runner.xcodeproj`: `bash tools/build_ios.sh --with-watch` собирает приложение часов, кладёт его в `Runner.app/Watch/` и заново подписывает Runner.app его же сертификатом и entitlements. Подпись часов не меняется. Перед первой установкой такой сборки удалите с часов отдельно поставленную копию: иначе iOS показывает «Сопряжено», но не считает её компаньоном, и WCSession не поднимается. Способ ниже через Xcode остаётся для постоянного решения.
+**Через приложение Watch на iPhone без платного аккаунта поставить не получится.** Проверено 25.11.2026: Runner.app с вложенной папкой `Watch/` (`bash tools/build_ios.sh --with-watch`) передаёт приложение на часы, но часы его отклоняют: `MIInstallerErrorDomain 111, ApplicationVerificationFailed` в логе `appconduitd`. Приложения с профилем Personal Team watchOS принимает только при прямой установке с Mac. Встраивание через Xcode (Embed Watch Content) упирается в то же ограничение: оно доставляет часы тем же companion sync.
 
-Сейчас приложение часов ставится отдельно из своего проекта. Для Watch Connectivity и `startWatchApp` этого хватает: совпадает companion bundle ID. Для единого комплекта поставки (МК-01) приложение часов должно лежать внутри Runner.app. Вслепую править `Runner.xcodeproj` из облака рискованно, поэтому это делается в Xcode:
+Рабочий порядок для стенда:
 
-1. `cd watchos && xcodegen generate`, затем в `ios/Runner.xcworkspace` File → Add Files → `watchos/NSControlWatch.xcodeproj`.
-2. Runner → Build Phases → Target Dependencies → + `NSControlWatch`.
-3. Runner → Build Phases → + New Copy Files Phase, назвать «Embed Watch Content», Destination: Products Directory, Subpath: `$(CONTENTS_FOLDER_PATH)/Watch`, добавить `NSControlWatch.app`.
-4. Собрать Runner на iPhone. Приложение часов должно поставиться само (Watch на iPhone → NSControl → «Показывать на Apple Watch»).
+1. На iPhone поставить Runner (можно с `Watch/` внутри, он не мешает).
+2. Удалить с часов старую копию NSControl, если она есть.
+3. Поставить приложение часов напрямую с Mac: Xcode → схема NSControlWatch → устройство Apple Watch → Run, или `xcrun devicectl device install app --device <UDID часов> <путь>/NSControlWatch.app`. Подпись та же Personal Team, что у Runner, bundle ID `org.nscontrol.nscontrol.watchkitapp`, `WKCompanionAppBundleIdentifier = org.nscontrol.nscontrol`.
+4. Открыть NSControl на часах, затем на iPhone. В «Сон и часы» должно появиться «Часы на связи» и «Обмен временем установлен».
+
+Именно так Xcode ставит часы при обычной разработке, и WatchConnectivity признаёт такую копию компаньоном по совпадающему bundle ID и команде. Если после шага 4 iPhone всё равно пишет «Приложение NSControl не установлено на часах», это ограничение бесплатного профиля для пары. Тогда нужен платный Apple Developer Program, обходного пути нет. Срок действия бесплатного профиля 7 дней на обоих устройствах, после этого переустановить оба приложения.
+
+Для поставки (МК-01) приложение часов должно лежать внутри Runner.app (Embed Watch Content). Ставить его через приложение Watch можно только с платной подписью.
 
 Если Xcode ругается на HealthKit у цели часов: Signing & Capabilities → + Capability → HealthKit (entitlement уже в `Support/NSControlWatch.entitlements`). Runner пересобрать тоже нужно: в нём новый метод `wearable.prepare`.
 
