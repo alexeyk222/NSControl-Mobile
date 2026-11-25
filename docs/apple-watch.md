@@ -36,6 +36,8 @@ open NSControlWatch.xcodeproj   # Signing: та же Personal Team, что у Ru
 
 ### Встроить часы в сборку iOS (нужно сделать на Mac)
 
+Быстрый путь без правки `Runner.xcodeproj`: `bash tools/build_ios.sh --with-watch` собирает приложение часов, кладёт его в `Runner.app/Watch/` и заново подписывает Runner.app его же сертификатом и entitlements. Подпись часов не меняется. Перед первой установкой такой сборки удалите с часов отдельно поставленную копию: иначе iOS показывает «Сопряжено», но не считает её компаньоном, и WCSession не поднимается. Способ ниже через Xcode остаётся для постоянного решения.
+
 Сейчас приложение часов ставится отдельно из своего проекта. Для Watch Connectivity и `startWatchApp` этого хватает: совпадает companion bundle ID. Для единого комплекта поставки (МК-01) приложение часов должно лежать внутри Runner.app. Вслепую править `Runner.xcodeproj` из облака рискованно, поэтому это делается в Xcode:
 
 1. `cd watchos && xcodegen generate`, затем в `ios/Runner.xcworkspace` File → Add Files → `watchos/NSControlWatch.xcodeproj`.

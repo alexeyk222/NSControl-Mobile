@@ -5,6 +5,7 @@
 #
 #   bash tools/build_ios.sh               # build + install
 #   bash tools/build_ios.sh --build-only  # build only
+#   bash tools/build_ios.sh --with-watch  # also embed the watch app (any order)
 #
 # Env: NSCONTROL_XCODE (path to Xcode.app), NSCONTROL_TEAM (Apple team ID;
 # auto-detected from the keychain when omitted), NSCONTROL_NO_HEALTHKIT=1
@@ -13,7 +14,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 install=true
-[[ "${1:-}" == "--build-only" ]] && install=false
+with_watch=false
+for arg in "$@"; do
+  case "$arg" in
+    --build-only) install=false ;;
+    --with-watch) with_watch=true ;;
+    *) echo "Unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 xcode="${NSCONTROL_XCODE:-}"
 if [[ -z "$xcode" ]]; then
@@ -58,6 +66,29 @@ xcodebuild -workspace ios/Runner.xcworkspace -scheme Runner -configuration Relea
   build | grep -E "error:|warning: .*(sign|provision)|BUILD (SUCCEEDED|FAILED)|Signing Identity|Provisioning Profile" || true
 app="build/ios/derived/Build/Products/Release-iphoneos/Runner.app"
 [[ -d "$app" ]] || { echo "Signed build failed" >&2; exit 1; }
+if $with_watch; then
+  # The watch app must sit inside Runner.app/Watch, otherwise iOS treats the
+  # separately installed copy as a stranger and WCSession never activates
+  # ("paired" but not installed). This embeds it after the build instead of
+  # editing Runner.xcodeproj, then re-seals Runner.app with its own identity
+  # and entitlements; the watch app keeps its own signature.
+  (cd watchos && xcodegen generate --quiet)
+  xcodebuild -project watchos/NSControlWatch.xcodeproj -scheme NSControlWatch -configuration Release \
+    -destination 'generic/platform=watchOS' -derivedDataPath build/watch-derived \
+    -allowProvisioningUpdates -allowProvisioningDeviceRegistration DEVELOPMENT_TEAM="$team" \
+    clean build | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+  watch_app="build/watch-derived/Build/Products/Release-watchos/NSControlWatch.app"
+  [[ -d "$watch_app" ]] || { echo "Watch build failed" >&2; exit 1; }
+  rm -rf "$app/Watch" && mkdir -p "$app/Watch" && cp -R "$watch_app" "$app/Watch/"
+  identity="$(codesign -dvv "$app" 2>&1 | sed -n 's/^Authority=\(Apple Development.*\)$/\1/p' | head -1)"
+  sha="$(security find-identity -v -p codesigning | grep -F "\"$identity\"" | awk '{print $2}' | head -1)"
+  [[ -n "$sha" ]] || { echo "Signing identity not found: $identity" >&2; exit 1; }
+  codesign -d --entitlements - --xml "$app" > build/ios/runner-entitlements.plist 2>/dev/null
+  codesign --force --sign "$sha" --entitlements build/ios/runner-entitlements.plist \
+    --generate-entitlement-der "$app"
+  codesign --verify --deep --strict "$app"
+  echo "Embedded: $app/Watch/NSControlWatch.app"
+fi
 codesign -dv "$app" 2>&1 | grep -E "Identifier|TeamIdentifier|Authority=Apple Development" || true
 echo "App: $app"
 $install || exit 0
