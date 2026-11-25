@@ -1,7 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
-import 'package:nscontrol/logic/replay.dart' show channelSignActive;
 
 final profile = CalibrationProfile(
   trackingId: 1,
@@ -282,6 +281,43 @@ void main() {
       );
     });
 
+    test('squint has hysteresis: on at 0.45, off below 0.35', () {
+      final gate = EyeGate();
+      EyeGateReason step(double squint) => gate.evaluate(
+        face: arkit(open: .3, squint: squint),
+        zone: GazeZone.road,
+        threshold: .4,
+        headOnly: false,
+      );
+      expect(step(.42), EyeGateReason.none);
+      expect(step(.45), EyeGateReason.squint);
+      expect(step(.36), EyeGateReason.squint);
+      expect(step(.34), EyeGateReason.none);
+      expect(step(.42), EyeGateReason.none);
+    });
+
+    test(
+      'looking down has hysteresis: on at 12° or 0.35, off below 9° and 0.25',
+      () {
+        final gate = EyeGate();
+        EyeGateReason step(double eyeDown, double lookDown, double open) =>
+            gate.evaluate(
+              face: arkit(eyeDown: eyeDown, lookDown: lookDown, open: open),
+              zone: GazeZone.road,
+              threshold: .4,
+              headOnly: false,
+            );
+        step(11, .2, .8);
+        expect(step(11, .2, .3), EyeGateReason.none, reason: 'not on yet');
+        step(12, .2, .8);
+        expect(step(9.5, .2, .3), EyeGateReason.lookDown);
+        expect(step(8, .3, .3), EyeGateReason.lookDown, reason: 'blend ≥ 0.25');
+        expect(step(8, .2, .3), EyeGateReason.none);
+        step(5, .36, .8);
+        expect(step(5, .26, .3), EyeGateReason.lookDown);
+      },
+    );
+
     test('engines without gaze need the head-only flag', () {
       final frames = [mlkit(pitch: 12, open: .8), mlkit(pitch: 12, open: .3)];
       expect(run(EyeGate(), frames), EyeGateReason.none);
@@ -290,9 +326,14 @@ void main() {
   });
 
   group('closure latch', () {
-    /// Road, then a real closure at openness 0.2–0.3 while eyeSquint jumps
-    /// between 0.4 and 0.5 and eyeLookDown grows (ARKit-like artefacts).
-    ({ObservationEvent? event, int closedAtUs, bool cut}) run(EyeGate gate) {
+    /// 1 s on the road, then [frames] frames of [closure] (ARKit-like: the
+    /// engine also reports the closed eye as looking down). Returns the first
+    /// event and whether an active event was cut.
+    ({ObservationEvent? event, int closedAtUs, bool cut}) run(
+      EyeGate gate,
+      FaceSignals Function(int i) closure, {
+      int frames = 75,
+    }) {
       final engine = ObservationEngine(sessionId: 's', calibration: profile);
       final p = AttentionPipeline(
         calibration: profile,
@@ -300,7 +341,7 @@ void main() {
         eyeGate: gate,
       );
       var us = 0;
-      var eyesSign = false, cut = false;
+      var eyesEvent = false, cut = false, closing = false;
       ObservationEvent? event;
       void frame(FaceSignals f) {
         us += 33333;
@@ -308,34 +349,55 @@ void main() {
           sessionId: 's',
           capturedUs: us,
           completedUs: us + 20000,
-          faces: p.process(us, [f], eyesSignActive: eyesSign).measurements,
+          faces: p.process(us, [f], eyesEventActive: eyesEvent).measurements,
         );
         if (u.started.isNotEmpty) event ??= u.started.first;
-        if (u.ended.isNotEmpty) cut = true;
-        eyesSign = channelSignActive(u.snapshot.eyes);
+        if (u.ended.isNotEmpty && closing) cut = true;
+        eyesEvent = u.snapshot.eyes.activeEvent != null;
       }
 
       for (var i = 0; i < 30; i++) {
         frame(arkit());
       }
       final closedAt = us + 33333;
-      for (var i = 0; i < 75; i++) {
-        frame(
-          arkit(
-            open: i.isEven ? .2 : .3,
-            squint: i % 3 == 0 ? .5 : .4,
-            eyeDown: i < 15 ? i.toDouble() : 15,
-            lookDown: (.3 + i * .01).clamp(0, .8).toDouble(),
-          ),
-        );
+      closing = true;
+      for (var i = 0; i < frames; i++) {
+        frame(closure(i));
+      }
+      closing = false;
+      for (var i = 0; i < 15; i++) {
+        frame(arkit());
       }
       return (event: event, closedAtUs: closedAt, cut: cut);
     }
 
-    test('a flickering squint does not reset the 1.5 s count', () {
-      final r = run(EyeGate());
-      expect(r.event, isNotNull);
-      expect(r.event!.type, EventType.eyesClosed);
+    /// eyeSquint jumping between 0.42 and 0.5, as in laughter.
+    double jumping(int i) => i % 3 == 2 ? .5 : .42;
+
+    /// Closed-eye artefact: the eye "looks down" more and more.
+    FaceSignals closed(int i, {required double open, required double squint}) =>
+        arkit(
+          open: open,
+          squint: squint,
+          eyeDown: i < 15 ? i.toDouble() : 15,
+          lookDown: (.3 + i * .01).clamp(0, .8).toDouble(),
+        );
+
+    test('laughter: 3 s at openness 0.25 with a jumping squint, no event', () {
+      final r = run(
+        EyeGate(),
+        (i) => arkit(open: .25, squint: jumping(i)),
+        frames: 90,
+      );
+      expect(r.event, isNull);
+    });
+
+    test('a real closure with the same jumping squint is found', () {
+      final r = run(
+        EyeGate(),
+        (i) => closed(i, open: i.isEven ? .05 : .1, squint: jumping(i)),
+      );
+      expect(r.event?.type, EventType.eyesClosed);
       expect(
         r.event!.thresholdUs - r.closedAtUs,
         inInclusiveRange(1500000, 1700000),
@@ -343,20 +405,60 @@ void main() {
       expect(r.cut, isFalse, reason: 'the active event must not be cut');
     });
 
+    // A closure that starts without a squint and is then joined by one
+    // (lids squeezed): latched after 100 ms, the squint changes nothing.
+    FaceSignals squeezed(int i) =>
+        closed(i, open: i.isEven ? .2 : .3, squint: i < 5 ? .3 : jumping(i));
+
+    test('a latched closure is not reset by a squint joining it', () {
+      final r = run(EyeGate(), squeezed);
+      expect(r.event?.type, EventType.eyesClosed);
+      expect(
+        r.event!.thresholdUs - r.closedAtUs,
+        inInclusiveRange(1500000, 1700000),
+      );
+      expect(r.cut, isFalse);
+    });
+
     test('without the latch the same closure would be lost', () {
-      final r = run(EyeGate(latchUs: 1 << 40));
-      expect(r.event, isNull);
+      expect(run(EyeGate(latchUs: 1 << 40), squeezed).event, isNull);
+    });
+
+    test('ungated frames latch only when they last 100 ms in a row', () {
+      final gate = EyeGate();
+      var us = 0;
+      void step(double squint) {
+        us += 33333;
+        gate.evaluate(
+          face: arkit(open: .3, squint: squint),
+          zone: GazeZone.road,
+          threshold: .4,
+          headOnly: false,
+          atUs: us,
+        );
+      }
+
+      // Two ungated frames, a squint, two more, a squint, ... never 100 ms.
+      for (var i = 0; i < 30; i++) {
+        step(i % 3 == 2 ? .5 : .3);
+      }
+      expect(gate.latched, isFalse);
+      for (var i = 0; i < 4; i++) {
+        step(.3);
+      }
+      expect(gate.latched, isFalse, reason: '99.9 ms');
+      step(.3);
+      expect(gate.latched, isTrue);
     });
 
     test('the latch releases when both eyes are open again', () {
       final gate = EyeGate();
-      final map = ZoneMap.fromCalibration(profile);
       var us = 0;
       EyeGateReason step(FaceSignals f) {
         us += 33333;
         return gate.evaluate(
           face: f,
-          zone: map.classify(map.directionOf(f)!),
+          zone: GazeZone.road,
           threshold: .4,
           headOnly: false,
           atUs: us,
@@ -364,7 +466,7 @@ void main() {
       }
 
       for (var i = 0; i < 6; i++) {
-        step(arkit(open: .3, squint: i.isEven ? .5 : .4));
+        step(arkit(open: .3, squint: i < 5 ? .3 : .5));
       }
       expect(gate.latched, isTrue);
       expect(step(arkit(open: .3, squint: .7)), EyeGateReason.none);
@@ -373,7 +475,7 @@ void main() {
       expect(step(arkit(open: .3, squint: .7)), EyeGateReason.squint);
     });
 
-    test('the eyes channel sign latches at once', () {
+    test('an active eyes event latches at once', () {
       final gate = EyeGate();
       final map = ZoneMap.fromCalibration(profile);
       final f = arkit(open: .3, squint: .7);
@@ -383,7 +485,7 @@ void main() {
           zone: map.classify(map.directionOf(f)!),
           threshold: .4,
           headOnly: false,
-          eyesSignActive: true,
+          eyesEventActive: true,
         ),
         EyeGateReason.none,
       );
@@ -447,6 +549,44 @@ void main() {
       expect(m.hasHeadAngles, isTrue);
       expect(m.trackingId, 1);
       expect(frame.state.toJson()['eyeGate'], 'look_down');
+    });
+
+    test('the provider takes every face and gives every measurement', () {
+      final provider = ZoneAttentionProvider()..reset(profile);
+      final engine = ObservationEngine(sessionId: 's', calibration: profile);
+      var us = 0;
+      void frame(List<FaceSignals> faces) {
+        us += 33333;
+        provider.updateFaces(faces, us);
+        engine.process(
+          sessionId: 's',
+          capturedUs: us,
+          completedUs: us + 20000,
+          faces: provider.lastMeasurements,
+        );
+        provider.eyesEventActive = engine.snapshot.eyes.activeEvent != null;
+      }
+
+      for (var i = 0; i < 10; i++) {
+        frame([arkit()]);
+      }
+      expect(provider.lastMeasurements, hasLength(1));
+      expect(provider.lastMeasurement?.trackingId, 1);
+      final passenger = FaceSignals(
+        engineId: 'arkit_face_tracking',
+        trackingId: 2,
+        headYawLeft: 30,
+        headPitchDown: 0,
+        headRollRight: 0,
+        eyeOpenLeft: .9,
+        eyeOpenRight: .9,
+      );
+      frame([arkit(), passenger]);
+      expect(provider.lastMeasurements, hasLength(2));
+      expect(provider.lastMeasurement, isNull);
+      expect(engine.snapshot.requiresRecalibration, isTrue);
+      frame([]);
+      expect(provider.lastMeasurements, isEmpty);
     });
 
     test('faces without an id inherit the calibrated id', () {

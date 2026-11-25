@@ -445,7 +445,7 @@ class ReplayRunner {
         ),
     ];
     var ambiguous = 0, rejected = 0, observed = 0;
-    var tzSign = false, eyesSign = false, restored = 0;
+    var tzSign = false, eyesEvent = false, restored = 0;
     int? firstUs, lastUs, pausedAtUs;
     GazeZone? runZone;
     int? runStartUs, offStartUs;
@@ -476,7 +476,7 @@ class ReplayRunner {
         frame.capturedUs,
         faces,
         tzSignActive: tzSign,
-        eyesSignActive: eyesSign,
+        eyesEventActive: eyesEvent,
       );
       if (attention.state.driver == ContinuityDecision.restored) restored++;
       final zone = attention.state.zone;
@@ -532,7 +532,7 @@ class ReplayRunner {
       _feedFatigue(fatigue, attention, frame, profile, settings);
       final snapshot = update.snapshot;
       tzSign = tzSignActive(snapshot);
-      eyesSign = channelSignActive(snapshot.eyes);
+      eyesEvent = snapshot.eyes.activeEvent != null;
       if (snapshot.requiresRecalibration) pausedAtUs ??= frame.capturedUs;
       for (final r in episodes) {
         if (frame.capturedUs < r.episode.startUs ||

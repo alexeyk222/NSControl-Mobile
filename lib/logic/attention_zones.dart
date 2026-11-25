@@ -537,24 +537,41 @@ enum EyeGateReason {
 ///   same glance, so a real closure that starts on the road is never hidden
 ///   even if the engine reports the closed eye as "looking down".
 /// - Squint: a strong squint blendshape (sun, laughter, yawn).
+/// - Both signs have hysteresis: squint turns on at [squintBlend] and off
+///   below [squintOff]; looking down turns on at [lookDownGaze] or
+///   [lookDownBlend] and off below [lookDownGazeOff] and [lookDownBlendOff].
+///   A coefficient jumping around the "on" value (laughter: 0.42–0.5) keeps
+///   the sign on instead of letting single frames through.
 /// - A deep closure (both eyes open ≤ [deepOpen]) always counts.
-/// - Closure latch: once both eyes have been below T for [latchUs] with at
-///   least one frame the gate let through, or the eyes channel already has a
-///   sign, the gate stays open until both eyes are back at or above T. A
-///   squint coefficient flickering around [squintBlend] during a real closure
-///   then can neither reset the 1.5 s count nor cut an active event.
+/// - Closure latch: once both eyes have been below T with the gate letting
+///   every frame through for [latchUs] in a row, or the eyes channel already
+///   has an active event, the gate stays open until both eyes are back at or
+///   above T. A sign without an event does not latch: the ТЗ automaton shows
+///   a sign after two closed frames, too early to tell a closure from noise.
+///   A squint flickering during a real closure then can neither reset the
+///   1.5 s count nor cut an active event, while a few frames let through by
+///   noise do not latch.
 class EyeGate {
   EyeGate({
     this.lookDownGaze = 12,
+    this.lookDownGazeOff = 9,
     this.lookDownBlend = .35,
+    this.lookDownBlendOff = .25,
     this.squintBlend = .45,
+    this.squintOff = .35,
     this.deepOpen = .15,
     this.latchUs = 100000,
   });
 
-  /// Eye-in-head downward angle, degrees, treated as looking down.
-  final double lookDownGaze;
-  final double lookDownBlend, squintBlend;
+  /// Eye-in-head downward angle, degrees, that turns looking down on; it
+  /// stays on until the angle is below [lookDownGazeOff].
+  final double lookDownGaze, lookDownGazeOff;
+
+  /// The same for the mean eyeLookDown blendshape.
+  final double lookDownBlend, lookDownBlendOff;
+
+  /// Mean eyeSquint that turns the squint sign on; off below [squintOff].
+  final double squintBlend, squintOff;
 
   /// Both eyes at or below this openness are a closure whatever the gaze.
   final double deepOpen;
@@ -562,8 +579,9 @@ class EyeGate {
   /// How long an ungated closure must last before the latch holds it.
   final int latchUs;
 
-  bool _armed = false, _latched = false, _runHadUngated = false;
-  int? _runStartUs;
+  bool _armed = false, _latched = false, _squinting = false;
+  bool _eyesDown = false;
+  int? _ungatedSinceUs;
 
   /// True while a closure is latched and the gate is held open.
   bool get latched => _latched;
@@ -574,7 +592,7 @@ class EyeGate {
     required double threshold,
     required bool headOnly,
     int atUs = 0,
-    bool eyesSignActive = false,
+    bool eyesEventActive = false,
   }) {
     final left = face.eyeOpenLeft, right = face.eyeOpenRight;
     if (left == null || right == null) {
@@ -584,17 +602,16 @@ class EyeGate {
     final open = left >= threshold && right >= threshold;
     final closed = left < threshold && right < threshold;
     final reason = _reason(face, zone, left, right, open, headOnly);
-    if (!closed) {
-      _runStartUs = null;
-      _runHadUngated = false;
+    if (!closed || reason != EyeGateReason.none) {
+      _ungatedSinceUs = null;
       if (open) _latched = false;
     } else {
-      _runStartUs ??= atUs;
-      if (reason == EyeGateReason.none) _runHadUngated = true;
-      if (eyesSignActive ||
-          (_runHadUngated && atUs - _runStartUs! >= latchUs)) {
-        _latched = true;
-      }
+      _ungatedSinceUs ??= atUs;
+    }
+    if (closed &&
+        (eyesEventActive ||
+            (_ungatedSinceUs != null && atUs - _ungatedSinceUs! >= latchUs))) {
+      _latched = true;
     }
     return _latched ? EyeGateReason.none : reason;
   }
@@ -617,11 +634,15 @@ class EyeGate {
         face.blendshape(Blendshape.eyeLookDownLeft),
         face.blendshape(Blendshape.eyeLookDownRight),
       );
+      final gaze = face.eyeGazeDown;
+      final eyesDown = _eyesDown
+          ? (gaze != null && gaze >= lookDownGazeOff) ||
+                (blend != null && blend >= lookDownBlendOff)
+          : (gaze != null && gaze >= lookDownGaze) ||
+                (blend != null && blend >= lookDownBlend);
+      _eyesDown = eyesDown;
       lookingDown =
-          (face.eyeGazeDown != null && face.eyeGazeDown! >= lookDownGaze) ||
-          (blend != null && blend >= lookDownBlend) ||
-          zone == GazeZone.instruments ||
-          zone == GazeZone.console;
+          eyesDown || zone == GazeZone.instruments || zone == GazeZone.console;
     } else {
       lookingDown =
           headOnly &&
@@ -632,12 +653,14 @@ class EyeGate {
     } else if (open) {
       _armed = true;
     }
-    if (deep) return EyeGateReason.none;
     final squint = _mean(
       face.blendshape(Blendshape.eyeSquintLeft),
       face.blendshape(Blendshape.eyeSquintRight),
     );
-    if (squint != null && squint >= squintBlend) return EyeGateReason.squint;
+    _squinting =
+        squint != null && squint >= (_squinting ? squintOff : squintBlend);
+    if (deep) return EyeGateReason.none;
+    if (_squinting) return EyeGateReason.squint;
     if (lookingDown && _armed) return EyeGateReason.lookDown;
     return EyeGateReason.none;
   }
@@ -645,8 +668,9 @@ class EyeGate {
   void reset() {
     _armed = false;
     _latched = false;
-    _runHadUngated = false;
-    _runStartUs = null;
+    _squinting = false;
+    _eyesDown = false;
+    _ungatedSinceUs = null;
   }
 
   static double? _mean(double? a, double? b) =>
@@ -898,15 +922,21 @@ class AttentionPipeline {
 
   AttentionDecision attention = AttentionDecision.unknown;
 
+  /// The driver's face as last seen during calibration, at [atUs]; see
+  /// [DriverContinuity.anchor].
+  void anchorDriver(FaceSignals face, int atUs) =>
+      continuity.anchor(atUs, box: face.box, distanceM: face.distanceM);
+
   /// [tzSignActive]: a ТЗ automaton had a sign or an event on the previous
   /// frame (`ChannelPhase.signPresent` or later); distraction then waits.
-  /// [eyesSignActive]: the same for the eyes channel alone; it latches the
-  /// eye gate open (see [EyeGate]).
+  /// [eyesEventActive]: the eyes channel had an active event on the previous
+  /// frame (`ChannelSnapshot.activeEvent != null`); it latches the eye gate
+  /// open (see [EyeGate]).
   AttentionFrame process(
     int capturedUs,
     List<FaceSignals> faces, {
     bool tzSignActive = false,
-    bool eyesSignActive = false,
+    bool eyesEventActive = false,
   }) {
     final usable = continuity.resolve(
       capturedUs,
@@ -928,7 +958,7 @@ class AttentionPipeline {
         threshold: threshold,
         headOnly: settings.headOnlyLookDown,
         atUs: capturedUs,
-        eyesSignActive: eyesSignActive,
+        eyesEventActive: eyesEventActive,
       );
     } else {
       eyeGate.reset();
@@ -990,11 +1020,13 @@ class AttentionPipeline {
 /// The attention logic behind the lab's [AttentionStateProvider]: zone, eye
 /// gate and distraction for the primary engine's frames.
 ///
-/// [update] returns the state for display and recording. To let the eye gate
-/// change the input of the ТЗ automata, the caller feeds
-/// [lastMeasurement] (instead of `signals.toMeasurement()`) into
-/// `ObservationEngine.process`; with [AttentionSettings.acceptance] it is the
-/// same measurement.
+/// Call [updateFaces] with every face of the frame and feed
+/// [lastMeasurements] (instead of `toMeasurement()` of each face) into
+/// `ObservationEngine.process`: the engine then sees the eye gate, the
+/// restored driver id and a second face exactly as the pipeline decided
+/// (ФТ-02 pause on two faces). With [AttentionSettings.acceptance] the eyes
+/// and angles are the ТЗ measurement; only the tracking id may be restored.
+/// [update] is the single-face form of the interface.
 class ZoneAttentionProvider implements AttentionStateProvider {
   ZoneAttentionProvider({this.settings = AttentionSettings.lab, this.zones});
   static const providerId = 'zones-1';
@@ -1011,14 +1043,21 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   /// event is present); distraction does not start meanwhile.
   bool tzSignActive = false;
 
-  /// Set by the caller: the eyes channel has a sign or an event; latches the
-  /// eye gate open.
-  bool eyesSignActive = false;
+  /// Set by the caller after each frame: the eyes channel has an active
+  /// event (`snapshot.eyes.activeEvent != null`); latches the eye gate open.
+  bool eyesEventActive = false;
 
   AttentionPipeline? get pipeline => _pipeline;
+
+  /// Input for `ObservationEngine.process` for the latest frame, one per
+  /// usable face, same order as the pipeline decided; empty before
+  /// calibration or without faces.
+  List<FaceMeasurement> get lastMeasurements => _last?.measurements ?? const [];
+
+  /// The measurement when the latest frame had exactly one face.
   FaceMeasurement? get lastMeasurement {
-    final m = _last?.measurements;
-    return m == null || m.isEmpty ? null : m.single;
+    final m = lastMeasurements;
+    return m.length == 1 ? m.single : null;
   }
 
   AttentionFrame? get lastFrame => _last;
@@ -1030,7 +1069,7 @@ class ZoneAttentionProvider implements AttentionStateProvider {
   void reset(CalibrationProfile? calibration) {
     _last = null;
     tzSignActive = false;
-    eyesSignActive = false;
+    eyesEventActive = false;
     _pipeline = calibration == null
         ? null
         : AttentionPipeline(
@@ -1040,15 +1079,28 @@ class ZoneAttentionProvider implements AttentionStateProvider {
           );
   }
 
+  /// Call right after [reset] with the last calibration frame of the driver
+  /// (or a face with the median box and distance of the calibration) and its
+  /// time, so that a face lost right after the start is still the driver.
+  void anchorDriver(FaceSignals face, int atUs) =>
+      _pipeline?.anchorDriver(face, atUs);
+
   @override
-  AttentionState update(FaceSignals? signals, int atUs) {
+  AttentionState update(FaceSignals? signals, int atUs) =>
+      updateFaces([?signals], atUs);
+
+  /// Processes every face the engine reported in the frame.
+  AttentionState updateFaces(List<FaceSignals> faces, int atUs) {
     final pipeline = _pipeline;
-    if (pipeline == null) return AttentionState.unknown;
+    if (pipeline == null) {
+      _last = null;
+      return AttentionState.unknown;
+    }
     final frame = pipeline.process(
       atUs,
-      [?signals],
+      faces,
       tzSignActive: tzSignActive,
-      eyesSignActive: eyesSignActive,
+      eyesEventActive: eyesEventActive,
     );
     _last = frame;
     final details = frame.state.toJson()..remove('zone');
