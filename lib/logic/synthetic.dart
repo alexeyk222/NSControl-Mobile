@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'calibration.dart';
 import 'face.dart';
+import 'mount.dart';
 import 'signals.dart';
 
 /// Synthetic recordings (JSONL, schema 1) of the contract scenario steps, for
@@ -135,9 +136,39 @@ class _Step {
 
 /// Builds the bench scenario as a JSONL recording.
 class SyntheticScenario {
-  SyntheticScenario(this.style, {this.seed = 7});
+  SyntheticScenario(
+    this.style, {
+    this.seed = 7,
+    this.mountYaw = 0,
+    this.mountTilt = 0,
+    this.arkitEyeYawLimit = 25,
+  });
   final SyntheticStyle style;
   final int seed;
+
+  /// Side mount: the head yaw to the camera while looking at the road, > 0
+  /// with the phone on the driver's right (the driver's road pose is turned
+  /// to the left of the camera), < 0 on the left. 0 is the dash mount in
+  /// front of the driver used by the other tests.
+  final double mountYaw;
+
+  /// Camera tilt about its own horizontal axis after the turn, degrees (a
+  /// vent mount below the face, turned and tilted towards it). With a tilt
+  /// the camera Euler angles of a nod differ from the road-frame nod.
+  final double mountTilt;
+
+  /// Eye view limit of the synthetic ARKit engine (the real one is measured
+  /// by the ARKit thread).
+  final double arkitEyeYawLimit;
+
+  bool get _mounted => mountYaw != 0 || mountTilt != 0;
+  Rotation3 get _mount =>
+      Rotation3.rotationX(mountTilt) * Rotation3.rotationY(mountYaw);
+
+  /// Head yaw to the camera for a road-frame pose.
+  double _cameraYaw(_Pose p) => _mounted
+      ? (_mount * Rotation3.fromAngles(p.yaw, p.pitch, p.roll)).angles.$1
+      : p.yaw;
 
   static const calibrationUs = 10000000;
   static const gapUs = 2500000;
@@ -304,7 +335,8 @@ class SyntheticScenario {
       } else if (captured >= nextBlinkUs + 150000) {
         nextBlinkUs += 3500000 + rnd.nextInt(1500000);
       }
-      final visible = pose.visible && pose.yaw.abs() <= (_arkit ? 60 : 55);
+      final visible =
+          pose.visible && _cameraYaw(pose).abs() <= (_arkit ? 60 : 55);
       // ML Kit gives the face a new tracking id after every loss.
       if (!_arkit && visible && wasLost) _id++;
       wasLost = !visible;
@@ -314,7 +346,7 @@ class SyntheticScenario {
         visible ? _signals(pose, noise, arkit: _arkit, id: _id) : null,
       ));
       if (_dual && index % mlKitEvery == 0) {
-        final seen = pose.visible && pose.yaw.abs() <= 55;
+        final seen = pose.visible && _cameraYaw(pose).abs() <= 55;
         if (seen && mlKitWasLost) mlKitId++;
         mlKitWasLost = !seen;
         mlKitFrames[captured] = (
@@ -328,7 +360,8 @@ class SyntheticScenario {
       jsonEncode({
         'type': 'meta',
         'schema': 1,
-        'recordingId': 'synthetic-${style.name}-$seed',
+        'recordingId':
+            'synthetic-${style.name}-$seed${_mounted ? '-mount${mountYaw.round()}' : ''}',
         'app': 'synthetic',
         'device': _dual ? 'iPhone12,1' : 'synthetic',
         'os': 'synthetic',
@@ -336,6 +369,11 @@ class SyntheticScenario {
         'startedAt': '2026-11-25T00:00:00+03:00',
         'subject': 'synthetic',
         'notes': 'SyntheticScenario',
+        if (_mounted)
+          'mount': {
+            'position': mountYaw > 0 ? 'vent_right' : 'vent_left',
+            'angleDeg': mountYaw.abs().round(),
+          },
       }),
     );
     var calibrationWritten = false;
@@ -419,14 +457,31 @@ class SyntheticScenario {
   }
 
   DetectorCapabilities get detector => _arkit
-      ? const DetectorCapabilities(
+      ? DetectorCapabilities(
           id: 'arkit_face_tracking',
           version: 'synthetic',
-          eyeYawLimit: 25,
+          eyeYawLimit: arkitEyeYawLimit,
         )
       : DetectorCapabilities.mlKit;
 
   CalibrationProfile _calibrate(List<(int, int, FaceSignals?)> frames) {
+    if (_mounted) {
+      final collector = MountCalibrationCollector(
+        trackingId: 1,
+        detector: detector,
+        hiddenEyes: false,
+        startedUs: 0,
+      );
+      for (final (captured, _, signals) in frames) {
+        if (captured > calibrationUs) break;
+        collector.add(capturedUs: captured, faces: [?signals]);
+      }
+      final result = collector.finish(nowUs: calibrationUs);
+      if (!result.successful) {
+        throw StateError('Синтетическая калибровка: ${result.issues}');
+      }
+      return result.profile!;
+    }
     final collector = CalibrationCollector(
       trackingId: 1,
       detector: detector,
@@ -503,11 +558,17 @@ class SyntheticScenario {
     required bool arkit,
     required int id,
   }) {
-    // The face box moves and narrows as the head turns.
-    final yawRad = p.yaw * math.pi / 180;
+    // Side mount: the pose seen by a turned and tilted camera.
+    final camera = _mounted
+        ? _mount * Rotation3.fromAngles(p.yaw, p.pitch, p.roll)
+        : null;
+    final cameraYaw = camera == null ? p.yaw : camera.angles.$1;
+    // The face box moves and narrows as the head turns from the camera; the
+    // phone is turned so that the face is centred while on the road.
+    final yawRad = cameraYaw * math.pi / 180;
     final width = .3 * (.75 + .25 * math.cos(yawRad)) + noise(.004);
     final box = FaceBox(
-      left: .5 - p.yaw * .004 + noise(.004) - width / 2,
+      left: .5 - (cameraYaw - mountYaw) * .004 + noise(.004) - width / 2,
       top: .45 + p.pitch * .003 + noise(.004) - .2,
       width: width,
       height: .4 + noise(.004),
@@ -520,9 +581,15 @@ class SyntheticScenario {
     // to keep the lid above T in a squint or yawn (see [SyntheticStyle]).
     if (!arkit && _dual && p.squint >= .55) open = math.max(open, .5);
     final closed = open < .2;
-    final yaw = roadYaw + p.yaw + noise(.6);
-    final pitch = roadPitch + p.pitch + noise(.6);
-    final roll = 1 + p.roll + noise(.5);
+    final engineId = arkit
+        ? SyntheticStyle.arkit.engineId
+        : SyntheticStyle.mlKit.engineId;
+    final (cy, cp, cr) =
+        camera?.engineAngles(engineId) ??
+        (roadYaw + p.yaw, roadPitch + p.pitch, 1 + p.roll);
+    final yaw = cy + noise(.6);
+    final pitch = cp + noise(.6);
+    final roll = cr + noise(.5);
     final left = clamp01(open + noise(arkit ? .02 : .05));
     final right = clamp01(open + noise(arkit ? .02 : .05));
     if (!arkit) {
@@ -545,6 +612,20 @@ class SyntheticScenario {
     final eyeDown = p.eyeDown + (closed ? 10 : 0) + noise(1);
     final eyeLeft = p.eyeLeft + noise(1);
     final lookDown = clamp01(eyeDown / 30 + (closed ? .4 : 0));
+    // Gaze in the camera frame: the road-frame gaze direction turned by the
+    // mount.
+    final gaze = camera == null
+        ? (yaw + eyeLeft, pitch + eyeDown)
+        : () {
+            final (gl, gd) = Rotation3.anglesOf(
+              _mount.apply(
+                Rotation3.direction(p.yaw + eyeLeft, p.pitch + eyeDown),
+              ),
+            );
+            // The head noise, so that the random sequence (and the blink
+            // times) stay those of the dash mount.
+            return (gl + yaw - cy, gd + pitch - cp);
+          }();
     return FaceSignals(
       engineId: arkit
           ? SyntheticStyle.arkit.engineId
@@ -554,13 +635,16 @@ class SyntheticScenario {
       box: box,
       headPitchDown: pitch,
       headRollRight: roll,
-      gazeLeft: yaw + eyeLeft,
-      gazeDown: pitch + eyeDown,
+      gazeLeft: gaze.$1,
+      gazeDown: gaze.$2,
       eyeGazeLeft: eyeLeft,
       eyeGazeDown: eyeDown,
       eyeOpenLeft: left,
       eyeOpenRight: right,
       distanceM: .55 + noise(.01),
+      headRotation: camera == null
+          ? null
+          : Rotation3.fromEngineAngles(engineId, yaw, pitch, roll).quaternion,
       blendshapes: {
         Blendshape.eyeBlinkLeft: 1 - left,
         Blendshape.eyeBlinkRight: 1 - right,
