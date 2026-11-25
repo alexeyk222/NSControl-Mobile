@@ -9,6 +9,7 @@ import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
 import '../logic/mount.dart';
+import '../logic/mount_shift.dart';
 import '../logic/replay.dart' show tzSignActive;
 import '../logic/thermal.dart';
 import '../version.dart';
@@ -183,6 +184,16 @@ class TripController extends ChangeNotifier {
 
   /// Slow drift of the road pose, when the profile has it.
   RoadAdaptation? get roadAdaptation => attention?.pipeline?.roadAdaptation;
+
+  /// Re-calibration when the holder has moved (FR-CAL-08): a new side-mount
+  /// calibration collected in the background while observation goes on.
+  MountShiftMonitor mountShift = MountShiftMonitor();
+  MountCalibrationCollector? _shiftCollector;
+  int _shiftEndUs = 0;
+  bool _shiftSwapping = false;
+
+  /// «Телефон сдвинулся» while the new calibration is collected.
+  String? movedText;
 
   /// The profile and settings the automata and the fatigue monitor run on:
   /// the road-frame profile in mount mode, [calibration] itself otherwise.
@@ -628,6 +639,7 @@ class TripController extends ChangeNotifier {
         ?..tzSignActive = tzSignActive(engine.snapshot)
         ..eyesEventActive = engine.snapshot.eyes.activeEvent != null;
       _recordDerived(completed);
+      _watchMount(result, captured, at);
       if (engine.snapshot.requiresRecalibration) {
         unawaited(
           recalibrate(
@@ -638,6 +650,92 @@ class TripController extends ChangeNotifier {
       }
     }
     _throttledNotify();
+  }
+
+  /// FR-CAL-08: starts, feeds and finishes the background re-calibration.
+  void _watchMount(List<DetectedFace> result, int captured, int at) {
+    final adaptation = roadAdaptation, engine = this.engine;
+    if (adaptation == null || engine == null || _shiftSwapping) return;
+    final busy =
+        tzSignActive(engine.snapshot) ||
+        engine.snapshot.activeEvents.isNotEmpty;
+    final collector = _shiftCollector;
+    if (collector != null) {
+      if (busy) {
+        // An automaton needs the driver: no new road pose from this window.
+        _shiftCollector = null;
+        movedText = null;
+        _notify();
+        return;
+      }
+      collector.add(
+        capturedUs: captured,
+        faces: result.map(_signalsOf).toList(),
+      );
+      if (result.length == 1) {
+        _anchorFace = _signalsOf(result.single);
+        _anchorUs = captured;
+      }
+      if (captured >= _shiftEndUs) {
+        _shiftCollector = null;
+        final r = collector.finish(nowUs: captured);
+        final found = r.result.profile;
+        if (found == null) {
+          movedText = null;
+          _notify();
+        } else {
+          unawaited(_swapCalibration(found, r.note, captured));
+        }
+      }
+      return;
+    }
+    if (result.length != 1) return;
+    final id = result.single.measurement.trackingId;
+    if (id == null) return;
+    if (!mountShift.shouldStart(
+      atUs: at,
+      atLimitSinceUs: adaptation.atLimitSinceUs,
+      onRoad: attentionState.zone == GazeZone.road,
+      signActive: busy,
+    )) {
+      return;
+    }
+    mountShift.attempted(at);
+    final start = captured + mountShift.promptDelayUs;
+    _shiftCollector = MountCalibrationCollector(
+      trackingId: id,
+      detector: profile.detector(capabilities),
+      hiddenEyes: settings.hiddenEyes,
+      startedUs: start,
+    );
+    _shiftEndUs = start + 10000000;
+    movedText = 'Телефон сдвинулся';
+    _say('Телефон сдвинулся. Смотрите на дорогу, перенастроюсь');
+    _notify();
+  }
+
+  /// The new road pose replaces the old one: a new session on it (the
+  /// automata restart, as after any calibration).
+  Future<void> _swapCalibration(
+    CalibrationProfile found,
+    String? note,
+    int now,
+  ) async {
+    _shiftSwapping = true;
+    try {
+      await _endSession(EventEndReason.observationStopped);
+      if (!active || phase != TripPhase.observing) return;
+      calibration = profile.calibrate(found);
+      final saved = calibration!.toJson();
+      _write((db) => db.setSetting('calibration', saved));
+      calibrationNote = note;
+      _newSession();
+      _recordCalibration(now);
+    } finally {
+      movedText = null;
+      _shiftSwapping = false;
+      _notify();
+    }
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
@@ -915,6 +1013,8 @@ class TripController extends ChangeNotifier {
       ..reset(profile);
     attention = pipeline;
     attentionState = AttentionState.unknown;
+    // Session times start at 0 again; a new road pose starts a new watch.
+    mountShift = MountShiftMonitor();
     final anchor = _anchorFace, seen = _anchorUs;
     if (anchor != null && seen != null) {
       // Where the driver was last seen, so a loss right after the start of
@@ -1111,6 +1211,7 @@ class TripController extends ChangeNotifier {
     sessionId = null;
     _collector = null;
     _mountCollector = null;
+    _shiftCollector = null;
     attention = null;
     attentionState = AttentionState.unknown;
     _fatigueMonitor = null;
