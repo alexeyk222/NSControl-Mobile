@@ -183,6 +183,91 @@ void main() {
 
   setUp(() => lastUs = 0);
 
+  ArkitStats stats(String thermal, {int sent = 30}) => ArkitStats(
+    atUs: trip.clock.elapsedMicroseconds,
+    arFrames: 30,
+    sent: sent,
+    droppedEvents: 0,
+    mlKitDone: 0,
+    mlKitSkipped: 0,
+    mlKitErrors: 0,
+    mlKitBusyUs: 0,
+    thermal: thermal,
+    lowPower: false,
+    batteryState: 'unplugged',
+    battery: .7,
+  );
+
+  Future<void> settle() async {
+    for (var i = 0; i < 5; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  group('heat (FR-DRV-08)', () {
+    test('serious: economy at 15 a second, no preview, said once', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      expect(arkit().options.emitEvery, 1);
+      arkit().onStats(stats('serious'));
+      expect(
+        platform.spoken.last,
+        'Телефон нагрелся. Продолжаю в экономном режиме',
+      );
+      expect(trip.heatText, 'Телефон нагрелся, экономлю');
+      expect(trip.showPreview, isFalse);
+      trip.tick();
+      await settle();
+      expect(sources, hasLength(2));
+      expect(sources.first.disposed, isTrue);
+      expect(arkit().options.emitEvery, 2);
+      expect(arkit().options.preview, isFalse);
+      expect(arkit().options.fps, 30);
+      // Observation goes on after the restart.
+      expect(trip.phase, TripPhase.observing);
+      observe(2, () => arkitFace(open: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+      arkit().onStats(stats('serious', sent: 15));
+      expect(
+        platform.spoken.where((t) => t.startsWith('Телефон нагрелся')),
+        hasLength(1),
+      );
+    });
+
+    test('no restart while an automaton has a sign or an event', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      observe(2, () => arkitFace(open: .05));
+      expect(trip.snapshot!.eyes.activeEvent, isNotNull);
+      arkit().onStats(stats('serious'));
+      trip.tick();
+      await settle();
+      expect(sources, hasLength(1));
+      trip.acknowledge(trip.snapshot!.activeEvents.map((e) => e.id).toSet());
+      observe(3, arkitFace);
+      trip.tick();
+      await settle();
+      expect(sources, hasLength(2));
+      expect(arkit().options.emitEvery, 2);
+    });
+
+    test('critical: tone and voice, repeated every 5 minutes', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      arkit().onStats(stats('critical'));
+      expect(
+        platform.spoken.last,
+        'Телефон перегрелся. Уберите его от горячего воздуха',
+      );
+      expect(platform.testAlertCalls, 1);
+      expect(trip.heatText, contains('Телефон перегрелся'));
+      arkit().onStats(stats('critical'));
+      expect(platform.testAlertCalls, 1);
+    });
+  });
+
   test('the trip runs on ARKit at 30 fps by default', () async {
     await trip.start();
     expect(trip.engineInUse, TripEngine.arkit);
