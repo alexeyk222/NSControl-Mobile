@@ -23,10 +23,16 @@ class RecordedFrame {
     required this.completedUs,
     required this.faceCount,
     this.signals,
+    this.others = const [],
   });
   final String engine;
   final int capturedUs, completedUs, faceCount;
+
+  /// The driver candidate (the face the app chose).
   final FaceSignals? signals;
+
+  /// The other faces of the frame (optional `others` of the `frame` line).
+  final List<FaceSignals> others;
 }
 
 class RecordedLabel {
@@ -133,6 +139,7 @@ class Recording {
             );
           case 'frame':
             final signals = json['signals'] as Map?;
+            final others = json['others'] as List?;
             frames.add(
               RecordedFrame(
                 engine: json['engine'] as String,
@@ -142,6 +149,10 @@ class Recording {
                 signals: signals == null
                     ? null
                     : FaceSignals.fromJson(Map<String, dynamic>.from(signals)),
+                others: [
+                  for (final o in others ?? const [])
+                    FaceSignals.fromJson(Map<String, dynamic>.from(o as Map)),
+                ],
               ),
             );
           case 'label':
@@ -482,6 +493,13 @@ class ReplayRunner {
       final faces = <FaceSignals>[];
       if (frame.faceCount > 1) {
         ambiguous++;
+        // With the other faces recorded, the pipeline and the automaton see
+        // all of them and suspend observation as the app does (ФТ-02).
+        // Older recordings carry only the driver candidate: such a frame is
+        // replayed as a frame without the driver.
+        if (frame.signals != null && frame.others.isNotEmpty) {
+          faces.addAll([frame.signals!, ...frame.others]);
+        }
       } else if (frame.faceCount == 1 && frame.signals != null) {
         faces.add(frame.signals!);
       }
