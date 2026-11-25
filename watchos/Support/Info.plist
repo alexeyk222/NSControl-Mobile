@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with the keys Xcode generates (GENERATE_INFOPLIST_FILE). -->
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+	</array>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Во время поездки NSControl держит часы в режиме тренировки, чтобы предупредить вибрацией при погасшем экране. Тренировка не сохраняется в «Здоровье».</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>NSControl не читает данные здоровья на часах.</string>
+</dict>
+</plist>

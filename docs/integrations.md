@@ -42,7 +42,7 @@ Android использует `AudioTrack` с циклическим PCM-буфе
 
 ## Часы и транспорт
 
-Apple: `WCSession.sendMessage` вызывается только при активированной сессии, установленном приложении и `isReachable`. `updateApplicationContext` применяется только к последнему snapshot для показа состояния. Фоновые очереди `transferUserInfo`/file transfer для предупреждений не используются. Контекст на часах не разрешает вибрацию. Переключение/деактивация часов и reachability публикуются в Flutter.
+Apple: `WCSession.sendMessage` вызывается только при активированной сессии, установленном приложении и `isReachable`. Работа при погасшем экране держится на фоновой сессии-тренировке часов, подробности и порядок проверки на устройствах: [apple-watch.md](apple-watch.md). `updateApplicationContext` применяется только к последнему snapshot для показа состояния. Фоновые очереди `transferUserInfo`/file transfer для предупреждений не используются. Контекст на часах не разрешает вибрацию. Переключение/деактивация часов и reachability публикуются в Flutter.
 
 Garmin: зависимость `com.garmin.connectiq:ciq-companion-app-sdk:2.2.0@aar` из Maven Central. Используются `getKnownDevices`, `getApplicationInfo`, `registerForDeviceEvents`, `registerForAppEvents` и `sendMessage(..., isTransient=true)`. Требуется установленный Garmin Connect Mobile и сопряжение. Пользователь выбирает устройство, если их несколько. Статус соединения SDK не подтверждает, что приложение часов сейчас выполняется: это проверяется handshake. Команда не ставится в повторную очередь NSControl. Тайм-аут отправки — 3 с; это только предел ожидания ответа, не расширение TTL.
 
@@ -95,7 +95,7 @@ xcodebuild -project NSControlWatch.xcodeproj -scheme NSControlWatch -sdk watchsi
 Независимая проверка протокола без Apple SDK:
 
 ```sh
-swiftc -module-cache-path /tmp/nscontrol-swift-cache watchos/NSControlWatch/AlertGate.swift watchos/Tests/main.swift -o /tmp/nscontrol-watch-tests
+swiftc -module-cache-path /tmp/nscontrol-swift-cache watchos/NSControlWatch/AlertGate.swift watchos/NSControlWatch/AlarmLoop.swift watchos/Tests/main.swift -o /tmp/nscontrol-watch-tests
 /tmp/nscontrol-watch-tests
 ```
 

@@ -188,6 +188,7 @@ class SleepController extends ChangeNotifier {
             reason: rec.message,
             occurredUs: trip.clock.elapsedMicroseconds,
             event: false,
+            kind: 'advice',
           ),
         );
       }

@@ -50,6 +50,7 @@ class TripController extends ChangeNotifier {
       onDelivery: _delivery,
       onVitals: _onVitals,
       onUserAck: (ids) => acknowledge(ids.toSet(), fromWatch: true),
+      onWatchState: (_) => _notify(),
     );
     _timer = Timer.periodic(const Duration(milliseconds: 50), (_) => _tick());
     _platformEvents = platform.events.listen(
@@ -188,6 +189,16 @@ class TripController extends ChangeNotifier {
     );
     onTripStarted?.call();
     phase = TripPhase.findingFace;
+    // The watch must learn about the trip before any alert: it starts its
+    // background session on a non-idle snapshot or on the launch below.
+    _pushWatchState();
+    unawaited(() async {
+      try {
+        await platform.call('wearable.prepare');
+      } catch (_) {
+        // Android/Garmin have no launch step; the watch status says the rest.
+      }
+    }());
     await _safe(() => platform.keepAwake(true));
     if (generation != _lifecycleGeneration || !active || !_foreground) return;
     _notify();
@@ -574,6 +585,7 @@ class TripController extends ChangeNotifier {
                 : 'Продолжительный наклон головы — проверьте состояние',
             occurredUs: sessionBaseUs + event.thresholdUs,
             event: true,
+            kind: event.type == EventType.eyesClosed ? 'eyes' : 'head',
             recommendation: event.type == EventType.eyesClosed
                 ? recommendationText
                 : null,
@@ -800,6 +812,32 @@ class TripController extends ChangeNotifier {
     unawaited(wearable.snapshot());
   }
 
+  /// Sends a short test burst to the watch through the live protocol, so the
+  /// first pulse goes through the same TTL check as a real alert.
+  Future<bool> testWatch() async {
+    if (!wearable.synchronized) return false;
+    await wearable.alert(
+      id: 'test-${_ids.v4()}',
+      reason: 'Проверка вибрации',
+      occurredUs: clock.elapsedMicroseconds,
+      event: false,
+      kind: 'test',
+    );
+    return true;
+  }
+
+  /// Plain-language state of screen-off alerts on Apple Watch.
+  String? get watchBackgroundText => switch (wearable.watchBackground) {
+    'active' => 'Часы предупредят и при погасшем экране',
+    'starting' => 'Часы включают фоновый режим…',
+    'denied' =>
+      'Откройте NSControl на часах и разрешите тренировку, иначе при погасшем экране часы промолчат',
+    'failed' || 'unavailable' =>
+      'Фоновый режим часов не запустился. Держите приложение на часах открытым',
+    'off' => active ? 'Фоновый режим часов выключен' : null,
+    _ => null,
+  };
+
   void updateRecommendation(String text) {
     recommendationText = text;
     _pushWatchState();
@@ -871,7 +909,7 @@ class TripController extends ChangeNotifier {
     return switch (detail['status']) {
       'connected' => 'Часы на связи',
       'disconnected' => 'Часы не на связи. Откройте NSControl на часах',
-      'unpaired' => 'Apple Watch не сопряжены. Для Garmin выберите часы ниже',
+      'unpaired' => 'Apple Watch не сопряжены с этим iPhone',
       'app_not_installed' => 'Приложение NSControl не установлено на часах',
       'connecting' => 'Подключение…',
       'unavailable' => 'Обмен с часами недоступен на этом устройстве',
