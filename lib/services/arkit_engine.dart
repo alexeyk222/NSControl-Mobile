@@ -23,7 +23,7 @@ class ArkitOptions {
     this.mlKitBgra = false,
     this.mlKitWidth = 640,
     this.emitEvery = 1,
-    this.axes = ArkitAxes.standard,
+    this.axes = ArkitAxes.device,
   });
 
   /// 30 or 60; ignored when [formatIndex] is set.
@@ -235,7 +235,7 @@ class ArkitEngine {
   ArkitEngine({
     MethodChannel? method,
     EventChannel? events,
-    this.axes = ArkitAxes.standard,
+    this.axes = ArkitAxes.device,
   }) : _method = method ?? const MethodChannel('nscontrol/arkit'),
        _events = events ?? const EventChannel('nscontrol/arkit/events');
 
