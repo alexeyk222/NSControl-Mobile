@@ -11,6 +11,9 @@ import WatchConnectivity
     func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
         GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
         Self.platform = PlatformBridge(messenger: engineBridge.applicationRegistrar.messenger())
+        if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "NSControlFaceTracking") {
+            FaceTrackingPlugin.register(with: registrar)
+        }
     }
     override func application(_ app: UIApplication, open url: URL,
                               options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
