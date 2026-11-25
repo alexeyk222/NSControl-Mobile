@@ -22,6 +22,7 @@
 | `eyeOpenLeft`, `eyeOpenRight` | 0..1, 1 — открыт | `leftEyeOpenProbability` | 1 − `eyeBlinkLeft` (или своя проверенная формула) |
 | `blendshapes` | 0..1, имена ARKit/MediaPipe, Left/Right — глаз водителя | нет | все 52 или нужные из `Blendshape` |
 | `distanceM` | метры до лица | нет | из `transform` |
+| `box` | рамка лица {`left`, `top`, `width`, `height`} в долях 0..1 повёрнутого (вертикального) анализируемого кадра, без зеркалирования, начало — левый верхний угол; необязательно | `Face.boundingBox` / размер кадра после поворота | проекция лица на `capturedImage` (если тред 2 сочтёт нужным; иначе null — непрерывность водителя тогда по `distanceM` и позе) |
 | `tracked` | лицо надёжно отслеживается | true | `isTracked` |
 
 Знаки каждого движка подтверждаются на iPhone простым тестом в Лаборатории (повернуть голову влево, опустить, наклонить к плечу, посмотреть глазами влево и вниз) до того, как его значения используются в логике. Текущий знак Euler Y и Z у ML Kit в проекте не проверен.
@@ -34,7 +35,7 @@
 
 ```
 {"type":"meta","schema":1,"recordingId":"…","app":"1.0.0+2","device":"iPhone12,1","os":"iOS 26.2.1","engines":["mlkit_face_detection"],"startedAt":"2026-11-27T10:00:00+03:00","subject":"S1","notes":""}
-{"type":"calibration","atUs":…,"profile":{…CalibrationProfile.toJson()…},"zones":{…необязательно…}}
+{"type":"calibration","atUs":…,"profile":{…CalibrationProfile.toJson()…},"zones":{…ZoneMap.toJson(), необязательно…}}
 {"type":"frame","engine":"arkit_face_tracking","capturedUs":…,"completedUs":…,"faceCount":1,"signals":{…FaceSignals.toJson()…}}
 {"type":"derived","atUs":…,"zone":"mirror_left","eyes":{…ChannelSnapshot.toJson()…},"head":{…},"fatigue":{…}}
 {"type":"event","change":"started","event":{…ObservationEvent.toJson()…}}
@@ -43,6 +44,7 @@
 
 - `frame` пишется на каждый завершённый анализ. В режиме сравнения двух движков на один `capturedUs` приходится две строки с разными `engine`. Если лица нет, `faceCount` 0 и `signals` отсутствует.
 - `derived` — то, что приложение решило в этот момент. Программа прогона его не использует: она заново считает решения по `frame`, а `derived` нужен для сверки и для живого экрана.
+- `calibration.zones` — раскладка зон внимания `ZoneMap.toJson()` (`lib/logic/attention_zones.dart`): `road` {`headLeft`, `headDown`, `gazeLeft`, `gazeDown`} — абсолютные углы направления «дорога» по голове и по взгляду; `mirrorsCalibrated`; `gazeRegions` и `headRegions` — списки эллипсов {`zone` (код `GazeZone`), `left`, `down`, `radiusLeft`, `radiusDown`} в градусах относительно дороги, знаки как у `FaceSignals`. Поле пишется после калибровки зеркал; без него программа прогона берёт стартовые секторы, а центр дороги по взгляду — медиану взгляда за 10 с калибровки ТЗ.
 - `label` — начало и конец шага сценария. Необязательное поле `rep` — номер повтора шага в сценарии (1, 2, …): пара `start`/`end` сопоставляется по `step` и `rep`. Если сценарий прерван, Лаборатория закрывает открытый шаг меткой `end` с полем `"aborted": true`. Метка — эталон для оценки, детектор эталоном не является (ТЗ, методика ПМИ).
 - Неизвестные поля и типы строк читатели пропускают; несовместимое изменение повышает `schema`.
 
@@ -65,6 +67,7 @@
 | `glasses`, `dark` | очки; приглушённый свет | по основному шагу |
 | `sign_head_left`, `sign_head_down`, `sign_roll_right` | повернуть голову влево, опустить, наклонить к правому плечу (сценарий `signs-v1`) | нет; проверка знаков `headYawLeft`, `headPitchDown`, `headRollRight` |
 | `sign_eyes_left`, `sign_eyes_down` | голова прямо, глаза влево, глаза вниз (`signs-v1`) | нет; проверка знаков `eyeGazeLeft`, `eyeGazeDown` |
+| `distraction_4s` | смотреть на консоль (телефон, магнитола) 4 с, голова прямо | `distraction`, только когда расширение «отвлечение» включено; в режиме приёмки — нет |
 
 Список можно расширять новыми `step`; ожидание для нового шага задаётся в программе прогона.
 
