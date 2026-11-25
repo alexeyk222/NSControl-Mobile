@@ -17,6 +17,7 @@ import 'services/sleep_controller.dart';
 import 'services/trip_controller.dart';
 import 'ui/integrations_page.dart';
 import 'ui/journal_page.dart';
+import 'logic/detection_profile.dart';
 import 'ui/lab_page.dart';
 import 'ui/settings_page.dart';
 import 'ui/trip_page.dart';
@@ -31,7 +32,8 @@ Future<void> main() async {
   var theme = ThemeMode.system;
   var incomplete = false;
   var developerMode = false;
-  var tzReference = false, recordTrips = false;
+  var recordTrips = false;
+  var tripProfile = DetectionProfile.current;
   String? tripMount;
   try {
     db = await TripRepository.open();
@@ -45,7 +47,13 @@ Future<void> main() async {
         ThemeMode.values.where((t) => t.name == storedTheme).firstOrNull ??
         ThemeMode.system;
     developerMode = await db.getSetting('developer_mode') == true;
-    tzReference = await db.getSetting('trip_tz_reference') == true;
+    final profileId = await db.getSetting('trip_profile');
+    tripProfile =
+        DetectionProfile.all.where((p) => p.id == profileId).firstOrNull ??
+        // Before profiles: the developer switch «Поездка: ТЗ 2.2 (эталон)».
+        (await db.getSetting('trip_tz_reference') == true
+            ? DetectionProfile.tz22
+            : DetectionProfile.current);
     recordTrips = await db.getSetting('trip_recording') == true;
     final mount = await db.getSetting('trip_mount');
     if (mount is String) tripMount = mount;
@@ -62,7 +70,7 @@ Future<void> main() async {
           detector: registry.create('mlkit_face_detection'),
           settings: settings,
         )
-        ..tzReference = tzReference
+        ..profile = tripProfile
         ..recordTrips = recordTrips
         ..mountPosition = tripMount ?? 'front';
   trip.journalIncomplete = incomplete || db == null;

@@ -5,7 +5,9 @@ import 'package:uuid/uuid.dart';
 import '../data/trip_repository.dart';
 import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
+import '../logic/detection_profile.dart';
 import '../logic/mount.dart';
+import '../logic/replay.dart' show tzSignActive;
 import '../version.dart';
 import 'camera_service.dart';
 import 'detector.dart';
@@ -77,17 +79,25 @@ class TripController extends ChangeNotifier {
   CalibrationCollector? _collector;
   ObservationEngine? engine;
 
-  /// Developer option «ТЗ 2.2 (эталон)»: the strict ТЗ calibration (head
-  /// turned to the camera within the engine's eye limit) and camera-frame
-  /// angles. Off by default: the trip calibrates on any mount the way the
-  /// lab does for a side mount (attention-method.md § 9) — the road pose is
-  /// whatever the driver looks at while driving, head angles are taken
-  /// relative to it (`R_cal⁻¹ · R`), the eyes only within the engine's view.
-  bool tzReference = false;
+  /// Detection profile of the trip (attention-method.md § 10), from the
+  /// next calibration. By default the current tuned profile: it calibrates
+  /// on any mount the way the lab does for a side mount (§ 9) — the road
+  /// pose is whatever the driver looks at while driving, head angles are
+  /// taken relative to it (`R_cal⁻¹ · R`) with a slow drift of that pose,
+  /// the eyes only within the profile's view limit of the engine, the
+  /// thresholds of the profile. The developer option «ТЗ 2.2 (эталон)»
+  /// ([DetectionProfile.tz22]) is the strict ТЗ calibration (head turned to
+  /// the camera within the engine's eye limit), camera-frame angles and the
+  /// user's ТЗ thresholds.
+  DetectionProfile profile = DetectionProfile.current;
+  bool get tzReference => profile.isReference;
   MountCalibrationCollector? _mountCollector;
 
   /// Road pose of the session (mount mode), null for the ТЗ reference.
   RoadFrame? _road;
+
+  /// Slow drift of the road pose, when the profile has it.
+  RoadAdaptation? _adaptation;
 
   /// The profile and settings the automata and the fatigue monitor run on:
   /// the road-frame profile in mount mode, [calibration] itself otherwise.
@@ -159,7 +169,7 @@ class TripController extends ChangeNotifier {
       _collector?.usableFrames ?? _mountCollector?.processedFrames ?? 0;
 
   /// Mount mode: the calibration and the automata use road-relative angles.
-  bool get mountRelative => !tzReference;
+  bool get mountRelative => profile.attention.mountRelative;
   Future<void> get pendingWrites => _writes;
   Duration get drivingTime =>
       Duration(microseconds: drive.continuousUs(clock.elapsedMicroseconds));
@@ -258,17 +268,17 @@ class TripController extends ChangeNotifier {
     error = null;
     calibrationNote = null;
     _calibrationStart = clock.elapsedMicroseconds;
-    if (tzReference) {
+    if (!mountRelative) {
       _collector = CalibrationCollector(
         trackingId: trackingId,
-        detector: detector.capabilities,
+        detector: profile.detector(detector.capabilities),
         hiddenEyes: settings.hiddenEyes,
         startedUs: _calibrationStart,
       );
     } else {
       _mountCollector = MountCalibrationCollector(
         trackingId: trackingId,
-        detector: detector.capabilities,
+        detector: profile.detector(detector.capabilities),
         hiddenEyes: settings.hiddenEyes,
         startedUs: _calibrationStart,
       );
@@ -308,7 +318,12 @@ class TripController extends ChangeNotifier {
     final measurements = road != null && profile != null
         ? [
             for (final f in result)
-              mountMeasurement(_signalsOf(f), road: road, calibration: profile),
+              mountMeasurement(
+                _signalsOf(f),
+                road: road,
+                calibration: profile,
+                adaptation: _adaptation,
+              ),
           ]
         : result.map((f) => f.measurement).toList();
     _recordFrame(result, captured, completed);
@@ -328,6 +343,7 @@ class TripController extends ChangeNotifier {
         ),
       );
       _feedFatigue(measurements, captured - sessionBaseUs);
+      _adapt(result, captured);
       _recordDerived(completed);
       if (engine!.snapshot.requiresRecalibration) {
         unawaited(
@@ -339,6 +355,23 @@ class TripController extends ChangeNotifier {
       }
     }
     _throttledNotify();
+  }
+
+  /// The road pose follows a slow drift of the driver's posture: only the
+  /// calibrated driver, only while no ТЗ sign is active, only near the road
+  /// pose (RoadAdaptation keeps ±14° of yaw and ±7° of pitch, so a lowered
+  /// head never pulls it).
+  void _adapt(List<DetectedFace> result, int captured) {
+    final adaptation = _adaptation, road = _road, engine = this.engine;
+    if (adaptation == null || road == null || engine == null) return;
+    if (tzSignActive(engine.snapshot)) return;
+    final id = calibration?.trackingId;
+    final driver = result.length == 1
+        ? result.single
+        : result.where((f) => f.measurement.trackingId == id).firstOrNull;
+    if (driver == null) return;
+    final head = road.head(_signalsOf(driver));
+    if (head != null) adaptation.observe(captured, adaptation.apply(head));
   }
 
   void _feedFatigue(List<FaceMeasurement> measured, int atUs) {
@@ -412,9 +445,9 @@ class TripController extends ChangeNotifier {
     eyeThreshold: (_engineSettings ?? settings).hiddenEyes
         ? null
         : calibration!.eyeThreshold,
-    nodThreshold: settings.pitchThreshold * .6,
-    eyesEventUs: settings.eyesClosedUs,
-    headEventUs: settings.headDownUs,
+    nodThreshold: (_engineSettings ?? settings).pitchThreshold * .6,
+    eyesEventUs: (_engineSettings ?? settings).eyesClosedUs,
+    headEventUs: (_engineSettings ?? settings).headDownUs,
   );
 
   /// Escalates an alarm that stayed unacknowledged for 5 s. Runs on the
@@ -568,7 +601,7 @@ class TripController extends ChangeNotifier {
         phase = TripPhase.findingFace;
         error = result.issues.join('\n');
       } else {
-        calibration = result.profile;
+        calibration = profile.calibrate(result.profile!);
         final saved = calibration!.toJson();
         _write((db) => db.setSetting('calibration', saved));
         if (note != null) {
@@ -599,11 +632,15 @@ class TripController extends ChangeNotifier {
     // get the road-frame profile (neutral 0); eyes hidden by the mount turn
     // the eye channel off like the ТЗ "hidden eyes" setting.
     _road = mountRelative ? RoadFrame.fromProfile(profile) : null;
+    final rate = this.profile.attention.roadAdaptDegPerMin;
+    _adaptation = mountRelative && rate != null
+        ? RoadAdaptation(degPerMin: rate)
+        : null;
     engineCalibration = mountRelative ? roadProfile(profile) : profile;
-    _engineSettings = AlgorithmSettings.fromJson({
-      ...settings.toJson(),
-      'hiddenEyes': settings.hiddenEyes || engineCalibration!.hiddenEyes,
-    });
+    _engineSettings = this.profile.session(
+      settings,
+      hiddenEyes: engineCalibration!.hiddenEyes,
+    );
     engine = ObservationEngine(
       sessionId: sessionId!,
       calibration: engineCalibration!,
@@ -618,6 +655,7 @@ class TripController extends ChangeNotifier {
       'settings_json': {
         ..._engineSettings!.toJson(),
         if (mountRelative) 'mountRelative': true,
+        'detectionProfile': this.profile.toJson(),
       },
       'calibration_json': calibration!.toJson(),
       'detector_id': detector.capabilities.id,
@@ -788,6 +826,7 @@ class TripController extends ChangeNotifier {
     _collector = null;
     _mountCollector = null;
     _road = null;
+    _adaptation = null;
     _fatigueMonitor = null;
     _audioRequested = false;
     _syncAudio(false);
@@ -1161,10 +1200,16 @@ class TripController extends ChangeNotifier {
           'source': 'trip',
           'tripId': tripId,
           'attention': 'trip',
+          // What the trip uses of the profile's attention: road-relative
+          // angles and the drift of the road pose (no eye gate, no zones).
           'attentionSettings': AttentionSettings(
             mountRelative: mountRelative,
+            roadAdaptDegPerMin: mountRelative
+                ? profile.attention.roadAdaptDegPerMin
+                : null,
           ).toJson(),
           'tzReference': tzReference,
+          'detectionProfile': profile.toJson(),
           'mount': {'position': mountPosition},
           'algorithm': ObservationEngine.algorithmVersion,
           'settings': settings.toJson(),

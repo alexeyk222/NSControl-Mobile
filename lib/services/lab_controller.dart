@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../logic/attention_zones.dart';
+import '../logic/detection_profile.dart';
 import '../logic/domain.dart';
 import '../logic/driver_continuity.dart';
 import '../logic/mount.dart';
@@ -39,7 +40,8 @@ class LabController extends ChangeNotifier {
     int Function()? clockUs,
   }) : clockUs = clockUs ?? (Stopwatch()..start()).elapsedMicrosecondsOf,
        attention =
-           attention ?? ZoneAttentionProvider(settings: AttentionSettings.lab),
+           attention ??
+           ZoneAttentionProvider(settings: DetectionProfile.current.attention),
        recorder = LabRecorder(recordingsDirectory) {
     this.server =
         server ?? LabServer(recordings: recorder.list, onConnected: _greeting);
@@ -171,8 +173,29 @@ class LabController extends ChangeNotifier {
   /// Acceptance (ТЗ only) or lab extensions; null for another provider.
   AttentionSettings? get attentionSettings => zoneProvider?.settings;
 
-  /// Switches the attention mode. The automata restart with the same
-  /// calibration, because the eye gate changes their input.
+  /// Detection profile (attention-method.md § 10): thresholds, T rule, eye
+  /// view limits and attention flags. «ТЗ 2.2 (эталон)» or the tuned one;
+  /// written to `meta.detectionProfile`.
+  DetectionProfile profile = DetectionProfile.current;
+
+  /// Switches the profile. The automata restart with the same calibration;
+  /// the T rule and the eye view limit apply from the next calibration.
+  void setProfile(DetectionProfile next) {
+    if (recording || next.id == profile.id) return;
+    profile = next;
+    attention = ZoneAttentionProvider(settings: next.attention, zones: zones);
+    _newSession();
+    _note(
+      next.isReference
+          ? 'ТЗ 2.2 (эталон): числа и калибровка ТЗ — после новой калибровки'
+          : 'Профиль ${next.id}: ${next.summary} — после новой калибровки',
+    );
+    _notify(force: true);
+  }
+
+  /// Switches the attention flags alone (experiments; the profile's
+  /// thresholds stay). The automata restart with the same calibration,
+  /// because the eye gate changes their input.
   void setAttentionSettings(AttentionSettings next) {
     if (recording || attentionSettings == null) return;
     attention = ZoneAttentionProvider(settings: next, zones: zones);
@@ -262,6 +285,7 @@ class LabController extends ChangeNotifier {
       'attention': attention.id,
       if (attentionSettings != null)
         'attentionSettings': attentionSettings!.toJson(),
+      'detectionProfile': profile.toJson(),
       'mount': mount,
       'algorithm': ObservationEngine.algorithmVersion,
       'settings': settings.toJson(),
@@ -716,8 +740,9 @@ class LabController extends ChangeNotifier {
     _notify(force: true);
   }
 
-  DetectorCapabilities calibrationDetector(DetectorCapabilities engine) {
+  DetectorCapabilities calibrationDetector(DetectorCapabilities base) {
     final settings = attentionSettings;
+    final engine = profile.detector(base);
     if (!eyeLimit45 ||
         settings == null ||
         settings.isAcceptance ||
@@ -748,8 +773,8 @@ class LabController extends ChangeNotifier {
     final otherGaze = Map.of(_otherGaze);
     _cancelCalibration();
     otherCalibrations.clear();
-    final profile = result.profile;
-    if (profile == null) {
+    final found = result.profile;
+    if (found == null) {
       error = result.issues.join('\n');
       _say('Калибровка не удалась');
       _note('Калибровка не удалась: ${result.issues.join(' ')}');
@@ -760,6 +785,7 @@ class LabController extends ChangeNotifier {
       return;
     }
     error = null;
+    final profile = this.profile.calibrate(found);
     calibration = profile;
     final restriction = result.note;
     if (restriction != null) {
@@ -779,7 +805,8 @@ class LabController extends ChangeNotifier {
     );
     for (final MapEntry(key: id, value: other) in others.entries) {
       final r = other?.finish(finishedUs);
-      final p = r?.profile;
+      final found = r?.profile;
+      final p = found == null ? null : this.profile.calibrate(found);
       if (p == null) {
         _note(
           'Калибровка $id не удалась: '
@@ -891,19 +918,20 @@ class LabController extends ChangeNotifier {
     // Side mount: the measurements carry road-frame angles, so the automata
     // get the road-frame profile (neutral 0) the pipeline made.
     final automata = zoneProvider?.engineCalibration ?? profile;
+    final session = this.profile.session(
+      settings,
+      hiddenEyes: automata.hiddenEyes,
+    );
     engine = ObservationEngine(
       sessionId: _sessionId!,
       calibration: automata,
-      settings: AlgorithmSettings.fromJson({
-        ...settings.toJson(),
-        'hiddenEyes': automata.hiddenEyes,
-      }),
+      settings: session,
     );
     _fatigue = FatigueMonitor(
       eyeThreshold: profile.hiddenEyes ? null : profile.eyeThreshold,
-      nodThreshold: settings.pitchThreshold * .6,
-      eyesEventUs: settings.eyesClosedUs,
-      headEventUs: settings.headDownUs,
+      nodThreshold: session.pitchThreshold * .6,
+      eyesEventUs: session.eyesClosedUs,
+      headEventUs: session.headDownUs,
     );
     fatigue = FatigueSnapshot.empty;
     // Where the driver was last seen, so a loss right after the start of the

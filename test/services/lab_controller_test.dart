@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:nscontrol/logic/detection_profile.dart';
 import 'package:nscontrol/logic/attention_zones.dart';
 import 'package:nscontrol/logic/domain.dart';
 import 'package:nscontrol/logic/replay.dart';
@@ -266,6 +267,8 @@ void main() {
   });
 
   test('lab mode raises a distraction event, acceptance does not', () async {
+    // Distraction is an experiment flag: off in profile v1.
+    lab.setAttentionSettings(AttentionSettings.lab);
     lab.calibrate();
     run(10.5, () => face());
     expect(lab.attentionSettings!.isAcceptance, isFalse);
@@ -293,6 +296,30 @@ void main() {
       isEmpty,
     );
     expect(reader.meta['attentionSettings'], isNotNull);
+  });
+
+  test('profile switch: v1 by default, «ТЗ 2.2 (эталон)» on demand', () async {
+    expect(lab.profile.id, 'v1');
+    expect(lab.attentionSettings!.roadAdaptDegPerMin, 1);
+    lab.calibrate();
+    run(10.5, () => face());
+    expect(lab.engine!.settings.pitchThreshold, 19);
+    await lab.startRecording();
+    run(1, () => face());
+    var reader = RecordingReader.parse(
+      await (await lab.stopRecording())!.readAsString(),
+    );
+    expect(reader.meta['detectionProfile']['id'], 'v1');
+
+    lab.setProfile(DetectionProfile.tz22);
+    expect(lab.attentionSettings!.isAcceptance, isTrue);
+    expect(lab.engine!.settings.pitchThreshold, 20);
+    await lab.startRecording();
+    run(1, () => face());
+    reader = RecordingReader.parse(
+      await (await lab.stopRecording())!.readAsString(),
+    );
+    expect(reader.meta['detectionProfile']['id'], 'tz-2.2');
   });
 
   test('mirror calibration writes calibrated zones', () async {

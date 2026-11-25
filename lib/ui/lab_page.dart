@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
-import '../logic/attention_zones.dart';
+import '../logic/detection_profile.dart';
 import '../logic/domain.dart';
 import '../services/detector.dart';
 import '../services/face_source.dart';
@@ -333,8 +333,7 @@ class _Controls extends StatelessWidget {
             ],
           ),
         ),
-        if (lab.attentionSettings case final settings?
-            when !settings.isAcceptance)
+        if (!lab.profile.isReference)
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             dense: true,
@@ -345,24 +344,25 @@ class _Controls extends StatelessWidget {
             value: lab.eyeLimit45,
             onChanged: lab.recording ? null : lab.setEyeLimit45,
           ),
-        if (lab.attentionSettings case final settings?)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: true, label: Text('Приёмка')),
-                ButtonSegment(value: false, label: Text('Лаборатория')),
-              ],
-              selected: {settings.isAcceptance},
-              onSelectionChanged: lab.recording
-                  ? null
-                  : (value) => lab.setAttentionSettings(
-                      value.single
-                          ? AttentionSettings.acceptance()
-                          : AttentionSettings.lab,
-                    ),
-            ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: SegmentedButton<String>(
+            segments: [
+              for (final p in DetectionProfile.all)
+                ButtonSegment(
+                  value: p.id,
+                  label: Text(
+                    p.isReference ? 'ТЗ 2.2 (эталон)' : 'Профиль ${p.id}',
+                  ),
+                ),
+            ],
+            selected: {lab.profile.id},
+            onSelectionChanged: lab.recording
+                ? null
+                : (value) =>
+                      lab.setProfile(DetectionProfile.byId(value.single)),
           ),
+        ),
         Wrap(
           spacing: 8,
           runSpacing: 8,

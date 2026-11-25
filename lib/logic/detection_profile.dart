@@ -72,13 +72,11 @@ class DetectionProfile {
     attention: AttentionSettings.acceptance(),
   );
 
-  /// Profile v1 (26.11.2026), chosen by `tool/tune.dart` on session 1: one
-  /// participant, ARKit on the left vent grille (see
-  /// docs/attention-method.md, п. 10). Preliminary until more people are
-  /// recorded.
-  /// First tuned profile (tool/tune.dart, session 1). Preliminary: one
-  /// participant, one car position. The head threshold is common to both
-  /// engines (joint feasible region); ARKit alone would take 17°.
+  /// Profile v1 (25.11.2026), chosen by `tool/tune.dart` on session 1: one
+  /// participant, the left vent grille (docs/attention-method.md, п. 10).
+  /// Preliminary until more people are recorded. The head threshold is
+  /// common to both engines (joint feasible region); ARKit alone would take
+  /// 17°.
   static const v1 = DetectionProfile(
     id: 'v1',
     eyeThresholds: {'arkit_face_tracking': .25},
@@ -100,6 +98,9 @@ class DetectionProfile {
 
   static const all = [tz22, v1];
 
+  /// The default of the trip and the lab.
+  static const current = v1;
+
   static DetectionProfile byId(String id) => all.firstWhere(
     (p) => p.id == id,
     orElse: () => throw ArgumentError('Нет профиля $id'),
@@ -118,6 +119,32 @@ class DetectionProfile {
     hiddenEyes: hiddenEyes,
     maximumGapUs: maximumGapUs,
   );
+
+  /// Settings of an observation session: the user's alarm options (volume,
+  /// vibration, escalation, preview, hidden eyes) with this profile's
+  /// thresholds. The ТЗ reference keeps the user's thresholds, because the
+  /// ТЗ lets the user set them. [hiddenEyes] adds the calibration's verdict.
+  AlgorithmSettings session(AlgorithmSettings user, {bool hiddenEyes = false}) {
+    final own = !isReference;
+    return AlgorithmSettings(
+      eyesClosedUs: own ? eyesClosedUs : user.eyesClosedUs,
+      headDownUs: own ? headDownUs : user.headDownUs,
+      pitchThreshold: own ? pitchThreshold : user.pitchThreshold,
+      headYawLimit: own ? headYawLimit : user.headYawLimit,
+      maximumGapUs: own ? maximumGapUs : user.maximumGapUs,
+      hiddenEyes: user.hiddenEyes || hiddenEyes,
+      volume: user.volume,
+      vibration: user.vibration,
+      showPreview: user.showPreview,
+      escalate: user.escalate,
+    );
+  }
+
+  /// [c] with this profile's eye threshold rule for its engine.
+  CalibrationProfile calibrate(CalibrationProfile c) {
+    final (share, cap) = eyeRule(c.detector.id);
+    return c.withEyeRule(share: share, cap: cap);
+  }
 
   /// The engine's capabilities with this profile's eye view limit.
   DetectorCapabilities detector(DetectorCapabilities base) {
