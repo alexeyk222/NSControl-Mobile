@@ -355,15 +355,32 @@ class EngineComparison {
     return result;
   }
 
+  /// Completed analyses in each consecutive 60 s window from the first
+  /// completion (КЧ-05 counts completions, a frame without a face included);
+  /// a trailing partial window is left out.
+  static List<int> perMinute(List<int> completedUs) {
+    if (completedUs.isEmpty) return const [];
+    final sorted = [...completedUs]..sort();
+    final start = sorted.first;
+    final full = (sorted.last - start) ~/ 60000000;
+    final counts = List.filled(full, 0);
+    for (final t in sorted) {
+      final i = (t - start) ~/ 60000000;
+      if (i < full) counts[i]++;
+    }
+    return counts;
+  }
+
   // 4: throughput and device.
   void _criterion4(StringBuffer b) {
     b.writeln();
     b.writeln('## 4. Производительность, нагрев, заряд');
     b.writeln();
     b.writeln(
-      '| Движок | Анализов в секунду | Задержка p50 / p95, мс | Кадров без лица |',
+      '| Движок | Анализов в секунду | Мин. за окно 60 с (КЧ-05: ≥ 600) | '
+      'Задержка p50 / p95, мс | Кадров без лица |',
     );
-    b.writeln('|---|---|---|---|');
+    b.writeln('|---|---|---|---|---|');
     for (final engine in recording.engines) {
       final frames = recording.frames.where((f) => f.engine == engine).toList();
       if (frames.length < 2) continue;
@@ -373,8 +390,14 @@ class EngineComparison {
         for (final f in frames) (f.completedUs - f.capturedUs) / 1000,
       ]..sort();
       final noFace = frames.where((f) => f.faceCount == 0).length;
+      final windows = perMinute([for (final f in frames) f.completedUs]);
+      final minute = windows.isEmpty
+          ? 'запись < 60 с'
+          : '${windows.reduce(math.min)} (окон ${windows.length}, '
+                'ниже 600: ${windows.where((n) => n < 600).length})';
       b.writeln(
-        '| $engine | ${_f(rate, 1)} | ${_f(_quantile(latency, .5), 0)} / '
+        '| $engine | ${_f(rate, 1)} | $minute | '
+        '${_f(_quantile(latency, .5), 0)} / '
         '${_f(_quantile(latency, .95), 0)} | ${_pct(noFace, frames.length)} |',
       );
     }

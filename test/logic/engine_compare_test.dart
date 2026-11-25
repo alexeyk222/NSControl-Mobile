@@ -113,6 +113,16 @@ void main() {
     expect(RegExp(r'· \d+ / \d+').allMatches(instruments).length, 2);
     expect(report, contains('Веки надёжны до |поворот| ≈ 60°'));
     expect(report, contains('ML Kit на кадрах ARKit: проанализировано'));
+    expect(report, contains('Мин. за окно 60 с'));
+  });
+
+  test('counts completed analyses per consecutive minute', () {
+    expect(EngineComparison.perMinute([]), isEmpty);
+    expect(EngineComparison.perMinute([0, 59000000]), isEmpty);
+    final every100ms = [for (var t = 0; t <= 150000000; t += 100000) t];
+    expect(EngineComparison.perMinute(every100ms), [600, 600]);
+    final gap = every100ms.where((t) => t < 30000000 || t >= 31000000);
+    expect(EngineComparison.perMinute(gap.toList()), [590, 600]);
   });
 
   test('a scaled ML Kit frame is compared by its own size', () {
@@ -147,11 +157,15 @@ void main() {
       SyntheticScenario(SyntheticStyle.arkitMlKit).toJsonl(),
     ).report();
     expect(report, isNot(contains('ошибка:')));
-    expect(
-      report,
-      contains('| arkit_face_tracking | строка calibration записи'),
-    );
-    expect(report, contains('| mlkit_face_detection | пересчитана'));
+    for (final mode in ['приёмка', 'затвор глаз']) {
+      expect(
+        report,
+        contains('| arkit_face_tracking | $mode | строка calibration записи'),
+      );
+      expect(report, contains('| mlkit_face_detection | $mode | пересчитана'));
+    }
+    // ARKit at 60 fps, ML Kit on every fourth frame: both above КЧ-05.
+    expect(report, contains('ниже 600: 0)'));
     expect(report, contains('ML Kit на кадрах ARKit'));
     expect(report, contains('Согласие движков на одних кадрах'));
   });
