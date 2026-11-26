@@ -336,6 +336,9 @@ class TripController extends ChangeNotifier {
   int sessionBaseUs = 0;
   DateTime? sessionStartedAt;
   int _calibrationStart = 0;
+
+  /// Time between the face confirmation and the calibration window.
+  static const calibrationSettleUs = 1500000;
   int _lifecycleGeneration = 0;
   int _lastUiUs = 0, _lastReconnectUs = 0, _lastWatchSyncUs = 0;
   int _lastWatchConnectUs = 0;
@@ -719,7 +722,11 @@ class TripController extends ChangeNotifier {
     _anchorFace = null;
     _anchorUs = null;
     _holderWindow.clear();
-    _calibrationStart = clock.elapsedMicroseconds;
+    // The window starts a moment after the tap: the hand that tapped
+    // «Подтвердить» covers the camera and the head turns back to the road
+    // (a side-mounted phone), which cost more than the 10 % of unusable
+    // frames the calibration allows.
+    _calibrationStart = clock.elapsedMicroseconds + calibrationSettleUs;
     if (!mountRelative) {
       _collector = CalibrationCollector(
         trackingId: trackingId,

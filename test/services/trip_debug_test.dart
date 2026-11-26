@@ -657,6 +657,33 @@ void main() {
       }
     });
 
+    test(
+      'the hand that confirmed the face does not spoil the calibration',
+      () async {
+        await trip.start();
+        trip.clock.stop();
+        final tap = trip.clock.elapsedMicroseconds;
+        arkit().emit([arkitFace()], tap);
+        trip.confirmFace(arkitFace().trackingId!);
+        expect(
+          trip.calibrationStartUs,
+          tap + TripController.calibrationSettleUs,
+        );
+        // The hand covers the camera, then the head turns back.
+        const settle = 1500000;
+        for (var t = tap + 33000; t < tap + 1400000; t += 33000) {
+          arkit().emit(t < tap + 900000 ? [] : [arkitFace(view: 10)], t);
+        }
+        final start = trip.calibrationStartUs;
+        for (var t = tap + 1400000; t <= tap + settle + 10200000; t += 33000) {
+          arkit().emit([arkitFace()], t);
+        }
+        trip.finishCalibration(start + 10300000);
+        expect(trip.phase, TripPhase.observing);
+        await trip.finish();
+      },
+    );
+
     test('nothing goes out without the recording or a live page', () async {
       trip.recordTrips = false;
       await trip.start();
