@@ -68,21 +68,27 @@ td.over{color:var(--warn);font-weight:600}
 #lb-banner.wrong #lb-big{color:var(--warn)}
 #lb-banner button{padding:8px 14px;font-size:15px;font-weight:600}
 #lb-banner.open button{background:var(--card);color:var(--fg);border-color:var(--card)}
-#lb-truths{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 8px}
+#lb-truths{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 6px}
 #lb-truths button{padding:4px 9px;font-size:13px}
-#lb-truths .grp{width:100%;font-size:12px;color:var(--muted);margin-top:2px}
-#lb-safety{font-size:12px;color:var(--warn);margin:0 0 6px}
-#lb-truths:not(.parked) .need{display:none}
+#lb-truths:not(.parked) .need,#lb-truths:not(.more-on) .more{display:none}
+#lb-more{border-style:dashed;color:var(--muted)}
+#lb-opts{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px}
+#lb-opts label{color:var(--fg);white-space:nowrap}
+#lb-safety{flex:1;min-width:200px}
 .lb-cols{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
 @media (max-width:760px){.lb-cols{grid-template-columns:1fr}}
 .lb-cols h4{margin:4px 0;font-size:13px;font-weight:600}
-.lb-cols h4 span{font-weight:400;color:var(--muted);font-size:12px;margin-left:6px}
-#lb-cases,#lb-outside{max-height:300px;overflow:auto;font-size:13px}
-#lb-cases .row,#lb-outside .row{padding:5px 0;border-bottom:1px solid var(--line)}
+.lb-cols h4 span{font-weight:400;font-size:12px;margin-left:6px}
+#lb-cases,#lb-outside{max-height:260px;overflow:auto;font-size:13px}
+#lb-cases .row,#lb-outside .row{padding:4px 0;border-bottom:1px solid var(--line)}
+#lb-cases .row.edit{background:var(--band)}
 #lb-cases .st{color:var(--muted);font-size:12px}
-#lb-cases select,#lb-outside select{max-width:210px}
-button.del{border:none;background:none;color:var(--muted);padding:0 6px;float:right}
-#lb-sum{font-size:13px;margin-bottom:4px}
+#lb-cases .dur{color:var(--muted)}
+#lb-outside select{max-width:210px}
+#lb-out{margin-top:8px;font-size:13px}
+#lb-out summary{cursor:pointer;color:var(--muted)}
+.act{float:right}
+button.del{border:none;background:none;color:var(--muted);padding:0 5px}
 #lb-by td:nth-child(n+2),#lb-by th:nth-child(n+2){width:1%;white-space:nowrap;padding-left:8px}
 .ok{color:#2e9d5b;font-weight:600}
 .no{color:var(--warn);font-weight:600}
@@ -161,19 +167,22 @@ const TRUTHS = [
   ["road","дорога","none","Digit1"],["mirror_left","левое зеркало","none","Digit2"],["mirror_center","салонное зеркало","none","Digit3"],
   ["mirror_right","правое зеркало","none","Digit4"],["blind_left","слепая зона слева","none","Digit5"],
   ["blind_right","слепая зона справа","none","Digit6"],["instruments","приборы / магнитола","none","Digit7"],
-  ["phone_short","телефон коротко (< 1 с)","none","Digit8"],["blink","долгое моргание (< 1 с)","none","Digit9"],["talk","разговор / смех","none","Digit0"],
+  ["phone_short","телефон до 1 с","none","Digit8"],["blink","моргание до 1 с","none","Digit9"],["talk","разговор / смех","none","Digit0"],
   ["yawn","зевок","none","KeyQ"],["squint","прищур / солнце","none","KeyW"],["hand_face","рука у лица","none","KeyE"],
-  ["other_quiet","другое, тревога не нужна","none","KeyR"],
-  ["eyes_closed","глаза закрыты","eyes","KeyZ"],["nod","клюю носом, голова упала","head","KeyX"],["look_down","долго смотрю вниз","head","KeyC"],
-  ["other_alarm","другое, тревога нужна","any","KeyV"]];
+  ["other_quiet","другое без тревоги","none","KeyR"],
+  ["eyes_closed","глаза закрыты","eyes","KeyZ"],["nod","клюю носом","head","KeyX"],["look_down","долго смотрю вниз","head","KeyC"],
+  ["other_alarm","другое с тревогой","any","KeyV"]];
 const TRUTH = Object.fromEntries(TRUTHS.map(([k, name, expect, code]) => [k, {name, expect, code, key: code.replace(/^(Digit|Key)/, "")}]));
 const KEY_TRUTH = Object.fromEntries(TRUTHS.map(t => [t[3], t[0]]));
+// The answers always on the card; the rest opens with «ещё…» (their keys
+// work either way).
+const MAIN_TRUTHS = new Set(["road","mirror_left","mirror_center","mirror_right","blind_left","blind_right","instruments","phone_short","eyes_closed","nod","look_down"]);
 // An alarm-wanted case shorter than this is not scored: the finger is
 // 0.3–0.5 s late at both ends, so a 2 s case may hold a 1.3 s closure.
 const POSITIVE_MIN = 3;
 // An alarm up to this long after the case's end still belongs to it.
 const CASE_TAIL = 1;
-let cases = [], openCase = null, pickedTruth = null, listsShownAt = 0, parked = false, flash = null;
+let cases = [], openCase = null, editCase = null, pickedTruth = null, listsShownAt = 0, parked = false, flash = null;
 let rtt = null, lastDerived = null, lastFrames = {}, dirty = true;
 let prevPhase = {eyes:null, head:null};
 
@@ -188,21 +197,19 @@ const vbar = el("div", "vbar",
   `<span>Только в памяти браузера, не пишется. Только ARKit.</span>`);
 videoCard.appendChild(vbar); grid.appendChild(videoCard);
 const labelCard = el("div", "card label");
-labelCard.appendChild(el("h3", null, `Разметка<span>начни случай, прими позу, закончи, ответь что было · верно или нет, посчитает страница</span>`));
+labelCard.appendChild(el("h3", null, `Разметка<span>пробел · поза · пробел · ответ</span>`));
 labelCard.appendChild(el("div", null,
   `<div id="lb-banner"><div class="txt"><div id="lb-big"></div><div id="lb-sub"></div></div>` +
   `<button id="lb-toggle"></button><button id="lb-cancel" style="display:none">Отменить <kbd>Esc</kbd></button></div>` +
-  `<div id="lb-safety">На ходу кнопками и клавишами управляет пассажир, водитель едет как обычно. Закрытые глаза, опущенная голова и отвлечение ставятся только в стоящей машине.</div>` +
-  `<div id="lb-truths"><div class="grp">Что было на самом деле. Тревога не нужна:</div>` +
-  TRUTHS.filter(t => t[2] === "none").map(([k, n]) => `<button data-truth="${k}"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`).join("") +
-  `<div class="grp"><label><input type="checkbox" id="lb-parked"> Машина стоит: показать позы, где тревога нужна</label>` +
-  ` · <label><input type="checkbox" id="lb-sound"> сигнал с этого компьютера через ${POSITIVE_MIN} с от начала случая</label></div>` +
-  `<div class="grp need">Тревога нужна (только в стоящей машине). Держи позу ${POSITIVE_MIN} с и дольше, до сигнала:</div>` +
-  TRUTHS.filter(t => t[2] !== "none").map(([k, n]) => `<button data-truth="${k}" class="bad need"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`).join("") + `</div>` +
-  `<div class="lb-cols"><div><h4>Случаи<span id="lb-sum"></span></h4><div id="lb-cases"></div></div>` +
-  `<div><h4>Итог по ответам</h4><table id="lb-by"></table>` +
-  `<h4>Тревоги вне случаев<span id="lb-out-info"></span></h4><div id="lb-outside"></div>` +
-  `<div class="marks" style="margin-top:8px"><button id="lb-mark">Отметить момент <kbd>M</kbd></button><span class="hint" style="align-self:center">для поездки: разберёшь потом в «Разборе поездок»</span></div></div></div>`));
+  `<div id="lb-truths">` +
+  TRUTHS.map(([k, n, e]) => `<button data-truth="${k}" class="${e !== "none" ? "bad need" : ""}${MAIN_TRUTHS.has(k) ? "" : " more"}"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`).join("") +
+  `<button id="lb-more">ещё…</button></div>` +
+  `<div id="lb-opts"><label><input type="checkbox" id="lb-parked"> Машина стоит</label>` +
+  `<span id="lb-safety">На ходу размечает пассажир. Позы с тревогой (глаза закрыты, голова вниз) только в стоящей машине.</span>` +
+  `<label><input type="checkbox" id="lb-sound"> сигнал через ${POSITIVE_MIN} с</label></div>` +
+  `<div class="lb-cols"><div><h4>Случаи<span id="lb-sum"></span></h4><div id="lb-cases"></div></div><div><table id="lb-by"></table></div></div>` +
+  `<details id="lb-out"><summary>Вне случаев<span id="lb-out-info"></span></summary><div id="lb-outside"></div>` +
+  `<div class="marks" style="margin-top:8px"><button id="lb-mark">Отметить момент <kbd>M</kbd></button><span class="hint" style="align-self:center">для поездки: разберёшь потом в «Разборе поездок»</span></div></details>`));
 grid.appendChild(labelCard);
 const limitsCard = el("div", "card");
 limitsCard.appendChild(el("h3", null, `Пороги и автоматы<span id="l-profile">—</span>`));
@@ -248,7 +255,7 @@ function reset() {
   series.clear(); bands.length = 0; events.length = 0; zones.length = 0; tNow = 0; threshold = null;
   lastFrames = {}; prevPhase = {eyes:null, head:null}; dirty = true;
   alarms = []; marks = []; boxes.length = 0; lastMeasure = null; renderAlarms();
-  cases = []; openCase = null; pickedTruth = null; renderCases();
+  cases = []; openCase = null; editCase = null; pickedTruth = null; renderCases();
 }
 function setChip(id, text, cls) { const c = document.getElementById(id); c.textContent = text; c.className = "chip" + (cls ? " " + cls : ""); }
 
@@ -425,7 +432,7 @@ function onCase(m) {
   if (m.edge === "end") { c.t1 = t; if (openCase === c.id) openCase = null; addFeed(`Случай ${c.n}: конец`, "lb"); }
   if (m.edge === "cancel") {
     cases = cases.filter(x => x.id !== c.id); cases.forEach((x, i) => x.n = i + 1);
-    if (openCase === c.id) openCase = null; addFeed("Случай отменён", "lb"); renderLabel(true); return;
+    if (openCase === c.id) openCase = null; if (editCase === c.id) editCase = null; addFeed("Случай отменён", "lb"); renderLabel(true); return;
   }
   if (m.truth && TRUTH[m.truth]) { c.truth = m.truth; if (m.edge === "truth") addFeed(`Случай ${c.n}: ${TRUTH[m.truth].name}`, "lb"); }
   if (openCase === c.id) pickedTruth = c.truth;
@@ -461,7 +468,7 @@ function caseResult(c) {
   if (!c.truth) return {code: open ? "open" : "ask", text: got.length ? "тревога: " + names + (open ? "" : " · что было?") : open ? "идёт…" : "что было?", cls: ""};
   const want = TRUTH[c.truth].expect;
   if (want === "none") return got.length ? {code: "false_alarm", text: "✗ ложная: " + names, cls: "no"} : open ? {code: "open", text: "пока тихо", cls: ""} : {code: "ok", text: "✓ тихо", cls: "ok"};
-  if (!open && c.t1 - c.t0 < POSITIVE_MIN) return {code: "too_short", text: `не оценивается: ${num(c.t1 - c.t0, 1)} с, а нужно ${POSITIVE_MIN} с и дольше`, cls: "skip"};
+  if (!open && c.t1 - c.t0 < POSITIVE_MIN) return {code: "too_short", text: `не в счёт: короче ${POSITIVE_MIN} с`, cls: "skip"};
   const type = want === "eyes" ? "eyes_closed" : want === "head" ? "head_pitch_down" : null;
   const hit = got.find(a => type == null || a.type === type);
   if (hit) return {code: "ok", text: `✓ тревога «${ALARM_NAMES[hit.type] || hit.type}» через ${num(hit.t - c.t0, 1)} с`, cls: "ok"};
@@ -474,23 +481,26 @@ function askCase() { const last = cases[cases.length - 1]; return last && last.t
 function setText(id, text) { const e = document.getElementById(id); if (e && e.textContent !== text) e.textContent = text; }
 function renderBanner() {
   const banner = document.getElementById("lb-banner"); if (!banner) return;
-  const open = cases.find(c => c.id === openCase), ask = open ? null : askCase(), last = cases[cases.length - 1];
+  const open = cases.find(c => c.id === openCase), edit = open ? null : cases.find(c => c.id === editCase);
+  const ask = open || edit ? null : askCase(), last = cases[cases.length - 1];
   let cls = "", big, sub, toggle = "Начать случай", cancel = false;
   if (open) {
     const dur = tNow - open.t0, need = open.truth && TRUTH[open.truth].expect !== "none";
     cls = "open"; toggle = "Закончить"; cancel = true;
-    big = `● Случай ${open.n} · ${open.truth ? TRUTH[open.truth].name : "ответ дашь потом"} · ${num(dur, 1)} с`;
-    sub = (need && dur < POSITIVE_MIN ? `Держи позу ещё ${num(POSITIVE_MIN - dur, 0)} с. ` : "") + "Пробел: закончить · Esc: отменить" + (open.truth ? "" : " · клавиша ответа: отметить, что делаешь");
+    big = `● Случай ${open.n}${open.truth ? " · " + TRUTH[open.truth].name : ""} · ${num(dur, 1)} с`;
+    sub = need && dur < POSITIVE_MIN ? `Держи позу ещё ${num(POSITIVE_MIN - dur, 0)} с` : "Пробел: закончить";
     if (!open.beeped && dur >= POSITIVE_MIN && (!open.truth || need)) { open.beeped = true; beep(); }
+  } else if (edit) {
+    cls = "ask"; cancel = true;
+    big = `Случай ${edit.n}: какой ответ верный?`; sub = "Клавиша ответа или кнопка ниже";
   } else if (ask) {
     cls = "ask"; cancel = true;
-    big = `Случай ${ask.n} закончен (${num(ask.t1 - ask.t0, 1)} с). Что это было?`;
-    sub = "Нажми клавишу ответа или кнопку ниже · Esc: удалить случай · Пробел: начать следующий, ответ дашь в списке";
+    big = `Случай ${ask.n}: что это было?`; sub = "Клавиша ответа или кнопка ниже";
   } else {
     const r = last ? caseResult(last) : null;
     if (r && (r.cls === "ok" || r.cls === "no")) cls = r.cls === "ok" ? "good" : "wrong";
-    big = last && last.truth ? `Случай ${last.n} · ${TRUTH[last.truth].name} · ${r.text}` : "Готов к разметке";
-    sub = "Пробел: начать случай, ответ дашь потом · или сразу клавиша ответа: начнёт случай с этим ответом";
+    big = last && last.truth ? `Случай ${last.n} · ${TRUTH[last.truth].name} · ${r.text}` : "Готов";
+    sub = "Пробел: начать случай. Или сразу клавиша ответа.";
   }
   if (flash && performance.now() < flash.until) sub = flash.text;
   if (banner.className !== cls) banner.className = cls;
@@ -510,16 +520,16 @@ function renderLabel(force) {
   if (a && a.tagName === "SELECT" && labelCard.contains(a)) return;
   if (!force && performance.now() - listsShownAt < 1000) return;
   listsShownAt = performance.now();
-  const target = cases.find(c => c.id === openCase) || askCase();
-  for (const b of document.querySelectorAll("#lb-truths button")) b.classList.toggle("on", !!target && target.truth === b.dataset.truth);
+  const target = cases.find(c => c.id === openCase) || cases.find(c => c.id === editCase) || askCase();
+  for (const b of document.querySelectorAll("#lb-truths button[data-truth]")) b.classList.toggle("on", !!target && target.truth === b.dataset.truth);
   const closed = cases.filter(c => c.t1 != null), res = new Map(closed.map(c => [c, caseResult(c).code]));
   const count = (list, code) => list.filter(c => res.get(c) === code).length;
   const wrong = count(closed, "false_alarm") + count(closed, "missed") + count(closed, "other_type");
   const outside = outsideAlarms();
   setChip("c-alarms", `случаев ${cases.length}${wrong ? " · ошибок " + wrong : ""} · тревог ${alarms.length}` + (cases.length ? ` (вне случаев ${outside.length})` : ""), wrong ? "bad" : "");
   document.getElementById("lb-sum").innerHTML = cases.length
-    ? `${cases.length}: <span class="ok">✓ ${count(closed, "ok")}</span> · <span class="${count(closed, "false_alarm") ? "no" : ""}">ложных ${count(closed, "false_alarm")}</span> · <span class="${count(closed, "missed") ? "no" : ""}">пропусков ${count(closed, "missed")}</span>` +
-      (count(closed, "ask") ? ` · без ответа ${count(closed, "ask")}` : "")
+    ? `${cases.length}: <span class="ok">✓ ${count(closed, "ok")}</span> · <span class="${count(closed, "false_alarm") ? "no" : "hint"}">ложных ${count(closed, "false_alarm")}</span> · <span class="${count(closed, "missed") ? "no" : "hint"}">пропусков ${count(closed, "missed")}</span>` +
+      (count(closed, "ask") ? ` · <span class="hint">без ответа ${count(closed, "ask")}</span>` : "")
     : "";
   const fact = (v, text) => v != null ? text : null;
   document.getElementById("lb-cases").innerHTML = cases.slice().reverse().map(c => {
@@ -528,27 +538,29 @@ function renderLabel(force) {
       st.eyes != null ? `глаза от ${num(st.eyes, 2)} (T ${num(threshold, 2)})` : st.frames ? "глаза не видны" : null,
       st.te ? `признак глаз ${num(st.te, 1)} с (порог ${num(thresholds.eyes, 1)})` : null, st.th ? `признак головы ${num(st.th, 1)} с (порог ${num(thresholds.head, 1)})` : null,
       st.gate ? `затвор: ${st.gate}` : null].filter(Boolean).join(" · ");
-    return `<div class="row"><button class="del" data-del="${c.id}" title="Удалить случай">✕</button><b>${c.n}</b> ${fmtT(c.t0)} · ${num(dur, 1)} с ` +
-      (c.id === openCase ? `<i>${c.truth ? TRUTH[c.truth].name : "идёт"}</i>` : `<select data-case="${c.id}"><option value="">что было?</option>${truthOptions(c.truth)}</select>`) +
-      `<div class="${r.cls}">${r.text}</div><div class="st">${facts}</div></div>`;
-  }).join("") || `<div class="hint">Случаев пока нет. Пробел, поза, пробел, клавиша ответа. Время между случаями не оценивается: можно смотреть на клавиатуру.</div>`;
+    // What the automata saw is spelled out only where the case went wrong;
+    // elsewhere it is the row's tooltip.
+    return `<div class="row${c.id === editCase ? " edit" : ""}" title="${fmtT(c.t0)} · ${facts}"><span class="act">` +
+      (c.id === openCase ? "" : `<button class="del" data-edit="${c.id}" title="Поменять ответ">✎</button>`) + `<button class="del" data-del="${c.id}" title="Удалить случай">✕</button></span>` +
+      `<b>${c.n}</b> ${c.truth ? TRUTH[c.truth].name : c.id === openCase ? "идёт" : "без ответа"} <span class="dur">${num(dur, 1)} с</span> · <span class="${r.cls}">${r.text}</span>` +
+      (r.cls === "no" ? `<div class="st">${facts}</div>` : "") + `</div>`;
+  }).join("") || `<div class="hint">Пока нет. Время между случаями не оценивается: можно смотреть на клавиатуру.</div>`;
   const rows = TRUTHS.map(([k, name]) => {
     const list = closed.filter(c => c.truth === k); if (!list.length) return "";
     const cell = (n, bad) => `<td class="${n && bad ? "no" : ""}">${n || "·"}</td>`;
     return `<tr><td>${name}</td><td>${list.length}</td><td class="${count(list, "ok") ? "ok" : ""}">${count(list, "ok") || "·"}</td>${cell(count(list, "false_alarm"), true)}${cell(count(list, "missed"), true)}${cell(count(list, "other_type") + count(list, "too_short"), false)}</tr>`;
   }).join("");
   document.getElementById("lb-by").innerHTML = rows
-    ? `<tr><th>ответ</th><th>всего</th><th>✓</th><th>ложных</th><th>пропусков</th><th title="короче 3 с или тревога другого типа">не в счёт</th></tr>` + rows
-    : `<tr><td class="hint" style="border:none">Появится после первого случая с ответом.</td></tr>`;
-  document.getElementById("lb-out-info").textContent = outside.length ? `${outside.length}, без ответа ${outside.filter(a => !a.verdict).length} · на стенде их можно не разбирать` : "";
+    ? `<tr><th>ответ</th><th>всего</th><th>✓</th><th>ложных</th><th>пропусков</th><th title="короче 3 с или тревога другого типа">не в счёт</th></tr>` + rows : "";
   const loose = marks.filter(m => !m.eventId && m.kind !== "case").map(m => ({t: m.t, mark: m}));
+  document.getElementById("lb-out-info").textContent = `: тревог ${outside.length}` + (outside.some(a => !a.verdict) ? `, без ответа ${outside.filter(a => !a.verdict).length}` : "") + (loose.length ? `, меток ${loose.length}` : "");
   document.getElementById("lb-outside").innerHTML = [...outside.map(a => ({t: a.t, alarm: a})), ...loose].sort((x, y) => y.t - x.t).map(x => {
     if (x.mark) return `<div class="row"><b>${fmtT(x.t)}</b> ${KINDS[x.mark.kind] || x.mark.kind} ${x.mark.source === "phone" ? "с телефона" : "с Mac"} <span class="hint">· разбор после поездки</span></div>`;
     const a = x.alarm, known = a.cause && TRUTH[a.cause];
     return `<div class="row"><b class="no">${fmtT(a.t)}</b> ${ALARM_NAMES[a.type] || a.type}${a.t1 != null ? ` · ${num(a.t1 - a.t0, 1)} с` : ""} ` +
       `<select data-id="${a.id}"><option value="">что было?</option>${truthOptions(known ? a.cause : null, true)}</select>` +
       (a.verdict ? ` <span class="${a.verdict === "true" ? "ok" : "no"}">${a.verdict === "true" ? "верная" : "ложная"}${a.cause && !known ? " · " + (CAUSES[a.cause] || a.cause) : ""}</span>` : "") + `</div>`;
-  }).join("") || `<div class="hint">Нет. Сюда попадают тревоги, которые сработали не во время случая, и метки с телефона (двойное касание).</div>`;
+  }).join("") || `<div class="hint">Сюда попадают тревоги, которые сработали не во время случая, и метки с телефона. На стенде их можно не разбирать.</div>`;
 }
 function renderAlarms() { renderLabel(true); }
 function renderCases() { renderLabel(true); }
@@ -564,11 +576,13 @@ function beep() {
 function newCaseId() { return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 function labelling() { return !!meta && meta.source === "trip"; }
 function toggleCase() {
-  if (!labelling()) return; unlockAudio(); flash = null;
+  if (!labelling()) return; unlockAudio(); flash = null; editCase = null;
   if (openCase) { sendMark("case", {caseId: openCase, edge: "end", truth: pickedTruth || undefined}); return; }
   pickedTruth = null; sendMark("case", {caseId: newCaseId(), edge: "start"});
 }
 function cancelCase() {
+  // Esc while choosing another answer only leaves the answer as it was.
+  if (!openCase && editCase) { editCase = null; return renderLabel(true); }
   const c = cases.find(c => c.id === openCase) || askCase();
   if (c) sendMark("case", {caseId: c.id, edge: "cancel"});
 }
@@ -578,7 +592,8 @@ function pickTruth(k) {
   if (!labelling() || !TRUTH[k]) return; unlockAudio();
   if (TRUTH[k].expect !== "none" && !parked) return say("Позы, где тревога нужна, ставятся только в стоящей машине: отметь «Машина стоит».");
   flash = null;
-  const target = cases.find(c => c.id === openCase) || askCase();
+  const target = cases.find(c => c.id === openCase) || cases.find(c => c.id === editCase) || askCase();
+  editCase = null;
   if (target) { if (target.id === openCase) pickedTruth = k; sendMark("case", {caseId: target.id, edge: "truth", truth: k}); return; }
   pickedTruth = k; sendMark("case", {caseId: newCaseId(), edge: "start", truth: k});
 }
@@ -603,15 +618,16 @@ labelCard.addEventListener("click", e => {
   // A focused button would take the next Space as its own click.
   const b = e.target.closest("button"); if (b) b.blur();
   const d = e.target.closest("button[data-del]"); if (d) sendMark("case", {caseId: d.dataset.del, edge: "cancel"});
+  const ed = e.target.closest("button[data-edit]"); if (ed) { editCase = editCase === ed.dataset.edit ? null : ed.dataset.edit; renderLabel(true); }
+  if (e.target.closest("#lb-more")) document.getElementById("lb-more").textContent = document.getElementById("lb-truths").classList.toggle("more-on") ? "меньше" : "ещё…";
 });
 labelCard.addEventListener("change", e => {
   const s = e.target.closest("select"); if (!s) return;
   const value = s.value; s.blur();
   if (!value) return renderLabel(true);
-  if (s.dataset.case) sendMark("case", {caseId: s.dataset.case, edge: "truth", truth: value});
   // An alarm outside the cases: the answer says what happened, the verdict
   // follows from it (nothing that wants an alarm happened: false).
-  else if (s.dataset.id) sendMark(TRUTH[value].expect === "none" ? "false" : "true", {eventId: s.dataset.id, cause: value});
+  if (s.dataset.id) sendMark(TRUTH[value].expect === "none" ? "false" : "true", {eventId: s.dataset.id, cause: value});
 });
 labelCard.addEventListener("focusout", e => { if (e.target.tagName === "SELECT") setTimeout(() => renderLabel(true), 0); });
 document.addEventListener("keydown", e => {

@@ -88,11 +88,11 @@ const TRUTHS = [
   ["road","дорога","none","Digit1"],["mirror_left","левое зеркало","none","Digit2"],["mirror_center","салонное зеркало","none","Digit3"],
   ["mirror_right","правое зеркало","none","Digit4"],["blind_left","слепая зона слева","none","Digit5"],
   ["blind_right","слепая зона справа","none","Digit6"],["instruments","приборы / магнитола","none","Digit7"],
-  ["phone_short","телефон коротко (< 1 с)","none","Digit8"],["blink","долгое моргание (< 1 с)","none","Digit9"],["talk","разговор / смех","none","Digit0"],
+  ["phone_short","телефон до 1 с","none","Digit8"],["blink","моргание до 1 с","none","Digit9"],["talk","разговор / смех","none","Digit0"],
   ["yawn","зевок","none","KeyQ"],["squint","прищур / солнце","none","KeyW"],["hand_face","рука у лица","none","KeyE"],
-  ["other_quiet","другое, тревога не нужна","none","KeyR"],
-  ["eyes_closed","глаза закрыты","eyes","KeyZ"],["nod","клюю носом, голова упала","head","KeyX"],["look_down","долго смотрю вниз","head","KeyC"],
-  ["other_alarm","другое, тревога нужна","any","KeyV"]];
+  ["other_quiet","другое без тревоги","none","KeyR"],
+  ["eyes_closed","глаза закрыты","eyes","KeyZ"],["nod","клюю носом","head","KeyX"],["look_down","долго смотрю вниз","head","KeyC"],
+  ["other_alarm","другое с тревогой","any","KeyV"]];
 const TRUTH = Object.fromEntries(TRUTHS.map(([k, name, expect, code]) => [k, {name, expect, code, key: code.replace(/^(Digit|Key)/, "")}]));
 const KEY_TRUTH = Object.fromEntries(TRUTHS.map(t => [t[3], t[0]]));
 // Why the system was wrong, when the reviewer can tell (optional).
@@ -189,7 +189,7 @@ function caseResult(c) {
   if (!c.truth) return {code: "ask", text: names ? "тревога: " + names + " · что было?" : "что было?", cls: ""};
   const want = TRUTH[c.truth].expect;
   if (want === "none") return c.alarms.length ? {code: "false_alarm", text: "✗ ложная: " + names, cls: "no"} : {code: "ok", text: "✓ тихо", cls: "ok"};
-  if (c.endedUs - c.atUs < POSITIVE_MIN_US) return {code: "too_short", text: `не оценивается: ${num((c.endedUs - c.atUs) / 1e6)} с, а нужно 3 с и дольше`, cls: "skip"};
+  if (c.endedUs - c.atUs < POSITIVE_MIN_US) return {code: "too_short", text: "не в счёт: короче 3 с", cls: "skip"};
   const type = want === "eyes" ? "eyes_closed" : want === "head" ? "head_pitch_down" : null;
   const hit = c.alarms.find(a => type == null || a.eventType === type);
   if (hit) return {code: "ok", text: `✓ тревога «${TYPES[hit.eventType] || hit.eventType}» через ${num((hit.atUs - c.atUs) / 1e6)} с`, cls: "ok"};
@@ -252,7 +252,7 @@ function renderList() {
     let title, vt, cls;
     if (it.kind === "case") {
       const r = caseResult(it);
-      title = `случай ${it.n}${it.truth ? " · " + TRUTH[it.truth].name : ""}`; vt = r.text.replace(/ через .*$/, "").replace(/^не оценивается.*$/, "не в счёт"); cls = r.cls === "ok" ? "true" : r.cls === "no" ? "false" : "none";
+      title = `случай ${it.n}${it.truth ? " · " + TRUTH[it.truth].name : ""}`; vt = r.text.replace(/ через .*$/, ""); cls = r.cls === "ok" ? "true" : r.cls === "no" ? "false" : "none";
     } else {
       title = (it.kind === "event" ? "тревога: " + (TYPES[it.eventType] || it.eventType) : `метка: ${({mark:"что-то не так",miss:"пропуск",false:"ложная",true:"верная"})[it.mark] || it.mark}${it.source === "phone" ? " (телефон)" : ""}`) +
         (it.cause ? " · " + ((TRUTH[it.cause] || {}).name || CAUSES[it.cause] || it.cause) : "");
