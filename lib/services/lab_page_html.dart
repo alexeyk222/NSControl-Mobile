@@ -63,6 +63,8 @@ td.over{color:var(--warn);font-weight:600}
 #case-truths{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 8px}
 #case-truths button{padding:4px 9px;font-size:13px}
 #case-truths .grp{width:100%;font-size:12px;color:var(--muted);margin-top:2px}
+#case-safety{font-size:12px;color:var(--warn);margin:0 0 6px}
+#case-truths:not(.parked) .need{display:none}
 #case-sum{font-size:13px;margin-bottom:4px}
 #cases{max-height:320px;overflow:auto;font-size:13px}
 #cases .row{padding:5px 0;border-bottom:1px solid var(--line)}
@@ -164,10 +166,12 @@ const casesCard = el("div", "card");
 casesCard.appendChild(el("h3", null, `Случаи<span>начни, прими позу, отметь что было</span>`));
 casesCard.appendChild(el("div", "marks", `<button id="case-btn">Новый случай <kbd>N</kbd></button><button id="case-cancel" style="display:none">Отменить</button><span id="case-state"></span>`));
 casesCard.appendChild(el("div", null,
+  `<div id="case-safety">На ходу кнопками и клавишей N управляет пассажир, водитель едет как обычно. Закрытые глаза, опущенная голова и отвлечение ставятся только в стоящей машине.</div>` +
   `<div id="case-truths"><div class="grp">Что было на самом деле. Тревога не нужна:</div>` +
   TRUTHS.filter(t => t[2] === "none").map(([k, n]) => `<button data-truth="${k}">${n}</button>`).join("") +
-  `<div class="grp">Тревога нужна:</div>` +
-  TRUTHS.filter(t => t[2] !== "none").map(([k, n]) => `<button data-truth="${k}" class="bad">${n}</button>`).join("") + `</div>`));
+  `<div class="grp"><label><input type="checkbox" id="case-parked"> Машина стоит: показать позы, где тревога нужна</label></div>` +
+  `<div class="grp need">Тревога нужна (только в стоящей машине):</div>` +
+  TRUTHS.filter(t => t[2] !== "none").map(([k, n]) => `<button data-truth="${k}" class="bad need">${n}</button>`).join("") + `</div>`));
 casesCard.appendChild(el("div", null, `<div id="case-sum"></div><div id="cases"></div>`));
 grid.appendChild(casesCard);
 const marksCard = el("div", "card");
@@ -473,6 +477,12 @@ function toggleCase() {
   pickedTruth = null; sendMark("case", {caseId: newCaseId(), edge: "start"});
 }
 document.getElementById("case-btn").addEventListener("click", toggleCase);
+{
+  // The alarm-wanted poses are staged only in a parked car (safety):
+  // hidden until the tester says the car stands. Not remembered.
+  const parked = document.getElementById("case-parked");
+  parked.addEventListener("change", () => document.getElementById("case-truths").classList.toggle("parked", parked.checked));
+}
 document.getElementById("case-cancel").addEventListener("click", () => { if (openCase) sendMark("case", {caseId: openCase, edge: "cancel"}); });
 document.getElementById("case-truths").addEventListener("click", e => {
   const b = e.target.closest("button[data-truth]"); if (!b) return;
