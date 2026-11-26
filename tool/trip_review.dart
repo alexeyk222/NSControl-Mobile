@@ -13,7 +13,8 @@ const _usage = '''
 Без --review берётся файл разбора рядом с записью; если его нет, берутся
 только случаи со страницы («Новый случай»), и время между ними не
 оценивается (испытатель в это время смотрит в клавиатуру). --score-gaps
-считает его ездой без тревог. Размеченную запись можно
+считает его ездой без тревог; с файлом разбора берётся выбор, сделанный на
+странице разбора. Размеченную запись можно
 прогнать: dart run tool/replay.dart размеченная.jsonl --profile v1
 и подобрать пороги: dart run tool/tune.dart размеченная.jsonl … --out tune.md
 ''';
@@ -50,7 +51,7 @@ Future<void> main(List<String> args) async {
   final TripReview review;
   if (await File(reviewPath).exists()) {
     review = TripReview.parse(await File(reviewPath).readAsString());
-    scoreGaps ??= true;
+    scoreGaps ??= review.scoreGaps ?? true;
   } else {
     scoreGaps ??= false;
     stderr.writeln('Нет файла разбора $reviewPath: беру только случаи.');
@@ -122,7 +123,7 @@ String tripReviewReport(String jsonl, TripReview review) {
       '- Наблюдение ${(observedUs / 6e7).toStringAsFixed(1)} мин от первой калибровки.',
     );
   final events = review.items.where((i) => i.isEvent).toList();
-  final marks = review.items.where((i) => !i.isEvent).toList();
+  final marks = review.items.where((i) => !i.isEvent && !i.isCase).toList();
   int count(String? type, String? verdict) => events
       .where(
         (e) => (type == null || e.eventType == type) && e.verdict == verdict,
@@ -145,8 +146,12 @@ String tripReviewReport(String jsonl, TripReview review) {
   b
     ..writeln()
     ..writeln(
-      '- Ложных тревог глаз и головы: $tzFalse'
-      '${hours > 0 ? ', ${(tzFalse / hours).toStringAsFixed(1)} в час (КЧ-03: не больше 1 в час)' : ''}.',
+      '- Ложных тревог глаз и головы вне случаев: $tzFalse'
+      '${review.scoreGaps == false
+          ? '; в час не считаются: время вне случаев не оценивается (стенд)'
+          : hours > 0
+          ? ', ${(tzFalse / hours).toStringAsFixed(1)} в час (КЧ-03: не больше 1 в час)'
+          : ''}.',
     )
     ..writeln(
       '- Пропусков по меткам: глаза '
@@ -179,13 +184,14 @@ String tripReviewReport(String jsonl, TripReview review) {
 
   String n(Object? v, [int digits = 1]) =>
       v is num ? v.toStringAsFixed(digits) : '—';
-  final cases = tripCases(caseLines);
+  final cases = tripCases(caseLines, review: review);
   if (cases.isNotEmpty) {
     const names = {
       'ok': 'верно',
       'false_alarm': 'ложная',
       'missed': 'пропуск',
       'other_type': 'другой тип',
+      'too_short': 'короче 3 с, не в счёт',
       'unsure': 'без ответа',
     };
     final outcomes = [for (final c in cases) caseOutcome(c, alarms)];
@@ -197,6 +203,23 @@ String tripReviewReport(String jsonl, TripReview review) {
         '- ${cases.length} случаев: ${names.entries.map((e) => '${e.value} ${outcomes.where((o) => o == e.key).length}').join(', ')}.',
       )
       ..writeln()
+      ..writeln('| Что было | всего | верно | ложных | пропусков | не в счёт |')
+      ..writeln('|---|---:|---:|---:|---:|---:|');
+    for (final truth in caseTruths.keys) {
+      final of = [
+        for (var i = 0; i < cases.length; i++)
+          if (cases[i].truth == truth) outcomes[i],
+      ];
+      if (of.isEmpty) continue;
+      int count(Set<String> which) => of.where(which.contains).length;
+      b.writeln(
+        '| $truth | ${of.length} | ${count({'ok'})} | '
+        '${count({'false_alarm'})} | ${count({'missed'})} | '
+        '${count({'other_type', 'too_short', 'unsure'})} |',
+      );
+    }
+    b
+      ..writeln()
       ..writeln(
         '| Время | Длит., с | Что было | Ждали | Тревоги | Итог | Наклон макс, ° | Поворот макс, ° | Глаза мин |',
       )
@@ -205,7 +228,8 @@ String tripReviewReport(String jsonl, TripReview review) {
       final c = cases[i];
       final inside = derived.where((d) {
         final t = (d['atUs'] as num).toInt();
-        return t >= c.startUs && t <= c.toUs;
+        // The pose itself: the tail after the end is not the pose.
+        return t >= c.startUs && t <= (c.endUs ?? c.startUs);
       });
       double? pitch, yaw, eyes;
       for (final d in inside) {
@@ -242,7 +266,7 @@ String tripReviewReport(String jsonl, TripReview review) {
       )
       ..writeln('|---|---|---|---|---|---|---|---|---|');
   }
-  for (final item in review.items) {
+  for (final item in review.items.where((i) => !i.isCase)) {
     final d = near(item.atUs);
     final m = (d?['measure'] as Map?) ?? const {};
     final gate = (d?['attention'] as Map?)?['eyeGate'];

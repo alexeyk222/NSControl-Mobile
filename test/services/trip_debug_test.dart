@@ -10,7 +10,9 @@ import 'package:nscontrol/logic/replay.dart';
 import 'package:nscontrol/logic/trip_review.dart';
 import 'package:nscontrol/services/arkit_engine.dart';
 import 'package:nscontrol/services/debug_video.dart';
+import 'package:nscontrol/services/lab_page_html.dart';
 import 'package:nscontrol/services/lab_recorder.dart';
+import 'package:nscontrol/services/review_page_html.dart';
 import 'package:nscontrol/services/trip_controller.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -508,6 +510,151 @@ void main() {
       expect(caseOutcome(c(null), eyes), 'unsure');
       expect(caseOutcome(c('road', end: null), const []), 'unsure');
       expect(caseOutcome(c('something new'), const []), 'unsure');
+    });
+
+    test('case rules: short alarm-wanted poses, the tail, the next case', () {
+      TripCase c(String truth, int start, int end) => TripCase('c$start', start)
+        ..endUs = end
+        ..truth = truth;
+      // An alarm-wanted pose held less than 3 s is not scored either way:
+      // the finger is late at both ends, the closure may be 1.3 s.
+      expect(
+        caseOutcome(c('eyes_closed', 0, 2900000), const [
+          (1700000, 'eyes_closed'),
+        ]),
+        'too_short',
+      );
+      expect(caseOutcome(c('nod', 0, 2900000), const []), 'too_short');
+      expect(caseOutcome(c('nod', 0, 3000000), const []), 'missed');
+      expect(caseOutcome(c('blink', 0, 900000), const []), 'ok');
+      expect(
+        caseWindows([c('eyes_closed', 0, 2900000)]).single.step,
+        TripReviewSteps.unsure,
+      );
+
+      // The tail after a case never reaches into the next one.
+      Map<String, dynamic> mark(String id, String edge, int at, [String? t]) =>
+          {
+            'type': 'mark',
+            'kind': 'case',
+            'caseId': id,
+            'edge': edge,
+            'atUs': at,
+            'truth': ?t,
+          };
+      final cases = tripCases([
+        mark('a', 'start', 0),
+        mark('a', 'end', 4000000, 'mirror_left'),
+        mark('b', 'start', 4300000),
+        mark('b', 'end', 8000000, 'eyes_closed'),
+      ]);
+      expect(cases.map((c) => c.toUs), [4300000, 9000000]);
+      const alarm = [(4800000, 'eyes_closed')];
+      expect(cases.map((c) => caseOutcome(c, alarm)), ['ok', 'ok']);
+      expect(caseWindows(cases).map((w) => '${w.step} ${w.toUs}'), [
+        'trip_case_quiet 4300000',
+        'trip_case_eyes 9000000',
+      ]);
+    });
+
+    test('the review corrects cases; an alarm in a case is not judged apart', () {
+      String line(Map<String, Object?> m) => jsonEncode(m);
+      Map<String, Object?> mark(String id, String edge, int at, [String? t]) =>
+          {
+            'type': 'mark',
+            'kind': 'case',
+            'caseId': id,
+            'edge': edge,
+            'atUs': at,
+            'truth': ?t,
+          };
+      final jsonl = [
+        line({'type': 'calibration', 'atUs': 1000000}),
+        line(mark('a', 'start', 10000000)),
+        line(mark('a', 'end', 14000000, 'road')),
+        line(mark('b', 'start', 32500000, 'mirror_left')),
+        line(mark('b', 'end', 36000000)),
+        line({'type': 'derived', 'atUs': 60000000}),
+      ].join('\n');
+      final review = TripReview.fromJson({
+        'type': 'review',
+        'schema': 1,
+        'recordingId': 'trip-1',
+        'scoreGaps': false,
+        'items': [
+          // The reviewer saw on the clip that it was a long look down and
+          // that the case ended a second later.
+          {
+            'kind': 'case',
+            'caseId': 'a',
+            'atUs': 10000000,
+            'endedUs': 15000000,
+            'truth': 'look_down',
+          },
+          // An older page listed the alarm inside the case as well.
+          {
+            'kind': 'event',
+            'eventType': 'head_pitch_down',
+            'atUs': 12000000,
+            'signStartedUs': 10500000,
+            'endedUs': 14500000,
+          },
+          // A false alarm between the cases: its margin stops at case b.
+          {
+            'kind': 'event',
+            'eventType': 'head_pitch_down',
+            'atUs': 30000000,
+            'signStartedUs': 28500000,
+            'endedUs': 31000000,
+            'verdict': 'false',
+            'cause': 'road',
+            'truth': 'road',
+          },
+        ],
+      });
+      expect(review.scoreGaps, isFalse);
+      final cases = tripCases([
+        for (final l in const LineSplitter().convert(jsonl))
+          jsonDecode(l) as Map<String, dynamic>,
+      ], review: review);
+      expect(cases.first.truth, 'look_down');
+      expect(cases.first.endUs, 15000000);
+      List<String> steps(String labelled) {
+        final labels = Recording.parse(labelled).labels;
+        return [
+          for (final l in labels.where((l) => l.edge == 'start'))
+            '${l.step} ${l.atUs ~/ 100000} '
+                '${labels.firstWhere((e) => e.edge == 'end' && e.rep == l.rep).atUs ~/ 100000}',
+        ];
+      }
+
+      // The reviewer chose not to score the time outside the cases.
+      expect(steps(labelTrip(jsonl, review)), [
+        'trip_unsure 10 100',
+        'trip_case_head 100 160',
+        'trip_unsure 160 265',
+        'trip_alarm_false 265 325',
+        'trip_case_quiet 325 370',
+        'trip_unsure 370 600',
+      ]);
+      expect(
+        steps(labelTrip(jsonl, review, scoreGaps: true)),
+        contains('trip_drive 160 265'),
+      );
+    });
+
+    test('the pages offer the answers of caseTruths, one key each', () {
+      for (final html in [labPageHtml, reviewPageHtml]) {
+        final block = RegExp(
+          r'const TRUTHS = \[(.*?)\]\];',
+          dotAll: true,
+        ).firstMatch(html)!.group(1)!;
+        final rows = RegExp(
+          r'\["(\w+)","[^"]*","(\w+)","(\w+)"',
+        ).allMatches(block).toList();
+        expect({for (final m in rows) m.group(1)!: m.group(2)!}, caseTruths);
+        expect({for (final m in rows) m.group(3)}, hasLength(rows.length));
+      }
     });
 
     test(

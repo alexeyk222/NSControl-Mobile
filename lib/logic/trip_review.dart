@@ -17,11 +17,18 @@ class TripReview {
     required this.items,
     this.profile,
     this.reviewedAt,
+    this.scoreGaps,
   });
 
   final String recordingId;
   final List<TripReviewItem> items;
   final String? profile, reviewedAt;
+
+  /// The reviewer's choice for the time outside the cases and the reviewed
+  /// alarms: true, it was driving and any alarm there is false; false, it
+  /// is not scored (a staged session: the tester looks at the keyboard
+  /// between the cases). Null: not chosen.
+  final bool? scoreGaps;
 
   static const schema = 1;
 
@@ -36,6 +43,7 @@ class TripReview {
       recordingId: json['recordingId'] as String? ?? '',
       profile: json['profile'] as String?,
       reviewedAt: json['reviewedAt'] as String?,
+      scoreGaps: json['scoreGaps'] as bool?,
       items: [
         for (final item in (json['items'] as List? ?? const []))
           TripReviewItem.fromJson(Map<String, dynamic>.from(item as Map)),
@@ -62,14 +70,21 @@ class TripReviewItem {
     this.note,
     this.windowFromUs,
     this.windowToUs,
+    this.caseId,
+    this.truth,
   });
 
-  /// `event` or `mark`.
+  /// `event`, `mark` or `case`.
   final String kind;
 
-  /// Alarm: its threshold moment; mark: when it was set.
+  /// Alarm: its threshold moment; mark: when it was set; case: its start.
   final int atUs;
   final String? eventId, eventType;
+
+  /// Case (a staged case of the live page, corrected on the review page):
+  /// its id, and what really happened (a key of [caseTruths]; empty: no
+  /// answer). [atUs] and [endedUs] are its start and end.
+  final String? caseId, truth;
   final int? signStartedUs, endedUs;
 
   /// Mark kind as set on the drive: mark, miss, false, true.
@@ -84,6 +99,7 @@ class TripReviewItem {
   final int? windowFromUs, windowToUs;
 
   bool get isEvent => kind == 'event';
+  bool get isCase => kind == 'case';
 
   factory TripReviewItem.fromJson(Map<String, dynamic> json) {
     int? i(String key) => (json[key] as num?)?.toInt();
@@ -100,6 +116,8 @@ class TripReviewItem {
       note: json['note'] as String?,
       windowFromUs: i('windowFromUs'),
       windowToUs: i('windowToUs'),
+      caseId: json['caseId'] as String?,
+      truth: json['truth'] as String?,
     );
   }
 }
@@ -132,7 +150,7 @@ abstract final class TripReviewSteps {
 
 /// A case staged on the live page: `mark` lines of kind `case` with one
 /// [id], edges `start` and `end`, and the tester's [truth] (docs/trip-debug.md,
-/// «Случаи»).
+/// «Разметка»).
 class TripCase {
   TripCase(this.id, this.startUs);
   final String id;
@@ -140,12 +158,40 @@ class TripCase {
   int? endUs;
   String? truth;
 
+  /// The start of the next case, set by [tripCases].
+  int? nextStartUs;
+
+  /// An alarm up to this long after the end still belongs to the case.
+  static const tailUs = 1000000;
+
+  /// An alarm-wanted case shorter than this is not scored. The tester's
+  /// finger is 0.3–0.5 s late at both ends, so a 2 s case may hold a 1.3 s
+  /// closure (bench-v1: «2 с» gave 1.3–2.1 s), which is on the wrong side
+  /// of a 1.6 s threshold.
+  static const positiveMinUs = 3000000;
+
   /// What the truth wants: `none`, `eyes`, `head`, `any`; null when the
   /// truth is not given or unknown.
   String? get expect => truth == null ? null : caseTruths[truth];
 
-  /// Where alarms count for the case: up to 1 s after its end.
-  int get toUs => (endUs ?? startUs) + 1000000;
+  /// Where alarms count for the case: up to [tailUs] after its end, and
+  /// never into the next case.
+  int get toUs {
+    final end = endUs ?? startUs;
+    final next = nextStartUs;
+    return next != null && next >= end && next < end + tailUs
+        ? next
+        : end + tailUs;
+  }
+
+  /// An alarm is wanted, but the pose was not held for [positiveMinUs].
+  bool get tooShort {
+    final end = endUs, want = expect;
+    return end != null &&
+        want != null &&
+        want != 'none' &&
+        end - startUs < positiveMinUs;
+  }
 }
 
 /// The live page's answers (TRUTHS in lab_page_html.dart) and the alarm
@@ -155,6 +201,8 @@ const caseTruths = {
   'mirror_left': 'none',
   'mirror_right': 'none',
   'mirror_center': 'none',
+  'blind_left': 'none',
+  'blind_right': 'none',
   'instruments': 'none',
   'phone_short': 'none',
   'talk': 'none',
@@ -169,8 +217,12 @@ const caseTruths = {
   'other_alarm': 'any',
 };
 
-/// Cases of a recording, in the order they started.
-List<TripCase> tripCases(Iterable<Map<String, dynamic>> lines) {
+/// Cases of a recording, in the order they started. [review]: its `case`
+/// items correct the truth and the bounds given on the live page.
+List<TripCase> tripCases(
+  Iterable<Map<String, dynamic>> lines, {
+  TripReview? review,
+}) {
   final cases = <String, TripCase>{};
   final cancelled = <String>{};
   for (final line in lines) {
@@ -189,14 +241,26 @@ List<TripCase> tripCases(Iterable<Map<String, dynamic>> lines) {
     final truth = line['truth'];
     if (truth is String && truth.isNotEmpty) c.truth = truth;
   }
-  return cases.values.where((c) => !cancelled.contains(c.id)).toList()
+  for (final item in review?.items ?? const <TripReviewItem>[]) {
+    final c = item.isCase ? cases[item.caseId] : null;
+    if (c == null) continue;
+    c.startUs = item.atUs;
+    if (item.endedUs case final end? when end >= item.atUs) c.endUs = end;
+    if (item.truth case final truth?) c.truth = truth.isEmpty ? null : truth;
+  }
+  final result = cases.values.where((c) => !cancelled.contains(c.id)).toList()
     ..sort((a, b) => a.startUs.compareTo(b.startUs));
+  for (var i = 0; i + 1 < result.length; i++) {
+    result[i].nextStartUs = result[i + 1].startUs;
+  }
+  return result;
 }
 
 /// How a case went against the alarms that started in its window
 /// ([alarms]: threshold moment on the recording clock and ТЗ type):
-/// `ok`, `false_alarm`, `missed`, `other_type`, or `unsure` (no truth or
-/// no end).
+/// `ok`, `false_alarm`, `missed`, `other_type`, `too_short` (an alarm was
+/// wanted, the pose was held less than [TripCase.positiveMinUs]: not
+/// scored), or `unsure` (no truth or no end).
 String caseOutcome(TripCase c, Iterable<(int, String)> alarms) {
   final expect = c.expect;
   if (expect == null || c.endUs == null) return 'unsure';
@@ -205,6 +269,7 @@ String caseOutcome(TripCase c, Iterable<(int, String)> alarms) {
       if (at >= c.startUs && at <= c.toUs) type,
   };
   if (expect == 'none') return got.isEmpty ? 'ok' : 'false_alarm';
+  if (c.tooShort) return 'too_short';
   final want = switch (expect) {
     'eyes' => 'eyes_closed',
     'head' => 'head_pitch_down',
@@ -214,11 +279,13 @@ String caseOutcome(TripCase c, Iterable<(int, String)> alarms) {
   return got.isEmpty ? 'missed' : 'other_type';
 }
 
-/// Label windows of the cases: from the start to 1 s after the end.
+/// Label windows of the cases: from the start to 1 s after the end (the
+/// next case cuts it). A case without an end or an answer, with the answer
+/// «другое, тревога нужна» or too short for its alarm is left unscored.
 List<ReviewWindow> caseWindows(List<TripCase> cases) => [
   for (final c in cases)
     ReviewWindow(
-      c.endUs == null
+      c.endUs == null || c.tooShort
           ? TripReviewSteps.unsure
           : switch (c.expect) {
               'none' => TripReviewSteps.caseQuiet,
@@ -261,8 +328,16 @@ List<ReviewWindow> reviewWindows(
   String gapStep = TripReviewSteps.drive,
 }) {
   const around = 2000000, after = 1000000;
-  final windows = <ReviewWindow>[...extra];
+  final windows = <ReviewWindow>[];
   for (final item in review.items) {
+    // A case's item only corrects the case (tripCases); its window is in
+    // [extra]. An alarm inside a case is explained by the case: a window of
+    // its own would take the alarm away from the case in the replay.
+    if (item.isCase) continue;
+    if (item.isEvent &&
+        extra.any((w) => item.atUs >= w.fromUs && item.atUs <= w.toUs)) {
+      continue;
+    }
     if (item.isEvent) {
       final start = item.signStartedUs ?? item.atUs;
       final end = (item.endedUs ?? item.atUs) < item.atUs
@@ -317,7 +392,27 @@ List<ReviewWindow> reviewWindows(
       }
     }
   }
-  windows.sort((a, b) => a.fromUs.compareTo(b.fromUs));
+  // The margins around a reviewed alarm or mark never reach into a case:
+  // the case's own window scores that time.
+  for (var i = windows.length - 1; i >= 0; i--) {
+    var w = windows[i];
+    for (final e in extra) {
+      if (e.fromUs <= w.fromUs && e.toUs > w.fromUs) {
+        w = ReviewWindow(w.step, e.toUs, w.toUs, why: w.why);
+      }
+      if (e.toUs >= w.toUs && e.fromUs < w.toUs) {
+        w = ReviewWindow(w.step, w.fromUs, e.fromUs, why: w.why);
+      }
+    }
+    if (w.toUs > w.fromUs) {
+      windows[i] = w;
+    } else {
+      windows.removeAt(i);
+    }
+  }
+  windows
+    ..addAll(extra)
+    ..sort((a, b) => a.fromUs.compareTo(b.fromUs));
   // The rest of the drive: the gaps between reviewed windows.
   final result = <ReviewWindow>[];
   var cursor = fromUs;
@@ -341,8 +436,10 @@ List<ReviewWindow> reviewWindows(
 ///
 /// [scoreGaps] false leaves the time outside the reviewed windows and cases
 /// unscored (`trip_unsure`): in a staged session the tester looks at the
-/// keyboard between cases, which is not driving.
-String labelTrip(String jsonl, TripReview review, {bool scoreGaps = true}) {
+/// keyboard between cases, which is not driving. Null: the reviewer's
+/// choice in the review file, else true.
+String labelTrip(String jsonl, TripReview review, {bool? scoreGaps}) {
+  scoreGaps ??= review.scoreGaps ?? true;
   int? from, to;
   final caseLines = <Map<String, dynamic>>[];
   for (final raw in const LineSplitter().convert(jsonl)) {
@@ -370,7 +467,7 @@ String labelTrip(String jsonl, TripReview review, {bool scoreGaps = true}) {
     review,
     fromUs: from,
     toUs: to,
-    extra: caseWindows(tripCases(caseLines)),
+    extra: caseWindows(tripCases(caseLines, review: review)),
     gapStep: scoreGaps ? TripReviewSteps.drive : TripReviewSteps.unsure,
   );
   for (final w in windows) {
