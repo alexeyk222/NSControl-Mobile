@@ -288,10 +288,14 @@ final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
-        // A voice downloaded while the app runs is picked up on the next phrase.
-        voiceObserver = NotificationCenter.default.addObserver(
-            forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification,
-            object: nil, queue: .main) { [weak self] _ in self?.cachedVoice = nil }
+        // A voice downloaded while the app runs is picked up on the next
+        // phrase (iOS 17+; on older iOS the voice is chosen once, on the
+        // first phrase).
+        if #available(iOS 17.0, *) {
+            voiceObserver = NotificationCenter.default.addObserver(
+                forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification,
+                object: nil, queue: .main) { [weak self] _ in self?.cachedVoice = nil }
+        }
     }
     func say(_ text: String) {
         guard !text.isEmpty else { return }
