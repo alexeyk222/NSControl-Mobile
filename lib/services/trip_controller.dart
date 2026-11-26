@@ -2187,8 +2187,11 @@ class TripController extends ChangeNotifier {
   /// that asked for it or for the clips; fewer pictures when the phone is
   /// hot (FR-DRV-08).
   void _updateDebugVideo() {
+    // finish() sets the phase to idle first and then awaits; a page that
+    // disconnects meanwhile must not turn the video back on.
     final wanted =
         active &&
+        phase != TripPhase.idle &&
         engineInUse == TripEngine.arkit &&
         ((debugServer?.videoWanted ?? false) || clips != null);
     _setDebugVideo(
