@@ -409,6 +409,28 @@ void main() {
       expect(platform.alertCalls, 0);
     });
 
+    test('a "road" far from the old one is refused', () async {
+      await trip.start();
+      calibrateWithUp([0, 1, 0]);
+      final session = trip.sessionId;
+      observe(1, arkitFace);
+      // The camera sees the head 40° away, steady, eyes straight out of the
+      // head: more likely a long look at the passenger than a holder moved
+      // that far on a vent.
+      for (var i = 0; i < 400; i++) {
+        lastUs += 100000;
+        arkit().emit([arkitFace(view: -2)], lastUs, up: [0, 1, 0]);
+      }
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        platform.spoken.where((t) => t.startsWith('Телефон сдвинулся')),
+        isNotEmpty,
+      );
+      expect(trip.sessionId, session);
+      expect(trip.calibration!.neutralYaw, closeTo(38, .5));
+      expect(trip.movedText, isNull);
+    });
+
     /// "Up" of the phone tilted [deg] about the camera x axis.
     List<double> tiltedUp(double deg) => [
       0,
@@ -537,6 +559,60 @@ void main() {
       'Телефон перегрелся. Уберите его от горячего воздуха',
     );
     expect(platform.testAlertCalls, 1);
+  });
+
+  group('the driver\'s pause (S-07)', () {
+    test(
+      'pause stops observation, resume goes on with the same calibration',
+      () async {
+        await trip.start();
+        calibrateOn(arkitFace);
+        final calibration = trip.calibration;
+        final session = trip.sessionId;
+        observe(1, arkitFace);
+        await trip.wearable.connect();
+        await trip.wearable.receive({
+          'type': 'ready',
+          'connection_id': platform.messages.last['connection_id'],
+          'receiver_epoch': 'watch',
+        });
+        trip.watchExtras = {'design': 'cockpit', 'mount': 'left'};
+        await trip.pause();
+        await Future<void>.delayed(Duration.zero);
+        expect(trip.userPaused, isTrue);
+        expect(trip.phase, TripPhase.paused);
+        expect(trip.sessionId, isNull);
+        expect(arkit().running, isFalse);
+        expect(platform.spoken.last, 'Пауза. Защита выключена');
+        final paused = platform.messages.lastWhere(
+          (m) => m['type'] == 'snapshot',
+        );
+        expect(paused['level'], 'paused');
+        expect(paused['design'], 'cockpit');
+        expect(paused['mount'], 'left');
+        // The app goes to the background and back: still paused.
+        await trip.foreground(false);
+        await trip.foreground(true);
+        expect(trip.phase, TripPhase.paused);
+        expect(trip.userPaused, isTrue);
+        await trip.resume();
+        expect(trip.userPaused, isFalse);
+        expect(trip.phase, TripPhase.observing);
+        expect(trip.sessionId, isNot(session));
+        expect(identical(trip.calibration, calibration), isTrue);
+        expect(platform.spoken.last, 'Продолжаю');
+        expect(arkit().running, isTrue);
+      },
+    );
+
+    test('an alarm during the pause cannot start', () async {
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      await trip.pause();
+      expect(trip.snapshot, isNull);
+      expect(platform.alertCalls, 0);
+    });
   });
 
   group('pause and return', () {
@@ -705,6 +781,8 @@ void main() {
     expect(trip.snapshot!.eyes.activeEvent, isNull);
     observe(0.4, () => arkitFace(open: .05));
     expect(trip.snapshot!.eyes.activeEvent?.type, EventType.eyesClosed);
+    expect(trip.tripEyesAlarms, 1);
+    expect(trip.tripHeadAlarms, 0);
   });
 
   test('the eye gate: lids lowered by looking at the instruments', () async {

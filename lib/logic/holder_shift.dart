@@ -27,7 +27,26 @@ class HolderShiftSettings {
     this.eyesInHeadDeg = 6,
     this.poseHoldUs = 15000000,
     this.poseShare = .8,
+    this.maxNewYawDeg = 35,
+    this.maxNewPitchDeg = 20,
   });
+
+  /// A background re-calibration (this sign or the road drift cap) is
+  /// refused when its road pose lies further than this from the old one
+  /// (neutral yaw, neutral pitch). The holder on a vent hardly moves that
+  /// far; a driver who kept looking at the passenger through the prompt
+  /// would otherwise make a look aside the new road.
+  final double maxNewYawDeg, maxNewPitchDeg;
+
+  /// Whether a new road pose ([yaw], [pitch]) may replace the old one.
+  bool acceptsNewPose({
+    required double oldYaw,
+    required double oldPitch,
+    required double yaw,
+    required double pitch,
+  }) =>
+      (yaw - oldYaw).abs() <= maxNewYawDeg &&
+      (pitch - oldPitch).abs() <= maxNewPitchDeg;
 
   /// Tilt of the phone to gravity, from the calibration, that counts as a
   /// shift when it holds [gravityHoldUs]. Session 1: a phone sagging in the
@@ -67,6 +86,8 @@ class HolderShiftSettings {
     'eyesInHeadDeg': eyesInHeadDeg,
     'poseHoldUs': poseHoldUs,
     'poseShare': poseShare,
+    'maxNewYawDeg': maxNewYawDeg,
+    'maxNewPitchDeg': maxNewPitchDeg,
   };
 
   factory HolderShiftSettings.fromJson(Map<String, dynamic> json) {
@@ -82,6 +103,8 @@ class HolderShiftSettings {
       eyesInHeadDeg: n('eyesInHeadDeg', d.eyesInHeadDeg),
       poseHoldUs: i('poseHoldUs', d.poseHoldUs),
       poseShare: n('poseShare', d.poseShare),
+      maxNewYawDeg: n('maxNewYawDeg', d.maxNewYawDeg),
+      maxNewPitchDeg: n('maxNewPitchDeg', d.maxNewPitchDeg),
     );
   }
 }

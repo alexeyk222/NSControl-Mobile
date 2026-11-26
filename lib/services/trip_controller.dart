@@ -358,6 +358,10 @@ class TripController extends ChangeNotifier {
   // Trip-level vigilance history; written into every session checkpoint.
   final List<int> fatiguePerMinute = [];
   int tripBreaks = 0, tripEscalations = 0, _fatigueMinutePeak = 0;
+
+  /// Alarms of each type in this trip (the advice after an alarm,
+  /// docs/ux/copy.md §5).
+  int tripEyesAlarms = 0, tripHeadAlarms = 0;
   int _lastFatigueMinuteUs = 0;
   bool _foreground = true,
       _disposed = false,
@@ -438,6 +442,9 @@ class TripController extends ChangeNotifier {
     fatiguePerMinute.clear();
     tripBreaks = 0;
     tripEscalations = 0;
+    tripEyesAlarms = 0;
+    tripHeadAlarms = 0;
+    userPaused = false;
     _fatigueMinutePeak = 0;
     _lastFatigueMinuteUs = clock.elapsedMicroseconds;
     drive.reset();
@@ -867,7 +874,31 @@ class TripController extends ChangeNotifier {
         _shiftCollector = null;
         final r = collector.finish(nowUs: captured);
         final found = r.result.profile;
-        if (found == null) {
+        final old = calibration;
+        final far =
+            found != null &&
+            old != null &&
+            !profile.holderShift.acceptsNewPose(
+              oldYaw: old.neutralYaw,
+              oldPitch: old.neutralPitch,
+              yaw: found.neutralYaw,
+              pitch: found.neutralPitch,
+            );
+        if (far && _tapping) {
+          _record({
+            'type': 'trip',
+            'atUs': _recUs(clock.elapsedMicroseconds),
+            'recalibrationRefused': {
+              'neutralYaw': found.neutralYaw,
+              'neutralPitch': found.neutralPitch,
+              'oldNeutralYaw': old.neutralYaw,
+              'oldNeutralPitch': old.neutralPitch,
+            },
+          });
+        }
+        if (found == null || far) {
+          // Nothing found, or a "road" too far from the old one: most
+          // likely a long look aside, not a moved holder.
           movedText = null;
           _holderRetry();
           _notify();
@@ -1396,6 +1427,11 @@ class TripController extends ChangeNotifier {
       _syncAudio(shouldSound);
     }
     for (final e in update.started) {
+      if (e.type == EventType.eyesClosed) {
+        tripEyesAlarms++;
+      } else {
+        tripHeadAlarms++;
+      }
       clips?.trigger(
         atUs: _recUs(sessionBaseUs + e.thresholdUs),
         reason: e.type.code,
@@ -1570,6 +1606,7 @@ class TripController extends ChangeNotifier {
     _lifecycleGeneration++;
     final id = tripId!;
     phase = TripPhase.idle;
+    userPaused = false;
     await _endSession(EventEndReason.tripEnded);
     final ended = {
       'type': 'trip',
@@ -1632,45 +1669,87 @@ class TripController extends ChangeNotifier {
     }
     if (!active) return;
     if (!value) {
-      faces = [];
-      // The calibration outlives a pause: the driver and the holder are
-      // usually where they were (ПЗ: the previous parameters are used after
-      // the return if the phone was not moved).
-      if (phase != TripPhase.paused) {
-        _resumeCalibration = phase == TripPhase.observing ? calibration : null;
-        _pausedAtUs = clock.elapsedMicroseconds;
-      }
-      phase = TripPhase.paused;
-      await _endSession(EventEndReason.cameraStopped);
-      await _stopCamera();
+      await _suspend(EventEndReason.cameraStopped, generation);
       if (generation != _lifecycleGeneration) return;
       await _safe(() => platform.keepAwake(false));
-    } else {
-      final resume = _resumeCalibration;
-      _resumeCalibration = null;
-      final now = clock.elapsedMicroseconds;
-      final goOn =
-          resume != null &&
-          identical(resume, calibration) &&
-          now - _pausedAtUs <= resumeWithinUs;
+    } else if (userPaused) {
+      // Back in the app during the driver's pause: it stays paused until
+      // «Продолжить».
       await _safe(() => platform.keepAwake(true));
-      if (generation != _lifecycleGeneration || !active || !_foreground) return;
-      if (goOn) {
-        // A new session on the same calibration. Driver continuity takes
-        // the driver back only where the driver was (box, distance) within
-        // its gap from now; another face or a moved phone stops it, and the
-        // trip asks to confirm the face (ФТ-02).
-        error = null;
-        _anchorUs = now;
-        _newSession();
-        _say('Продолжаю');
-      } else {
-        phase = TripPhase.findingFace;
-        error = 'Подтвердите лицо после возврата и повторите калибровку.';
-      }
-      if (!cameraPermissionBlocked) await _startCamera();
+    } else {
+      await _resumeObservation(generation);
     }
     _notify();
+  }
+
+  /// The driver pressed «Пауза» (docs/ux/states.md S-07).
+  bool userPaused = false;
+
+  /// «Пауза» (S-07): the camera and the automata stop (events end with
+  /// observation_stopped), the watch shows `paused`. The calibration is
+  /// kept for [resumeWithinUs] as after a return from the background.
+  Future<void> pause() async {
+    if (!active || userPaused) return;
+    userPaused = true;
+    final generation = ++_lifecycleGeneration;
+    _say('Пауза. Защита выключена');
+    await _suspend(EventEndReason.observationStopped, generation);
+    _pushWatchState();
+    _notify();
+  }
+
+  /// «Продолжить» after [pause]: the face is checked as after a return from
+  /// the background (driver continuity on the same calibration within
+  /// [resumeWithinUs], otherwise confirm the face again); says «Продолжаю».
+  Future<void> resume() async {
+    if (!active || !userPaused) return;
+    userPaused = false;
+    final generation = ++_lifecycleGeneration;
+    // In the background the return to the app resumes it.
+    if (_foreground) await _resumeObservation(generation);
+    _pushWatchState();
+    _notify();
+  }
+
+  /// Stops observation and keeps the calibration for a resume.
+  Future<void> _suspend(EventEndReason reason, int generation) async {
+    faces = [];
+    // The calibration outlives a pause: the driver and the holder are
+    // usually where they were (ПЗ: the previous parameters are used after
+    // the return if the phone was not moved).
+    if (phase != TripPhase.paused) {
+      _resumeCalibration = phase == TripPhase.observing ? calibration : null;
+      _pausedAtUs = clock.elapsedMicroseconds;
+    }
+    phase = TripPhase.paused;
+    await _endSession(reason);
+    await _stopCamera();
+  }
+
+  Future<void> _resumeObservation(int generation) async {
+    final resume = _resumeCalibration;
+    _resumeCalibration = null;
+    final now = clock.elapsedMicroseconds;
+    final goOn =
+        resume != null &&
+        identical(resume, calibration) &&
+        now - _pausedAtUs <= resumeWithinUs;
+    await _safe(() => platform.keepAwake(true));
+    if (generation != _lifecycleGeneration || !active || !_foreground) return;
+    if (goOn) {
+      // A new session on the same calibration. Driver continuity takes
+      // the driver back only where the driver was (box, distance) within
+      // its gap from now; another face or a moved phone stops it, and the
+      // trip asks to confirm the face (ФТ-02).
+      error = null;
+      _anchorUs = now;
+      _newSession();
+      _say('Продолжаю');
+    } else {
+      phase = TripPhase.findingFace;
+      error = 'Подтвердите лицо после возврата и повторите калибровку.';
+    }
+    if (!cameraPermissionBlocked) await _startCamera();
   }
 
   void _cameraError(Object e) {
@@ -1748,6 +1827,11 @@ class TripController extends ChangeNotifier {
     }
   }
 
+  /// Added to the watch state's extra on every push (the design thread
+  /// sends the chosen look and the mount side through it). The trip's own
+  /// keys win over these.
+  Map<String, Object?> watchExtras = {};
+
   void _pushWatchState() {
     final camera = snapshot?.cameraStatus;
     wearable.setState(
@@ -1756,8 +1840,11 @@ class TripController extends ChangeNotifier {
       activeEventIds: snapshot?.activeEvents.map((e) => e.id).toList() ?? [],
       recommendation: recommendationText,
       extra: {
+        ...watchExtras,
         'level': !active
             ? 'idle'
+            : userPaused
+            ? 'paused'
             : switch (camera) {
                 CameraStatus.warning => 'warning',
                 CameraStatus.observing => 'observing',
