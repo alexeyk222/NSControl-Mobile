@@ -11,7 +11,10 @@ class SleepController extends ChangeNotifier {
     _rules = RecommendationEngine(tripId: const Uuid().v4());
     trip.onCameraEvidence = (eyes, head) => evaluate(eyes: eyes, head: head);
     trip.onTripStarted = () {
-      _rules = RecommendationEngine(tripId: trip.tripId!);
+      _rules = RecommendationEngine(
+        tripId: trip.tripId!,
+        longDrive: trip.breakInterval,
+      );
       evaluate();
     };
     trip.onTripEnded = () {
