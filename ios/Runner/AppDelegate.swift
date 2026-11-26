@@ -107,6 +107,7 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
         case "speech.say":
             speech.say(args["text"] as? String ?? ""); result(["status": "ok"])
         case "speech.stop": speech.stop(); result(["status": "stopped"])
+        case "speech.voices": result(speech.voices())
         case "device.info":
             var system = utsname(); uname(&system)
             let model = withUnsafeBytes(of: &system.machine) { raw in
@@ -272,7 +273,8 @@ final class PlatformBridge: NSObject, FlutterStreamHandler, WCSessionDelegate {
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) { emit(["type": "wearable_message", "message": message]) }
 }
 
-/// Voice prompts of the developer lab scenarios (Russian system voice).
+/// Voice prompts of the lab scenarios and the trip calibration (the best
+/// installed Russian system voice, see `bestRussianVoice`).
 /// The audio session is activated once, on the first phrase, and kept active
 /// until `speech.stop` (scenario cancelled or lab closed). Activating and
 /// deactivating it around every phrase stalled the camera for ~0.5 s after
@@ -286,6 +288,10 @@ final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
     override init() {
         super.init()
         synthesizer.delegate = self
+        // A voice downloaded while the app runs is picked up on the next phrase.
+        voiceObserver = NotificationCenter.default.addObserver(
+            forName: AVSpeechSynthesizer.availableVoicesDidChangeNotification,
+            object: nil, queue: .main) { [weak self] _ in self?.cachedVoice = nil }
     }
     func say(_ text: String) {
         guard !text.isEmpty else { return }
@@ -295,9 +301,71 @@ final class LabSpeech: NSObject, AVSpeechSynthesizerDelegate {
             active = (try? session.setActive(true)) != nil
         }
         let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = AVSpeechSynthesisVoice(language: "ru-RU")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 1.1
+        utterance.voice = voice
+        // Calm, unhurried delivery: a little slower than the system default
+        // (it was 1.1x, which made the compact voice sound clipped and
+        // nervous) and a slightly lower, warmer pitch. Pitch stays near 1.0:
+        // larger shifts make the synthesis sound artificial.
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.95
+        utterance.pitchMultiplier = 0.95
+        utterance.volume = 1.0
         synthesizer.speak(utterance)
+    }
+    /// The nicest Russian voice installed on the phone, chosen on the first
+    /// phrase and again after the installed voices change. The
+    /// system default ru-RU voice is the compact (low quality) Milena; the
+    /// enhanced or premium voices sound far more natural but must be
+    /// downloaded by the user (Settings → Accessibility → Spoken Content →
+    /// Voices → Russian). Order: quality (premium > enhanced > default),
+    /// then a female voice, then Milena before Katya before others. Novelty
+    /// and Personal Voice voices are skipped. Falls back to the system
+    /// ru-RU voice when nothing else is installed.
+    private var cachedVoice: AVSpeechSynthesisVoice?
+    private var voiceObserver: NSObjectProtocol?
+    private var voice: AVSpeechSynthesisVoice? {
+        if cachedVoice == nil { cachedVoice = Self.bestRussianVoice() }
+        return cachedVoice
+    }
+    static func russianVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices().filter { voice in
+            guard voice.language.lowercased().hasPrefix("ru") else { return false }
+            if #available(iOS 17.0, *) {
+                if voice.voiceTraits.contains(.isNoveltyVoice) || voice.voiceTraits.contains(.isPersonalVoice) {
+                    return false
+                }
+            }
+            return true
+        }
+    }
+    static func bestRussianVoice() -> AVSpeechSynthesisVoice? {
+        func quality(_ voice: AVSpeechSynthesisVoice) -> Int {
+            if #available(iOS 16.0, *), voice.quality == .premium { return 3 }
+            return voice.quality == .enhanced ? 2 : 1
+        }
+        func name(_ voice: AVSpeechSynthesisVoice) -> Int {
+            let lower = voice.name.lowercased()
+            if lower.hasPrefix("milena") { return 2 }
+            if lower.hasPrefix("katya") { return 1 }
+            return 0
+        }
+        let best = russianVoices().max { a, b in
+            let ka = (quality(a), a.gender == .female ? 1 : 0, name(a))
+            let kb = (quality(b), b.gender == .female ? 1 : 0, name(b))
+            return ka < kb
+        }
+        return best ?? AVSpeechSynthesisVoice(language: "ru-RU")
+    }
+    /// Installed Russian voices for diagnostics (`speech.voices`).
+    func voices() -> [String: Any] {
+        func quality(_ voice: AVSpeechSynthesisVoice) -> String {
+            if #available(iOS 16.0, *), voice.quality == .premium { return "premium" }
+            return voice.quality == .enhanced ? "enhanced" : "default"
+        }
+        let list = Self.russianVoices().map { v -> [String: Any] in
+            ["id": v.identifier, "name": v.name, "quality": quality(v),
+             "gender": v.gender == .female ? "female" : v.gender == .male ? "male" : "unspecified"]
+        }
+        return ["selected": voice?.identifier ?? "", "voices": list]
     }
     func stop() {
         synthesizer.stopSpeaking(at: .immediate)
