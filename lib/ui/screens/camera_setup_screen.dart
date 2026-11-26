@@ -3,6 +3,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../services/detector.dart';
 import '../../services/trip_controller.dart';
 import '../copy.dart';
 import '../design/ns_theme.dart';
@@ -18,7 +19,10 @@ import 'common.dart';
 ///
 /// 1. search — no face: «Поверните телефон к себе» (voice after 2 s);
 /// 2. one face held for [confirmAfter] — the face is confirmed for the
-///    driver (`TripController.confirmFace`);
+///    driver (`TripController.confirmFace`). Several faces: a frame over
+///    each, the closest (largest) one chosen in advance; the driver taps
+///    their own and «Это я» (not in «ТЗ 2.2 (эталон)», which waits for
+///    one face);
 /// 3. capture — «Смотрите на дорогу», the guide fills with the trip's
 ///    calibration progress;
 /// 4. done — «Готово», a check; the app shell keeps this screen for a
@@ -52,6 +56,9 @@ class CameraSetupScreen extends StatefulWidget {
 
 class _CameraSetupScreenState extends State<CameraSetupScreen> {
   int? _candidate;
+
+  /// The face chosen among several (tracking id); the closest by default.
+  int? _picked;
   Timer? _confirm, _noFaceVoice, _failTimer;
   bool _failing = false;
   int _failures = 0;
@@ -134,7 +141,7 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
       _confirm?.cancel();
       _confirm = null;
       _candidate = null;
-      _sayOnce(Voice.calMany);
+      _sayOnce(trip.tzReference ? Voice.calMany : Voice.calManyPick);
       return;
     }
     final id = faces.single.measurement.trackingId;
@@ -168,6 +175,26 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
     });
   }
 
+  /// The face to confirm among several: the one tapped while it is still
+  /// in the frame, else the closest.
+  int? get _choice {
+    final ids = trip.faces.map((f) => f.measurement.trackingId).toSet();
+    if (_picked != null && ids.contains(_picked)) return _picked;
+    return trip.closestFace?.measurement.trackingId;
+  }
+
+  bool get _canPick =>
+      _stage == CalStage.many &&
+      !trip.tzReference &&
+      trip.phase == TripPhase.findingFace;
+
+  void _confirmChoice() {
+    final id = _choice;
+    if (id == null) return;
+    trip.confirmFace(id);
+    _picked = null;
+  }
+
   Future<void> _headOnly() async {
     await trip.changeSettings(settingsWith(trip.settings, hiddenEyes: true));
     setState(() => _failures = 0);
@@ -192,7 +219,7 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
             ? Copy.calFailLost
             : Copy.calFailMoved,
       CalStage.capture => Copy.calGo,
-      CalStage.many => Copy.calManyWait,
+      CalStage.many => trip.tzReference ? Copy.calManyWait : Copy.calMany,
       CalStage.search =>
         trip.phase != TripPhase.findingFace
             ? Copy.calStarting
@@ -257,7 +284,14 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
                 Flexible(
                   child: Padding(
                     padding: const EdgeInsets.only(left: 8),
-                    child: _PreviewBox(trip: trip, stage: stage),
+                    child: _PreviewBox(
+                      trip: trip,
+                      stage: stage,
+                      picked: _canPick ? _choice : null,
+                      onPick: _canPick
+                          ? (id) => setState(() => _picked = id)
+                          : null,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 18),
@@ -298,6 +332,15 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
                         single: single || widget.done,
                         many: faces.length > 1,
                       ),
+                      if (_canPick && _choice != null) ...[
+                        const SizedBox(height: 16),
+                        NsButton.primary(
+                          Copy.calManyConfirm,
+                          key: const Key('cal-this-is-me'),
+                          palette: p,
+                          onPressed: _confirmChoice,
+                        ),
+                      ],
                       if (trip.cameraPermissionBlocked) ...[
                         const SizedBox(height: 16),
                         Text(Copy.calCameraDenied, style: theme.body(p.text2)),
@@ -337,9 +380,19 @@ class _CameraSetupScreenState extends State<CameraSetupScreen> {
 /// (simulator, a camera that is starting) the guide is drawn on a dark
 /// frame.
 class _PreviewBox extends StatelessWidget {
-  const _PreviewBox({required this.trip, required this.stage});
+  const _PreviewBox({
+    required this.trip,
+    required this.stage,
+    this.picked,
+    this.onPick,
+  });
   final TripController trip;
   final CalStage stage;
+
+  /// Several faces: the chosen one (framed in the accent) and the tap
+  /// that chooses another. Null: no frames.
+  final int? picked;
+  final ValueChanged<int>? onPick;
 
   @override
   Widget build(BuildContext context) {
@@ -386,9 +439,80 @@ class _PreviewBox extends StatelessWidget {
                   stage: stage,
                   progress: trip.calibrationProgress,
                 ),
+                if (onPick != null)
+                  _FaceFrames(
+                    faces: trip.faces,
+                    picked: picked,
+                    onPick: onPick!,
+                  ),
               ],
             ),
           ),
+        );
+      },
+    );
+  }
+}
+
+/// A frame over each face to choose the driver's among several. The
+/// contract box is normalized and unmirrored in the portrait image, which
+/// fills this 3:4 frame exactly; the front camera's preview is mirrored, so
+/// the frames are too (as on the Lab page). A face without a box gets no
+/// frame: «Это я» still confirms the closest one.
+class _FaceFrames extends StatelessWidget {
+  const _FaceFrames({
+    required this.faces,
+    required this.picked,
+    required this.onPick,
+  });
+  final List<DetectedFace> faces;
+  final int? picked;
+  final ValueChanged<int> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = NsTheme.of(context);
+    final p = theme.trip;
+    return LayoutBuilder(
+      builder: (context, size) {
+        final w = size.maxWidth, h = size.maxHeight;
+        return Stack(
+          children: [
+            for (final face in faces)
+              if (face.signals?.box case final box?)
+                if (face.measurement.trackingId case final id?)
+                  Positioned(
+                    // Mirrored: the left of the image is the right on screen.
+                    left: (1 - box.left - box.width) * w,
+                    top: box.top * h,
+                    width: box.width * w,
+                    height: box.height * h,
+                    child: Semantics(
+                      button: true,
+                      selected: id == picked,
+                      label: Copy.calManyConfirm,
+                      child: GestureDetector(
+                        key: Key('face-$id'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () => onPick(id),
+                        child: AnimatedContainer(
+                          duration: NsMotion.state,
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color: id == picked
+                                  ? p.accent
+                                  : p.text2.withValues(alpha: .6),
+                              width: id == picked ? 3 : 1.5,
+                            ),
+                            borderRadius: BorderRadius.circular(
+                              theme.radii.chip,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+          ],
         );
       },
     );
