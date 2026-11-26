@@ -110,7 +110,7 @@ class TripView {
         voice: Voice.noFace,
       );
     }
-    if (text == Copy.headOnly) {
+    if (f.headOnly || text == Copy.headOnly) {
       return TripView(
         indicator: IndicatorKind.headOnly,
         status: Copy.headOnly,
@@ -194,6 +194,7 @@ class TripFacts {
     this.calibrationNote,
     this.journalIncomplete = false,
     this.watchLost = false,
+    this.headOnly = false,
   });
 
   factory TripFacts.of(TripController trip, {bool watchLost = false}) =>
@@ -202,6 +203,7 @@ class TripFacts {
         userPaused: trip.userPaused,
         cameraSilent: trip.cameraSilent,
         watchText: trip.watchText,
+        headOnly: trip.headOnly,
         multipleFaces: trip.multipleFaces,
         drivingTime: trip.drivingTime,
         breakDue: trip.drive.breakDue(trip.clock.elapsedMicroseconds),
@@ -216,6 +218,10 @@ class TripFacts {
 
   final TripPhase phase;
   final bool userPaused, cameraSilent, multipleFaces, breakDue;
+
+  /// Only the head is watched (calibration without eyes, or eyes lost
+  /// for 5 s): «Слежу за головой», the watch shows the same.
+  final bool headOnly;
   final String? watchText, movedText, heatText, calibrationNote;
   final Duration drivingTime;
   final int eyesAlarms, headAlarms;
