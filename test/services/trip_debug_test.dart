@@ -557,6 +557,100 @@ void main() {
       ]);
     });
 
+    test('several answers on one case: the alarm-wanted one decides', () {
+      expect(truthParts('eyes_closed+mirror_right'), [
+        'eyes_closed',
+        'mirror_right',
+      ]);
+      expect(truthParts('eyes_closed+sneeze'), isEmpty);
+      expect(truthExpect('mirror_right+talk'), 'none');
+      expect(truthExpect('mirror_right+eyes_closed'), 'eyes');
+      // A lowered head hides the eyes: the head alarm is the one wanted.
+      expect(truthExpect('eyes_closed+nod'), 'head');
+      expect(truthExpect('other_alarm+yawn'), 'any');
+      expect(truthExpect('eyes_closed+sneeze'), isNull);
+      expect(truthExpect(null), isNull);
+      // One spelling: alarm-wanted answers first, then the page's order.
+      expect(
+        truthKey('talk+mirror_right+eyes_closed'),
+        'eyes_closed+mirror_right+talk',
+      );
+      expect(truthKey('nod+eyes_closed'), 'eyes_closed+nod');
+      expect(truthKey('sneeze'), 'sneeze');
+
+      Map<String, dynamic> mark(String id, String edge, int at, [String? t]) =>
+          {
+            'type': 'mark',
+            'kind': 'case',
+            'caseId': id,
+            'edge': edge,
+            'atUs': at,
+            'truth': ?t,
+          };
+      final cases = tripCases([
+        mark('a', 'start', 0),
+        mark('a', 'end', 4000000, 'mirror_right+eyes_closed'),
+        mark('b', 'start', 10000000, 'nod'),
+        mark('b', 'truth', 11000000, 'nod+eyes_closed'),
+        mark('b', 'end', 14000000),
+        mark('c', 'start', 20000000),
+        mark('c', 'end', 24000000, 'talk+mirror_left'),
+        mark('d', 'start', 30000000),
+        mark('d', 'end', 34000000, 'eyes_closed+sneeze'),
+      ]);
+      expect(cases.map((c) => c.truth), [
+        'eyes_closed+mirror_right',
+        'eyes_closed+nod',
+        'mirror_left+talk',
+        'eyes_closed+sneeze',
+      ]);
+      expect(cases.map((c) => c.expect), ['eyes', 'head', 'none', null]);
+      const alarms = [
+        (1700000, 'eyes_closed'),
+        (11700000, 'eyes_closed'),
+        (21700000, 'eyes_closed'),
+      ];
+      expect(cases.map((c) => caseOutcome(c, alarms)), [
+        'ok',
+        // The eyes alarm woke the driver, the head channel missed its pose.
+        'other_type',
+        'false_alarm',
+        'unsure',
+      ]);
+      expect(
+        caseOutcome(cases[1], const [(11600000, 'head_pitch_down')]),
+        'ok',
+      );
+      expect(caseWindows(cases).map((w) => w.step), [
+        TripReviewSteps.caseEyes,
+        TripReviewSteps.caseHead,
+        TripReviewSteps.caseQuiet,
+        TripReviewSteps.unsure,
+      ]);
+      // The review's answer may be a combination too.
+      final review = TripReview.fromJson({
+        'type': 'review',
+        'schema': 1,
+        'recordingId': 'r',
+        'items': [
+          {
+            'kind': 'case',
+            'caseId': 'c',
+            'atUs': 20000000,
+            'endedUs': 24000000,
+            'truth': 'mirror_left+eyes_closed',
+          },
+        ],
+      });
+      expect(
+        tripCases([
+          mark('c', 'start', 20000000),
+          mark('c', 'end', 24000000, 'talk'),
+        ], review: review).single.truth,
+        'eyes_closed+mirror_left',
+      );
+    });
+
     test('the review corrects cases; an alarm in a case is not judged apart', () {
       String line(Map<String, Object?> m) => jsonEncode(m);
       Map<String, Object?> mark(String id, String edge, int at, [String? t]) =>
@@ -654,6 +748,8 @@ void main() {
         ).allMatches(block).toList();
         expect({for (final m in rows) m.group(1)!: m.group(2)!}, caseTruths);
         expect({for (final m in rows) m.group(3)}, hasLength(rows.length));
+        // Several answers: the same order of what decides as truthExpect.
+        expect(html, contains('["head", "eyes", "any", "none"].find('));
       }
     });
 
@@ -681,6 +777,36 @@ void main() {
         trip.finishCalibration(start + 10300000);
         expect(trip.phase, TripPhase.observing);
         await trip.finish();
+      },
+    );
+
+    test(
+      'with the live debug on the trip is recorded without the option',
+      () async {
+        // Labels of the live page are worth nothing without the numbers.
+        trip.recordTrips = false;
+        await trip.setLiveDebug(true);
+        await trip.start();
+        expect(trip.recording, isTrue);
+        calibrate();
+        drive(1, arkitFace);
+        trip.mark(
+          kind: 'case',
+          source: 'mac',
+          caseId: 'c1',
+          edge: 'start',
+          truth: 'eyes_closed+mirror_right',
+        );
+        drive(1, arkitFace);
+        await trip.finish();
+        final file = (await LabRecorder(dir).list()).single;
+        final lines = [
+          for (final l in await file.readAsLines())
+            if (l.isNotEmpty) jsonDecode(l) as Map<String, dynamic>,
+        ];
+        expect(lines.first['live'], isNull);
+        expect(lines.where((l) => l['type'] == 'derived'), isNotEmpty);
+        expect(tripCases(lines).single.truth, 'eyes_closed+mirror_right');
       },
     );
 

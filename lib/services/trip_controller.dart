@@ -306,6 +306,7 @@ class TripController extends ChangeNotifier {
   /// Developer option «Записывать поездку»: the trip goes to a JSONL file
   /// (schema 1, the lab's lines without prompts and labels) in the same
   /// folder as the lab recordings, for offline analysis. Numbers only.
+  /// With [liveDebug] on the trip is recorded anyway.
   LabRecorder? recorder;
   bool recordTrips = false;
 
@@ -2455,7 +2456,10 @@ class TripController extends ChangeNotifier {
     final id = 'trip-${_stamp(started)}';
     final target = recorder;
     var recordingOn = false;
-    if (recordTrips && target != null) {
+    // A live debug page is there to label the trip, and labels without the
+    // numbers cannot be replayed: with the live debug on the trip is
+    // recorded whatever «Записывать поездку» says.
+    if ((recordTrips || liveDebug) && target != null) {
       try {
         await target.start(id);
         recordingOn = true;
@@ -2464,7 +2468,8 @@ class TripController extends ChangeNotifier {
       }
     }
     recordingId = recordingOn ? id : null;
-    clips = recordingOn && debugClips && target != null
+    // Clips are pictures: only with the recording the user switched on.
+    clips = recordingOn && recordTrips && debugClips && target != null
         ? ClipRecorder(
             directory: Directory('${target.directory.path}/clips'),
             recordingId: id,

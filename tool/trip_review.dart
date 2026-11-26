@@ -205,7 +205,17 @@ String tripReviewReport(String jsonl, TripReview review) {
       ..writeln()
       ..writeln('| Что было | всего | верно | ложных | пропусков | не в счёт |')
       ..writeln('|---|---:|---:|---:|---:|---:|');
-    for (final truth in caseTruths.keys) {
+    // Single answers in the order of the page, then the combinations.
+    final order = caseTruths.keys.toList();
+    final truths = {for (final c in cases) ?c.truth}.toList()
+      ..sort((a, b) {
+        final pa = truthParts(a), pb = truthParts(b);
+        if (pa.length != pb.length) return pa.length.compareTo(pb.length);
+        final ia = order.indexOf(pa.firstOrNull ?? a);
+        final ib = order.indexOf(pb.firstOrNull ?? b);
+        return ia != ib ? ia.compareTo(ib) : a.compareTo(b);
+      });
+    for (final truth in truths) {
       final of = [
         for (var i = 0; i < cases.length; i++)
           if (cases[i].truth == truth) outcomes[i],
