@@ -13,7 +13,7 @@ class SleepController extends ChangeNotifier {
     trip.onTripStarted = () {
       _rules = RecommendationEngine(
         tripId: trip.tripId!,
-        breakAfter: trip.breakInterval,
+        longDrive: trip.breakInterval,
       );
       evaluate();
     };
