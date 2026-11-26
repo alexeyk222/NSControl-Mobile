@@ -29,6 +29,19 @@ void main() {
     expect(v.context, Copy.eyesHidden);
   });
 
+  test('S-02 follows the controller flag even before the line changes', () {
+    final v = view(const TripFacts(watchText: 'Слежу', headOnly: true));
+    expect(v.indicator, IndicatorKind.headOnly);
+    expect(v.status, Copy.headOnly);
+    // A stopped camera still wins: never «Слежу…» without observation.
+    expect(
+      view(
+        const TripFacts(watchText: 'Слежу', headOnly: true, cameraSilent: true),
+      ).status,
+      Copy.cameraError,
+    );
+  });
+
   test('S-04 not seen and S-05 several faces', () {
     final unseen = view(const TripFacts(watchText: 'Не вижу вас'));
     expect(unseen.indicator, IndicatorKind.unseen);

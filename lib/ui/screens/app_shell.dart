@@ -95,25 +95,35 @@ class _AppShellState extends State<AppShell> {
     _observed = trip.active && trip.phase == TripPhase.observing;
     _lastPhase = trip.phase;
     trip.addListener(_onTrip);
-    widget.prefs.addListener(_syncWatch);
-    _syncWatch();
+    widget.prefs.addListener(_syncPrefs);
+    _syncPrefs();
   }
 
   @override
   void dispose() {
     trip.removeListener(_onTrip);
-    widget.prefs.removeListener(_syncWatch);
+    widget.prefs.removeListener(_syncPrefs);
     _doneTimer?.cancel();
     super.dispose();
   }
 
-  /// The look and the mount side go to the watch with every state push.
-  void _syncWatch() {
+  /// The driver's choices that the trip controller uses: the look and the
+  /// mount side go to the watch with every state push; the voice switch
+  /// silences the optional phrases of both the screen and the controller;
+  /// the break interval is taken outside a trip (the rules read it when a
+  /// trip starts, and the settings row is locked during one).
+  void _syncPrefs() {
+    final prefs = widget.prefs;
     trip.watchExtras = {
-      'design': widget.prefs.design.name,
+      'design': prefs.design.name,
       'mount': trip.mountPosition,
     };
-    widget.voice.enabled = widget.prefs.voice;
+    widget.voice.enabled = prefs.voice;
+    trip.voiceEnabled = prefs.voice;
+    final interval = Duration(minutes: prefs.breakMinutes);
+    if (!trip.active && trip.breakInterval != interval) {
+      trip.breakInterval = interval;
+    }
   }
 
   void _onTrip() {
@@ -123,7 +133,7 @@ class _AppShellState extends State<AppShell> {
       _observed = false;
       _summaryFor = null;
       _startedAt = DateTime.now();
-      _syncWatch();
+      _syncPrefs();
     }
     if (trip.active &&
         phase == TripPhase.observing &&

@@ -14,7 +14,8 @@ import '../design/tokens.dart';
 /// | `theme`            | `system` / `dark` / `light` (outside a trip) |
 /// | `ui_onboarded`     | onboarding finished                    |
 /// | `ui_camera_ready`  | the camera was set up at least once    |
-/// | `ui_voice`         | voice prompts of the interface         |
+/// | `ui_voice`         | voice prompts (interface and controller) |
+/// | `ui_break_min`     | minutes between break advices (S-15)   |
 class UiPrefs extends ChangeNotifier {
   UiPrefs({
     this.design = NsDesign.cockpit,
@@ -22,6 +23,7 @@ class UiPrefs extends ChangeNotifier {
     this.onboarded = false,
     this.cameraReady = false,
     this.voice = true,
+    this.breakMinutes = defaultBreakMinutes,
     this.save,
   });
 
@@ -44,6 +46,10 @@ class UiPrefs extends ChangeNotifier {
           await db.getSetting('ui_camera_ready') == true ||
           await db.getSetting('calibration') != null;
       prefs.voice = await db.getSetting('ui_voice') != false;
+      final brk = await db.getSetting('ui_break_min');
+      if (brk is num && breakChoices.contains(brk.toInt())) {
+        prefs.breakMinutes = brk.toInt();
+      }
     } catch (_) {
       // A broken journal must not stop the app: defaults it is.
     }
@@ -53,6 +59,12 @@ class UiPrefs extends ChangeNotifier {
   NsDesign design;
   ThemeMode themeMode;
   bool onboarded, cameraReady, voice;
+
+  /// Minutes of continuous driving before «Пора сделать перерыв»; the
+  /// shell hands it to [TripController.breakInterval] outside a trip.
+  int breakMinutes;
+  static const defaultBreakMinutes = 120;
+  static const breakChoices = [90, 120, 150, 180];
 
   /// Writes one setting through the trip controller's journal queue.
   final void Function(Future<void> Function(TripRepository))? save;
@@ -87,5 +99,11 @@ class UiPrefs extends ChangeNotifier {
   void setVoice(bool v) {
     voice = v;
     _set('ui_voice', v);
+  }
+
+  void setBreakMinutes(int v) {
+    if (v == breakMinutes) return;
+    breakMinutes = v;
+    _set('ui_break_min', v);
   }
 }

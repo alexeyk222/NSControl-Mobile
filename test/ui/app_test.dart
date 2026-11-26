@@ -258,6 +258,16 @@ void main() {
       final context = tester.element(find.text(Copy.setDesign));
       expect(NsTheme.of(context).design, design);
     }
+    // The voice switch silences the controller's optional phrases too.
+    expect(trip.voiceEnabled, isTrue);
+    prefs.setVoice(false);
+    await tester.pump();
+    expect(trip.voiceEnabled, isFalse);
+    // The break interval goes to the trip rules outside a trip.
+    prefs.setBreakMinutes(150);
+    await tester.pump();
+    expect(trip.breakInterval, const Duration(minutes: 150));
+    expect(trip.drive.breakAfterUs, 150 * 60 * 1000000);
     // The theme outside a trip.
     await tester.tap(find.text(Copy.themeLight));
     await tester.pumpAndSettle();
