@@ -31,9 +31,9 @@ class Readiness {
   List<ReadyRow> get rows => [camera, watch, sleep];
 
   /// The break advice interval when nothing else is set
-  /// (`DriveClock.breakAfterUs` default); the driver changes it in the
-  /// settings.
-  static const breakAfter = Duration(hours: 2);
+  /// (`RecommendationEngine.defaultLongDrive`); the driver changes it in
+  /// the settings and [ReadinessFacts.breakAfter] carries the trip's own.
+  static const breakAfter = RecommendationEngine.defaultLongDrive;
 
   static Readiness from(ReadinessFacts f) {
     final reasons = <String>[];
