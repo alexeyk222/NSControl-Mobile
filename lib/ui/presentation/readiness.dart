@@ -30,8 +30,10 @@ class Readiness {
 
   List<ReadyRow> get rows => [camera, watch, sleep];
 
-  /// How long the break advice comes after (`RecommendationEngine`).
-  static const breakAfter = RecommendationEngine.longDrive;
+  /// The break advice interval when nothing else is set
+  /// (`DriveClock.breakAfterUs` default); the driver changes it in the
+  /// settings.
+  static const breakAfter = Duration(hours: 2);
 
   static Readiness from(ReadinessFacts f) {
     final reasons = <String>[];
@@ -58,7 +60,7 @@ class Readiness {
     } else {
       verdict = Copy.verdictOk;
       kind = VerdictKind.ok;
-      sub = Copy.verdictOkSub(breakInterval(breakAfter));
+      sub = Copy.verdictOkSub(breakInterval(f.breakAfter));
     }
 
     final camera = f.cameraDenied
@@ -208,6 +210,7 @@ class ReadinessFacts {
     this.cameraDenied = false,
     this.side = MountSide.left,
     this.watch = WatchReadiness.none,
+    this.breakAfter = Readiness.breakAfter,
   });
 
   factory ReadinessFacts.of({
@@ -229,6 +232,7 @@ class ReadinessFacts {
       cameraDenied: trip.cameraPermissionBlocked,
       side: MountSide.parse(trip.mountPosition),
       watch: WatchReadiness.of(trip),
+      breakAfter: trip.breakInterval,
     );
   }
 
@@ -239,4 +243,5 @@ class ReadinessFacts {
   final DateTime? sleepReadAt;
   final MountSide side;
   final WatchReadiness watch;
+  final Duration breakAfter;
 }

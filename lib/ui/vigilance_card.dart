@@ -22,7 +22,7 @@ class VigilanceCard extends StatelessWidget {
       FatigueLevel.high => ('Выраженные признаки усталости', scheme.error),
     };
     final driving = trip.drivingTime;
-    final total = DriveClock().breakAfterUs;
+    final total = trip.drive.breakAfterUs;
     final progress = (driving.inMicroseconds / total).clamp(0.0, 1.0);
     final vitals = trip.freshVitals;
     final metrics = [

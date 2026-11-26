@@ -357,7 +357,16 @@ class _SettingsListState extends State<_SettingsList> {
             ),
             NsRow(
               label: Copy.setBreak,
-              value: breakInterval(Readiness.breakAfter),
+              value: breakInterval(Duration(minutes: prefs.breakMinutes)),
+              // The rules take the interval when a trip starts.
+              enabled: !trip.active,
+              onTap: () async {
+                final v = await _pick(Copy.setBreak, [
+                  for (final m in UiPrefs.breakChoices)
+                    (m, breakInterval(Duration(minutes: m))),
+                ], prefs.breakMinutes);
+                if (v != null) prefs.setBreakMinutes(v);
+              },
             ),
           ],
         ),
