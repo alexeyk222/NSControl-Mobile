@@ -314,7 +314,7 @@ void main() {
     test('the break interval of the settings', () {
       final e = RecommendationEngine(
         tripId: 'trip',
-        longDrive: const Duration(minutes: 90),
+        breakAfter: const Duration(minutes: 90),
       );
       final enough = summary([record('one', -9, -1)]);
       final due = e.evaluate(

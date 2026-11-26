@@ -120,18 +120,17 @@ class RecommendationUpdate {
 
 /// One instance per trip. Acknowledging camera signals does not affect its latch.
 class RecommendationEngine {
-  RecommendationEngine({
-    required this.tripId,
-    this.longDrive = defaultLongDrive,
-  }) {
+  RecommendationEngine({required this.tripId, this.breakAfter = longDrive}) {
     if (tripId.isEmpty) throw ArgumentError('Поездка должна иметь ID');
   }
   final String tripId;
-  static const defaultLongDrive = Duration(hours: 2);
+
+  /// The default break interval.
+  static const longDrive = Duration(hours: 2);
 
   /// Continuous driving that is a reason for a break (the trip's break
-  /// interval).
-  final Duration longDrive;
+  /// interval, [longDrive] by default).
+  final Duration breakAfter;
   static const lowBodyBatteryLimit = 20;
   bool _eyesSeen = false, _fatigueSeen = false;
   int _sequence = 0;
@@ -153,7 +152,7 @@ class RecommendationEngine {
     // Fatigue trends are latched like eye evidence, but a break clears them.
     _fatigueSeen = tripStarted && (_fatigueSeen || fatigueHigh);
     final driveDue =
-        tripStarted && drivingTime != null && drivingTime >= longDrive;
+        tripStarted && drivingTime != null && drivingTime >= breakAfter;
     final lowEnergy =
         bodyBattery != null &&
         bodyBattery >= 0 &&

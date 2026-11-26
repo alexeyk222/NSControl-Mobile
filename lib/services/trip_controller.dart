@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Directory;
+import 'dart:ui' show Rect;
 import 'package:camera/camera.dart' show CameraException, CameraPreview;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Widget;
@@ -9,7 +10,8 @@ import '../logic/arkit_geometry.dart' show arkitCapabilities;
 import '../logic/domain.dart';
 import '../logic/attention_zones.dart';
 import '../logic/detection_profile.dart';
-import '../logic/driver_continuity.dart' show ContinuityDecision;
+import '../logic/driver_continuity.dart'
+    show ContinuityDecision, DriverContinuity;
 import '../logic/holder_shift.dart';
 import '../logic/mount.dart';
 import '../logic/mount_shift.dart';
@@ -738,15 +740,43 @@ class TripController extends ChangeNotifier {
     return CameraPreview(controller);
   }
 
+  /// The face the interface offers to confirm when there are several: the
+  /// closest to the camera, that is the largest.
+  DetectedFace? get closestFace {
+    DetectedFace? best;
+    for (final f in faces) {
+      final size = f.bounds.width * f.bounds.height;
+      if (best == null || size > best.bounds.width * best.bounds.height) {
+        best = f;
+      }
+    }
+    return best;
+  }
+
+  /// Confirms the driver's face. Several faces in the frame are allowed
+  /// (not in «ТЗ 2.2 (эталон)», which keeps the strict ФТ-02 rule): the
+  /// chosen face anchors driver continuity, and a calibration frame counts
+  /// only where the driver is told apart by geometry (box, distance);
+  /// other frames are unusable. Observation still pauses on several faces.
   void confirmFace(int trackingId) {
     if (!active || phase != TripPhase.findingFace) return;
-    if (faces.length != 1 ||
-        faces.single.measurement.trackingId != trackingId) {
+    final chosen = faces
+        .where((f) => f.measurement.trackingId == trackingId)
+        .firstOrNull;
+    if (chosen == null || (tzReference && faces.length != 1)) {
       error =
           'В области водителя должно оставаться одно лицо. Уберите другие лица из кадра.';
       _notify();
       return;
     }
+    final signals = _signalsOf(chosen);
+    _calibrationDriver = tzReference
+        ? null
+        : (DriverContinuity(trackingId: trackingId)..anchor(
+            _lastCapturedUs,
+            box: signals.box,
+            distanceM: signals.distanceM,
+          ));
     error = null;
     calibrationNote = null;
     _anchorFace = null;
@@ -811,6 +841,48 @@ class TripController extends ChangeNotifier {
         eyeOpenRight: f.measurement.rightEye,
       );
 
+  /// The driver among several faces during the calibration window.
+  DriverContinuity? _calibrationDriver;
+
+  /// The calibration frame's faces as the collectors get them: several
+  /// faces are reduced to the driver when geometry tells the driver apart,
+  /// to none when it does not (an unusable frame). One face goes through
+  /// continuity, so the driver keeps the calibrated id; another single face
+  /// goes on unchanged and the collectors see a changed face.
+  List<DetectedFace> _calibrationFaces(List<DetectedFace> result, int at) {
+    final driver = _calibrationDriver;
+    if (driver == null || result.isEmpty) return result;
+    if (result.length == 1) {
+      final resolved = driver.resolve(at, [_signalsOf(result.single)]).single;
+      return resolved.trackingId == result.single.measurement.trackingId
+          ? result
+          : [
+              DetectedFace(
+                resolved.toMeasurement(),
+                result.single.bounds,
+                signals: resolved,
+              ),
+            ];
+    }
+    final signals = result.map(_signalsOf).toList();
+    final picked = driver.pick(at, signals);
+    if (picked == null) return const [];
+    // pick() returns the face itself, or a copy with the calibrated id.
+    final index = signals.indexWhere(
+      (s) => identical(s, picked) || identical(s.box, picked.box),
+    );
+    final original = index < 0 ? null : result[index];
+    return [
+      original != null && identical(signals[index], picked)
+          ? original
+          : DetectedFace(
+              picked.toMeasurement(),
+              original?.bounds ?? Rect.zero,
+              signals: picked,
+            ),
+    ];
+  }
+
   void _onFaces(List<DetectedFace> result, int captured, int completed) {
     if (!active || !_foreground) return;
     faces = result;
@@ -818,6 +890,7 @@ class TripController extends ChangeNotifier {
     _lastFrameAtUs = _nowUs;
     _recordFrame(result, captured, completed);
     if (phase == TripPhase.calibrating) {
+      result = _calibrationFaces(result, captured);
       _collector?.add(
         capturedUs: captured,
         faces: result.map((f) => f.measurement).toList(),
@@ -987,7 +1060,9 @@ class TripController extends ChangeNotifier {
     );
     _shiftEndUs = start + 10000000;
     movedText = 'Телефон сдвинулся';
-    _say('Телефон сдвинулся. Смотрите на дорогу, перенастроюсь');
+    // Said even with the voice prompts off: the new calibration needs the
+    // driver's eyes on the road.
+    _say('Телефон сдвинулся. Смотрите на дорогу, перенастроюсь', always: true);
     _notify();
   }
 
