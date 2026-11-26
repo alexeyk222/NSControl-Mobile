@@ -9,14 +9,18 @@ import 'package:nscontrol/logic/trip_review.dart';
 /// Usage: see [_usage] or run with `--help`.
 const _usage = '''
 Разбор поездки:
-  dart run tool/trip_review.dart <nscontrol-trip-….jsonl> [--review nscontrol-trip-….review.json] [--out размеченная.jsonl] [--report отчёт.md]
-Без --review берётся файл разбора рядом с записью. Размеченную запись можно
+  dart run tool/trip_review.dart <nscontrol-trip-….jsonl> [--review nscontrol-trip-….review.json] [--out размеченная.jsonl] [--report отчёт.md] [--score-gaps]
+Без --review берётся файл разбора рядом с записью; если его нет, берутся
+только случаи со страницы («Новый случай»), и время между ними не
+оценивается (испытатель в это время смотрит в клавиатуру). --score-gaps
+считает его ездой без тревог. Размеченную запись можно
 прогнать: dart run tool/replay.dart размеченная.jsonl --profile v1
 и подобрать пороги: dart run tool/tune.dart размеченная.jsonl … --out tune.md
 ''';
 
 Future<void> main(List<String> args) async {
   String? file, reviewPath, out, reportPath;
+  bool? scoreGaps;
   for (var i = 0; i < args.length; i++) {
     String next() {
       if (i + 1 >= args.length) _fail('Не хватает значения для ${args[i]}');
@@ -30,6 +34,8 @@ Future<void> main(List<String> args) async {
         out = next();
       case '--report':
         reportPath = next();
+      case '--score-gaps':
+        scoreGaps = true;
       case '-h' || '--help':
         stdout.write(_usage);
         return;
@@ -41,12 +47,15 @@ Future<void> main(List<String> args) async {
   if (file == null) _fail(_usage);
   final text = await File(file).readAsString();
   reviewPath ??= file.replaceFirst(RegExp(r'\.jsonl$'), '.review.json');
-  if (!await File(reviewPath).exists()) {
-    _fail(
-      'Нет файла разбора $reviewPath. Разберите поездку на странице /review.',
-    );
+  final TripReview review;
+  if (await File(reviewPath).exists()) {
+    review = TripReview.parse(await File(reviewPath).readAsString());
+    scoreGaps ??= true;
+  } else {
+    scoreGaps ??= false;
+    stderr.writeln('Нет файла разбора $reviewPath: беру только случаи.');
+    review = TripReview(recordingId: '', items: const []);
   }
-  final review = TripReview.parse(await File(reviewPath).readAsString());
   final report = tripReviewReport(text, review);
   if (reportPath != null) {
     await File(reportPath).writeAsString(report);
@@ -54,7 +63,9 @@ Future<void> main(List<String> args) async {
     stdout.write(report);
   }
   if (out != null) {
-    await File(out).writeAsString(labelTrip(text, review));
+    await File(
+      out,
+    ).writeAsString(labelTrip(text, review, scoreGaps: scoreGaps));
     stderr.writeln('Размеченная запись: $out');
   }
 }
@@ -65,6 +76,8 @@ String tripReviewReport(String jsonl, TripReview review) {
   Map<String, dynamic> meta = const {};
   int? firstCal, last;
   final derived = <Map<String, dynamic>>[];
+  final caseLines = <Map<String, dynamic>>[];
+  final alarms = <(int, String)>[];
   for (final raw in const LineSplitter().convert(jsonl)) {
     if (raw.trim().isEmpty) continue;
     Map<String, dynamic> line;
@@ -82,12 +95,23 @@ String tripReviewReport(String jsonl, TripReview review) {
         firstCal ??= (line['atUs'] as num).toInt();
       case 'derived':
         derived.add(line);
+      case 'mark' when line['kind'] == 'case':
+        caseLines.add(line);
+      case 'event' when line['change'] == 'started':
+        final e = line['event'] as Map;
+        alarms.add((
+          (e['thresholdUs'] as num).toInt() +
+              ((line['sessionOffsetUs'] as num?)?.toInt() ?? 0),
+          e['type'] as String,
+        ));
     }
   }
   final observedUs = firstCal == null || last == null ? 0 : last - firstCal;
   final hours = observedUs / 3.6e9;
   final b = StringBuffer()
-    ..writeln('# Разбор поездки ${review.recordingId}')
+    ..writeln(
+      '# Разбор поездки ${review.recordingId.isEmpty ? meta['recordingId'] ?? '' : review.recordingId}',
+    )
     ..writeln()
     ..writeln(
       '- Профиль ${(meta['detectionProfile'] as Map?)?['id'] ?? review.profile ?? '—'}, '
@@ -140,14 +164,6 @@ String tripReviewReport(String jsonl, TripReview review) {
       '- Причины ложных: ${(causes.entries.toList()..sort((a, c) => c.value.compareTo(a.value))).map((e) => '${e.key} ${e.value}').join(', ')}.',
     );
   }
-  b
-    ..writeln()
-    ..writeln('## По порядку')
-    ..writeln()
-    ..writeln(
-      '| Время | Что | Вердикт | Причина | Зона | Наклон/поворот, ° | Глаза Л/П, T | Затвор | Заметка |',
-    )
-    ..writeln('|---|---|---|---|---|---|---|---|---|');
   Map<String, dynamic>? near(int t) {
     Map<String, dynamic>? best;
     var diff = 300000;
@@ -163,6 +179,69 @@ String tripReviewReport(String jsonl, TripReview review) {
 
   String n(Object? v, [int digits = 1]) =>
       v is num ? v.toStringAsFixed(digits) : '—';
+  final cases = tripCases(caseLines);
+  if (cases.isNotEmpty) {
+    const names = {
+      'ok': 'верно',
+      'false_alarm': 'ложная',
+      'missed': 'пропуск',
+      'other_type': 'другой тип',
+      'unsure': 'без ответа',
+    };
+    final outcomes = [for (final c in cases) caseOutcome(c, alarms)];
+    b
+      ..writeln()
+      ..writeln('## Случаи со страницы')
+      ..writeln()
+      ..writeln(
+        '- ${cases.length} случаев: ${names.entries.map((e) => '${e.value} ${outcomes.where((o) => o == e.key).length}').join(', ')}.',
+      )
+      ..writeln()
+      ..writeln(
+        '| Время | Длит., с | Что было | Ждали | Тревоги | Итог | Наклон макс, ° | Поворот макс, ° | Глаза мин |',
+      )
+      ..writeln('|---|---:|---|---|---|---|---:|---:|---:|');
+    for (var i = 0; i < cases.length; i++) {
+      final c = cases[i];
+      final inside = derived.where((d) {
+        final t = (d['atUs'] as num).toInt();
+        return t >= c.startUs && t <= c.toUs;
+      });
+      double? pitch, yaw, eyes;
+      for (final d in inside) {
+        final m = (d['measure'] as Map?) ?? const {};
+        final p = (m['pitchDown'] as num?)?.toDouble();
+        final y = (m['yaw'] as num?)?.toDouble().abs();
+        final l = (m['eyeLeft'] as num?)?.toDouble();
+        final r = (m['eyeRight'] as num?)?.toDouble();
+        if (p != null && (pitch == null || p > pitch)) pitch = p;
+        if (y != null && (yaw == null || y > yaw)) yaw = y;
+        if (l != null && r != null) {
+          final e = l > r ? l : r;
+          if (eyes == null || e < eyes) eyes = e;
+        }
+      }
+      final got = [
+        for (final (at, type) in alarms)
+          if (at >= c.startUs && at <= c.toUs) type,
+      ];
+      b.writeln(
+        '| ${_t(c.startUs)} | ${c.endUs == null ? '—' : ((c.endUs! - c.startUs) / 1e6).toStringAsFixed(1)} | '
+        '${c.truth ?? '—'} | ${c.expect ?? '—'} | ${got.isEmpty ? '—' : got.join(', ')} | '
+        '${names[outcomes[i]]} | ${n(pitch)} | ${n(yaw)} | ${n(eyes, 2)} |',
+      );
+    }
+  }
+  if (review.items.isNotEmpty) {
+    b
+      ..writeln()
+      ..writeln('## По порядку')
+      ..writeln()
+      ..writeln(
+        '| Время | Что | Вердикт | Причина | Зона | Наклон/поворот, ° | Глаза Л/П, T | Затвор | Заметка |',
+      )
+      ..writeln('|---|---|---|---|---|---|---|---|---|');
+  }
   for (final item in review.items) {
     final d = near(item.atUs);
     final m = (d?['measure'] as Map?) ?? const {};
