@@ -311,6 +311,21 @@ void main() {
       expect(due.recommendation.reasonTexts.single, contains('2 ч 5 мин'));
     });
 
+    test('the break interval of the settings', () {
+      final e = RecommendationEngine(
+        tripId: 'trip',
+        longDrive: const Duration(minutes: 90),
+      );
+      final enough = summary([record('one', -9, -1)]);
+      final due = e.evaluate(
+        localNow: now,
+        sleep: enough,
+        tripStarted: true,
+        drivingTime: const Duration(minutes: 95),
+      );
+      expect(due.recommendation.action, RecommendationAction.takeBreak);
+    });
+
     test('fatigue trend latches until a break and ranks below head event', () {
       final e = RecommendationEngine(tripId: 'trip');
       final enough = summary([record('one', -9, -1)]);

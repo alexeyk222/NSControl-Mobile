@@ -269,9 +269,27 @@ class TripController extends ChangeNotifier {
     final seen = _anchorUs;
     final lost = seen == null || _nowUs - seen > notSeenUs;
     if (lost && faces.isEmpty) return 'Не вижу вас';
-    return engineCalibration?.hiddenEyes ?? calibration?.hiddenEyes ?? false
-        ? 'Слежу за головой'
-        : 'Слежу';
+    return headOnly ? 'Слежу за головой' : 'Слежу';
+  }
+
+  /// Eyes out of use longer than this with the head seen: «Слежу за
+  /// головой» (docs/ux/states.md S-02: 5 s, not less than 3.5 s).
+  static const headOnlyAfterUs = 5000000;
+  int? _eyesLostSinceUs;
+  bool _wasHeadOnly = false;
+
+  /// Only the head is watched: the calibration hid the eyes, or the eye
+  /// channel has been out of use for [headOnlyAfterUs] while the head
+  /// channel works. The screen line and the watch level `head_only`.
+  bool get headOnly {
+    if (phase != TripPhase.observing || multipleFaces || cameraSilent) {
+      return false;
+    }
+    if (engineCalibration?.hiddenEyes ?? calibration?.hiddenEyes ?? false) {
+      return true;
+    }
+    final since = _eyesLostSinceUs;
+    return since != null && _nowUs - since >= headOnlyAfterUs;
   }
 
   /// The profile and settings the automata and the fatigue monitor run on:
@@ -354,6 +372,15 @@ class TripController extends ChangeNotifier {
   FatigueMonitor? _fatigueMonitor;
   FatigueSnapshot fatigue = FatigueSnapshot.empty;
   final drive = DriveClock();
+
+  /// Interval of the break advice (S-15, «Пора сделать перерыв»); the
+  /// recommendation rules read it too.
+  Duration get breakInterval => Duration(microseconds: drive.breakAfterUs);
+  set breakInterval(Duration value) {
+    drive.breakAfterUs = value.inMicroseconds;
+    _notify();
+  }
+
   WearableVitals? vitals;
   int _lastFatigueUs = 0;
   String? watchAcknowledgedAt;
@@ -653,7 +680,10 @@ class TripController extends ChangeNotifier {
                 platform.testAlert(volume: settings.volume * .6, vibrate: true),
           ),
         );
-        _say('Телефон перегрелся. Уберите его от горячего воздуха');
+        _say(
+          'Телефон перегрелся. Уберите его от горячего воздуха',
+          always: true,
+        );
     }
   }
 
@@ -750,8 +780,19 @@ class TripController extends ChangeNotifier {
   @visibleForTesting
   int get calibrationStartUs => _calibrationStart;
 
-  /// Voice prompt of the calibration; best effort, never an alert error.
-  void _say(String text) => unawaited(() async {
+  /// «Голосовые подсказки» in the settings: off silences the optional
+  /// phrases. The alarm, «Пауза. Защита выключена» and the overheating
+  /// warning are said always.
+  bool voiceEnabled = true;
+
+  /// Voice prompt; best effort, never an alert error. [always]: said even
+  /// with [voiceEnabled] off.
+  void _say(String text, {bool always = false}) {
+    if (!voiceEnabled && !always) return;
+    _speak(text);
+  }
+
+  void _speak(String text) => unawaited(() async {
     try {
       await platform.call('speech.say', {'text': text});
     } catch (_) {}
@@ -837,6 +878,12 @@ class TripController extends ChangeNotifier {
       );
       _feedFatigue(measurements, at);
       _observeHolder(result, measurements, at);
+      final channels = engine.snapshot;
+      if (channels.head.available && !channels.eyes.available) {
+        _eyesLostSinceUs ??= captured;
+      } else {
+        _eyesLostSinceUs = null;
+      }
       pipeline
         ?..tzSignActive = tzSignActive(engine.snapshot)
         ..eyesEventActive = engine.snapshot.eyes.activeEvent != null;
@@ -1232,6 +1279,12 @@ class TripController extends ChangeNotifier {
       _wasSilent = silent;
       _notify();
     }
+    final headOnly = this.headOnly;
+    if (headOnly != _wasHeadOnly) {
+      _wasHeadOnly = headOnly;
+      _pushWatchState();
+      _notify();
+    }
     if (phase == TripPhase.observing && engine != null) {
       _apply(engine!.tick(sessionNowUs));
       if (sessionNowUs - _lastCheckpointUs >= 1000000 && sessionId != null) {
@@ -1361,6 +1414,7 @@ class TripController extends ChangeNotifier {
     attentionState = AttentionState.unknown;
     // Session times start at 0 again; a new road pose starts a new watch.
     mountShift = MountShiftMonitor();
+    _eyesLostSinceUs = null;
     // The holder sign starts over on the references of the calibration
     // (kept over a pause: the phone is where it was).
     final shiftSettings = this.profile.holderShift;
@@ -1704,7 +1758,7 @@ class TripController extends ChangeNotifier {
     if (!active || userPaused) return;
     userPaused = true;
     final generation = ++_lifecycleGeneration;
-    _say('Пауза. Защита выключена');
+    _say('Пауза. Защита выключена', always: true);
     await _suspend(EventEndReason.observationStopped, generation);
     _pushWatchState();
     _notify();
@@ -1859,6 +1913,8 @@ class TripController extends ChangeNotifier {
             ? 'paused'
             : switch (camera) {
                 CameraStatus.warning => 'warning',
+                CameraStatus.observing ||
+                CameraStatus.limited when headOnly => 'head_only',
                 CameraStatus.observing => 'observing',
                 CameraStatus.limited => 'limited',
                 _ => 'unavailable',

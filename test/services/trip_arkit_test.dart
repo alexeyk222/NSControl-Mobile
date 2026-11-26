@@ -726,6 +726,68 @@ void main() {
     expect(trip.watchText, 'Не вижу вас');
   });
 
+  group('voice and head only', () {
+    test('voice off: only the necessary phrases', () async {
+      trip.voiceEnabled = false;
+      await trip.start();
+      calibrateOn(arkitFace);
+      observe(1, arkitFace);
+      expect(platform.spoken, isEmpty);
+      await trip.pause();
+      expect(platform.spoken, ['Пауза. Защита выключена']);
+      await trip.resume();
+      expect(platform.spoken, ['Пауза. Защита выключена']);
+    });
+
+    test('the break interval is set on the trip', () async {
+      expect(trip.breakInterval, const Duration(hours: 2));
+      trip.breakInterval = const Duration(minutes: 90);
+      await trip.start();
+      expect(trip.untilBreak.inMinutes, inInclusiveRange(89, 90));
+      expect(trip.drive.breakAfterUs, 90 * 60 * 1000000);
+    });
+
+    Future<void> connectWatch() async {
+      await trip.wearable.connect();
+      await trip.wearable.receive({
+        'type': 'ready',
+        'connection_id': platform.messages.last['connection_id'],
+        'receiver_epoch': 'watch',
+      });
+    }
+
+    String? watchLevel() =>
+        platform.messages.lastWhere((m) => m['type'] == 'snapshot')['level']
+            as String?;
+
+    test(
+      'eyes out of view for 5 s: «Слежу за головой», watch head_only',
+      () async {
+        await trip.start();
+        calibrateOn(arkitFace);
+        await connectWatch();
+        observe(1, arkitFace);
+        expect(trip.headOnly, isFalse);
+        // The driver sits so that the camera sees the eyes past its limit.
+        observe(3, () => arkitFace(view: 56));
+        trip.tick();
+        expect(trip.headOnly, isFalse);
+        expect(trip.watchText, 'Слежу');
+        observe(2.5, () => arkitFace(view: 56));
+        trip.tick();
+        await Future<void>.delayed(Duration.zero);
+        expect(trip.headOnly, isTrue);
+        expect(trip.watchText, 'Слежу за головой');
+        expect(watchLevel(), 'head_only');
+        observe(.5, arkitFace);
+        trip.tick();
+        await Future<void>.delayed(Duration.zero);
+        expect(trip.headOnly, isFalse);
+        expect(watchLevel(), isNot('head_only'));
+      },
+    );
+  });
+
   test('the trip runs on ARKit at 30 fps by default', () async {
     await trip.start();
     expect(trip.engineInUse, TripEngine.arkit);

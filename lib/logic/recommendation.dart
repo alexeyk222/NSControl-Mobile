@@ -120,11 +120,18 @@ class RecommendationUpdate {
 
 /// One instance per trip. Acknowledging camera signals does not affect its latch.
 class RecommendationEngine {
-  RecommendationEngine({required this.tripId}) {
+  RecommendationEngine({
+    required this.tripId,
+    this.longDrive = defaultLongDrive,
+  }) {
     if (tripId.isEmpty) throw ArgumentError('Поездка должна иметь ID');
   }
   final String tripId;
-  static const longDrive = Duration(hours: 2);
+  static const defaultLongDrive = Duration(hours: 2);
+
+  /// Continuous driving that is a reason for a break (the trip's break
+  /// interval).
+  final Duration longDrive;
   static const lowBodyBatteryLimit = 20;
   bool _eyesSeen = false, _fatigueSeen = false;
   int _sequence = 0;

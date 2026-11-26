@@ -212,7 +212,11 @@ class DriveClock {
     this.breakAfterUs = 2 * 3600 * 1000000,
     this.restCreditUs = 15 * 60 * 1000000,
   });
-  final int breakAfterUs, restCreditUs;
+
+  /// Continuous driving after which a break is due (settable: the break
+  /// interval of the settings).
+  int breakAfterUs;
+  final int restCreditUs;
   int? _segmentStartUs, _lastActiveUs;
 
   /// Records activity; returns true when a pause long enough to count as a
