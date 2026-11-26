@@ -66,6 +66,7 @@
 - **`device`.** На ARKit раз в секунду, как у Лаборатории. **На запасном ML Kit строк `device` нет**: плагин камеры статистики устройства не отдаёт, поэтому нагрев на ML Kit не отслеживается.
 - **`trip`.** `{"type":"trip","atUs":…,"heat":{"thermal":"serious","economy":true,"emitEvery":2,"floorHit":false}}` при смене режима нагрева (FR-DRV-08). Replay такие строки пропускает.
   `{"type":"trip","atUs":…,"holderShift":{"source":"pose","sinceUs":…,"offset":[yaw,pitch,roll]}}` один раз за сессию, когда HolderShift заподозрил резкий сдвиг держателя (FR-CAL-08); `sinceUs` на часах сессии. Поездка после этого перекалибровывается в фоне, как при `RoadAdaptation.atLimit`.
+  `{"type":"trip","atUs":…,"recalibrationRefused":{"neutralYaw":…,"neutralPitch":…,"oldNeutralYaw":…,"oldNeutralPitch":…}}`, когда фоновая перекалибровка нашла «дорогу» дальше `holderShift.maxNewYawDeg` (35°) или `maxNewPitchDeg` (20°) от старой: её не принимают, наблюдение идёт по старой калибровке.
 
 Живой дебаг и разбор поездки (`docs/trip-debug.md`), режим разработчика:
 
