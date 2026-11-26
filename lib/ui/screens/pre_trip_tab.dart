@@ -8,10 +8,12 @@ import '../../services/trip_controller.dart';
 import '../copy.dart';
 import '../design/ns_theme.dart';
 import '../design/tokens.dart';
+import '../presentation/phone_problem.dart';
 import '../presentation/readiness.dart';
 import '../presentation/ui_prefs.dart';
 import '../widgets/buttons.dart';
 import '../widgets/marks.dart';
+import '../widgets/problem_card.dart';
 import 'common.dart';
 
 /// «Перед поездкой» (design screen 4, states P-01…P-07): the verdict and
@@ -38,6 +40,10 @@ class _PreTripTabState extends State<PreTripTab> {
   /// The driver answered «Как вы себя чувствуете?» on this screen; «Не
   /// знаю» is shown as chosen only after a tap.
   bool _feelChosen = false;
+
+  /// The phone problem the driver closed with «Скрыть»: the controller
+  /// keeps its last one, a new one shows again.
+  String? _hiddenProblem;
 
   void _act(ReadyAction a) {
     switch (a) {
@@ -86,12 +92,23 @@ class _PreTripTabState extends State<PreTripTab> {
       _ => p.text,
     };
     final feel = widget.sleep.assessment;
+    final problem = PhoneProblem.of(widget.trip.alertError);
+    final showProblem = problem != null && problem.detail != _hiddenProblem;
     return Column(
       children: [
         Expanded(
           child: ListView(
             padding: const EdgeInsets.fromLTRB(24, 18, 24, 16),
             children: [
+              if (showProblem) ...[
+                ProblemCard(
+                  problem,
+                  key: const Key('pre-trip-problem'),
+                  palette: p,
+                  onHide: () => setState(() => _hiddenProblem = problem.detail),
+                ),
+                const SizedBox(height: 18),
+              ],
               AnimatedSwitcher(
                 duration: NsMotion.state,
                 transitionBuilder: fadeThrough,

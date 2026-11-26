@@ -148,6 +148,15 @@ abstract final class Copy {
   static const adviceStopNow = 'Остановитесь как можно скорее';
   static const heatSerious = 'Телефон нагрелся, экономлю';
   static const moved = 'Телефон сдвинулся'; // trip.moved
+
+  // Problems of the phone itself (TripController.alertError): the driver
+  // must know when the alarm sound may not start.
+  static const problemAlarm = 'Звук тревоги может не сработать';
+  static const problemAlarmHint = 'Проверьте громкость и беззвучный режим';
+  static const problemRecording = 'Запись поездки не идёт';
+  static const problemDebug = 'Живой дебаг не запустился';
+  static const problemOther = 'Телефон не выполнил команду';
+  static const problemHide = 'Скрыть';
   static const journalBroken =
       'История этой поездки сохранится не полностью'; // trip.journal.broken
   static const pause = 'Пауза'; // trip.pause

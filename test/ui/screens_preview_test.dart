@@ -309,6 +309,10 @@ void main() {
       trip.movedText = 'Телефон сдвинулся. Смотрите на дорогу, перенастроюсь';
       await shot('trip_moved_dev', road(dev: true));
       trip.movedText = null;
+      trip.alertError = 'Оповещение телефона ограничено: PlatformException';
+      await shot('trip_alert_problem', road());
+      await shot('pre_trip_alert_problem', home());
+      trip.alertError = null;
 
       // Тревога.
       ObservationEvent event(EventType type) => ObservationEvent(
