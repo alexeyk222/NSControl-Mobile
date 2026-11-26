@@ -75,6 +75,7 @@ td.over{color:var(--warn);font-weight:600}
 #lb-opts{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px}
 #lb-opts label{color:var(--fg);white-space:nowrap}
 #lb-safety{flex:1;min-width:200px}
+#lb-norec{font-size:13px;font-weight:600;margin:0 0 6px}
 .lb-cols{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
 @media (max-width:760px){.lb-cols{grid-template-columns:1fr}}
 .lb-cols h4{margin:4px 0;font-size:13px;font-weight:600}
@@ -174,6 +175,14 @@ const TRUTHS = [
   ["other_alarm","другое с тревогой","any","KeyV"]];
 const TRUTH = Object.fromEntries(TRUTHS.map(([k, name, expect, code]) => [k, {name, expect, code, key: code.replace(/^(Digit|Key)/, "")}]));
 const KEY_TRUTH = Object.fromEntries(TRUTHS.map(t => [t[3], t[0]]));
+// A truth is one answer or several that happened together, joined by "+"
+// ("eyes_closed+mirror_right"); truthParts, truthExpect and truthKey repeat
+// trip_review.dart. Of several answers the alarm-wanted one decides, a
+// lowered head before closed eyes.
+function truthParts(t) { const p = t ? [...new Set(String(t).split("+"))] : []; return p.length && p.every(k => TRUTH[k]) ? p : []; }
+function truthExpect(t) { const w = truthParts(t).map(k => TRUTH[k].expect); return ["head", "eyes", "any", "none"].find(x => w.includes(x)) || null; }
+function truthKey(parts) { const rank = k => (TRUTH[k].expect === "none" ? TRUTHS.length : 0) + TRUTHS.findIndex(t => t[0] === k); return [...parts].sort((a, b) => rank(a) - rank(b)).join("+"); }
+function truthName(t) { return truthParts(t).map(k => TRUTH[k].name).join(" + "); }
 // The answers always on the card; the rest opens with «ещё…» (their keys
 // work either way).
 const MAIN_TRUTHS = new Set(["road","mirror_left","mirror_center","mirror_right","blind_left","blind_right","instruments","phone_short","eyes_closed","nod","look_down"]);
@@ -183,6 +192,9 @@ const POSITIVE_MIN = 3;
 // An alarm up to this long after the case's end still belongs to it.
 const CASE_TAIL = 1;
 let cases = [], openCase = null, editCase = null, pickedTruth = null, listsShownAt = 0, parked = false, flash = null;
+// «Несколько сразу»: the answers add up on the current case, and only
+// Space starts a new one.
+let multi = false;
 let rtt = null, lastDerived = null, lastFrames = {}, dirty = true;
 let prevPhase = {eyes:null, head:null};
 
@@ -204,7 +216,9 @@ labelCard.appendChild(el("div", null,
   `<div id="lb-truths">` +
   TRUTHS.map(([k, n, e]) => `<button data-truth="${k}" class="${e !== "none" ? "bad need" : ""}${MAIN_TRUTHS.has(k) ? "" : " more"}"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`).join("") +
   `<button id="lb-more">ещё…</button></div>` +
+  `<div id="lb-norec" class="no" style="display:none">Запись поездки не идёт: разметка не сохранится. Заверши поездку и начни новую с живым дебагом.</div>` +
   `<div id="lb-opts"><label><input type="checkbox" id="lb-parked"> Машина стоит</label>` +
+  `<label title="Ответы складываются на одном случае: глаза закрыты + правое зеркало. Новый случай начинает только пробел. Разово то же делает Shift + ответ."><input type="checkbox" id="lb-multi"> несколько ответов сразу</label>` +
   `<span id="lb-safety">На ходу размечает пассажир. Позы с тревогой (глаза закрыты, голова вниз) только в стоящей машине.</span>` +
   `<label><input type="checkbox" id="lb-sound"> сигнал через ${POSITIVE_MIN} с</label></div>` +
   `<div class="lb-cols"><div><h4>Случаи<span id="lb-sum"></span></h4><div id="lb-cases"></div></div><div><table id="lb-by"></table></div></div>` +
@@ -270,8 +284,10 @@ function onLine(m) {
       setChip("c-profile", "профиль " + ((m.detectionProfile || {}).id || "—"));
       renderLimits();
       setChip("c-engine", "движок " + (engines.join(" + ") || "—"));
-      setChip("c-rec", m.recordingId ? "● запись " + m.recordingId : "запись выкл", m.recordingId ? "rec" : "");
-      if (m.recordingId) addFeed("Начата запись " + m.recordingId, "lb");
+      // A trip that only the page sees (`live`) has an id and no file.
+      const rec = m.recordingId && !m.live;
+      setChip("c-rec", rec ? "● запись " + m.recordingId : "запись выкл", rec ? "rec" : m.recordingId ? "bad" : "");
+      if (rec) addFeed("Начата запись " + m.recordingId, "lb");
       loadRecordings(); break;
     case "calibration":
       threshold = m.profile && m.profile.eyeThreshold; renderLimits();
@@ -429,12 +445,12 @@ function onCase(m) {
   let c = cases.find(c => c.id === m.caseId);
   if (!c) { c = {id: m.caseId, n: cases.length + 1, t0: t, t1: null, truth: null, st: {}, beeped: false}; cases.push(c); }
   if (m.edge === "start") { c.t0 = t; if (c.t1 == null) openCase = c.id; addFeed(`Случай ${c.n}: начало`, "lb"); }
-  if (m.edge === "end") { c.t1 = t; if (openCase === c.id) openCase = null; addFeed(`Случай ${c.n}: конец`, "lb"); }
+  if (m.edge === "end") { c.t1 = t; c.touched = performance.now(); if (openCase === c.id) openCase = null; addFeed(`Случай ${c.n}: конец`, "lb"); }
   if (m.edge === "cancel") {
     cases = cases.filter(x => x.id !== c.id); cases.forEach((x, i) => x.n = i + 1);
     if (openCase === c.id) openCase = null; if (editCase === c.id) editCase = null; addFeed("Случай отменён", "lb"); renderLabel(true); return;
   }
-  if (m.truth && TRUTH[m.truth]) { c.truth = m.truth; if (m.edge === "truth") addFeed(`Случай ${c.n}: ${TRUTH[m.truth].name}`, "lb"); }
+  if (truthParts(m.truth).length) { c.truth = truthKey(truthParts(m.truth)); c.sent = null; c.touched = performance.now(); if (m.edge === "truth") addFeed(`Случай ${c.n}: ${truthName(c.truth)}`, "lb"); }
   if (openCase === c.id) pickedTruth = c.truth;
   renderLabel(true);
 }
@@ -466,7 +482,7 @@ function caseResult(c) {
   const got = caseAlarms(c), types = [...new Set(got.map(a => a.type))];
   const names = types.map(t => ALARM_NAMES[t] || t).join(", "), open = c.t1 == null;
   if (!c.truth) return {code: open ? "open" : "ask", text: got.length ? "тревога: " + names + (open ? "" : " · что было?") : open ? "идёт…" : "что было?", cls: ""};
-  const want = TRUTH[c.truth].expect;
+  const want = truthExpect(c.truth);
   if (want === "none") return got.length ? {code: "false_alarm", text: "✗ ложная: " + names, cls: "no"} : open ? {code: "open", text: "пока тихо", cls: ""} : {code: "ok", text: "✓ тихо", cls: "ok"};
   if (!open && c.t1 - c.t0 < POSITIVE_MIN) return {code: "too_short", text: `не в счёт: короче ${POSITIVE_MIN} с`, cls: "skip"};
   const type = want === "eyes" ? "eyes_closed" : want === "head" ? "head_pitch_down" : null;
@@ -481,13 +497,16 @@ function askCase() { const last = cases[cases.length - 1]; return last && last.t
 function setText(id, text) { const e = document.getElementById(id); if (e && e.textContent !== text) e.textContent = text; }
 function renderBanner() {
   const banner = document.getElementById("lb-banner"); if (!banner) return;
+  // Labels without the recording cannot be replayed: say so in red.
+  const norec = labelling() && meta.live && meta.recordingId ? "" : "none", warn = document.getElementById("lb-norec");
+  if (warn.style.display !== norec) warn.style.display = norec;
   const open = cases.find(c => c.id === openCase), edit = open ? null : cases.find(c => c.id === editCase);
   const ask = open || edit ? null : askCase(), last = cases[cases.length - 1];
   let cls = "", big, sub, toggle = "Начать случай", cancel = false;
   if (open) {
-    const dur = tNow - open.t0, need = open.truth && TRUTH[open.truth].expect !== "none";
+    const dur = tNow - open.t0, need = open.truth && truthExpect(open.truth) !== "none";
     cls = "open"; toggle = "Закончить"; cancel = true;
-    big = `● Случай ${open.n}${open.truth ? " · " + TRUTH[open.truth].name : ""} · ${num(dur, 1)} с`;
+    big = `● Случай ${open.n}${open.truth ? " · " + truthName(open.truth) : ""} · ${num(dur, 1)} с`;
     sub = need && dur < POSITIVE_MIN ? `Держи позу ещё ${num(POSITIVE_MIN - dur, 0)} с` : "Пробел: закончить";
     if (!open.beeped && dur >= POSITIVE_MIN && (!open.truth || need)) { open.beeped = true; beep(); }
   } else if (edit) {
@@ -495,12 +514,13 @@ function renderBanner() {
     big = `Случай ${edit.n}: какой ответ верный?`; sub = "Клавиша ответа или кнопка ниже";
   } else if (ask) {
     cls = "ask"; cancel = true;
-    big = `Случай ${ask.n}: что это было?`; sub = "Клавиша ответа или кнопка ниже";
+    big = `Случай ${ask.n}: что это было?`; sub = multi ? "Клавиши ответов, можно несколько" : "Клавиша ответа или кнопка ниже";
   } else {
     const r = last ? caseResult(last) : null;
     if (r && (r.cls === "ok" || r.cls === "no")) cls = r.cls === "ok" ? "good" : "wrong";
-    big = last && last.truth ? `Случай ${last.n} · ${TRUTH[last.truth].name} · ${r.text}` : "Готов";
-    sub = "Пробел: начать случай. Или сразу клавиша ответа.";
+    big = last && last.truth ? `Случай ${last.n} · ${truthName(last.truth)} · ${r.text}` : "Готов";
+    sub = !multi ? "Пробел: начать случай. Или сразу клавиша ответа."
+      : answerCase(true) ? "Ещё ответ: добавить к этому случаю. Пробел: следующий случай." : "Пробел: начать случай.";
   }
   if (flash && performance.now() < flash.until) sub = flash.text;
   if (banner.className !== cls) banner.className = cls;
@@ -520,8 +540,9 @@ function renderLabel(force) {
   if (a && a.tagName === "SELECT" && labelCard.contains(a)) return;
   if (!force && performance.now() - listsShownAt < 1000) return;
   listsShownAt = performance.now();
-  const target = cases.find(c => c.id === openCase) || cases.find(c => c.id === editCase) || askCase();
-  for (const b of document.querySelectorAll("#lb-truths button[data-truth]")) b.classList.toggle("on", !!target && target.truth === b.dataset.truth);
+  const target = answerCase(multi), on = target ? truthParts(target.truth) : [];
+  for (const b of document.querySelectorAll("#lb-truths button[data-truth]")) b.classList.toggle("on", on.includes(b.dataset.truth));
+
   const closed = cases.filter(c => c.t1 != null), res = new Map(closed.map(c => [c, caseResult(c).code]));
   const count = (list, code) => list.filter(c => res.get(c) === code).length;
   const wrong = count(closed, "false_alarm") + count(closed, "missed") + count(closed, "other_type");
@@ -542,11 +563,13 @@ function renderLabel(force) {
     // elsewhere it is the row's tooltip.
     return `<div class="row${c.id === editCase ? " edit" : ""}" title="${fmtT(c.t0)} · ${facts}"><span class="act">` +
       (c.id === openCase ? "" : `<button class="del" data-edit="${c.id}" title="Поменять ответ">✎</button>`) + `<button class="del" data-del="${c.id}" title="Удалить случай">✕</button></span>` +
-      `<b>${c.n}</b> ${c.truth ? TRUTH[c.truth].name : c.id === openCase ? "идёт" : "без ответа"} <span class="dur">${num(dur, 1)} с</span> · <span class="${r.cls}">${r.text}</span>` +
+      `<b>${c.n}</b> ${c.truth ? truthName(c.truth) : c.id === openCase ? "идёт" : "без ответа"} <span class="dur">${num(dur, 1)} с</span> · <span class="${r.cls}">${r.text}</span>` +
       (r.cls === "no" ? `<div class="st">${facts}</div>` : "") + `</div>`;
   }).join("") || `<div class="hint">Пока нет. Время между случаями не оценивается: можно смотреть на клавиатуру.</div>`;
-  const rows = TRUTHS.map(([k, name]) => {
-    const list = closed.filter(c => c.truth === k); if (!list.length) return "";
+  // Single answers in the order of the buttons, then the combinations.
+  const combos = [...new Set(closed.map(c => c.truth).filter(t => truthParts(t).length > 1))].sort();
+  const rows = [...TRUTHS.map(t => t[0]), ...combos].map(k => {
+    const list = closed.filter(c => c.truth === k), name = truthName(k); if (!list.length) return "";
     const cell = (n, bad) => `<td class="${n && bad ? "no" : ""}">${n || "·"}</td>`;
     return `<tr><td>${name}</td><td>${list.length}</td><td class="${count(list, "ok") ? "ok" : ""}">${count(list, "ok") || "·"}</td>${cell(count(list, "false_alarm"), true)}${cell(count(list, "missed"), true)}${cell(count(list, "other_type") + count(list, "too_short"), false)}</tr>`;
   }).join("");
@@ -586,16 +609,41 @@ function cancelCase() {
   const c = cases.find(c => c.id === openCase) || askCase();
   if (c) sendMark("case", {caseId: c.id, edge: "cancel"});
 }
-// An answer: about the running case, else about the finished case without
-// one, else it starts a new case that already has it.
-function pickTruth(k) {
+// The case an answer is about: the running one, else the one whose answer
+// is being changed, else the finished one without an answer. When answers
+// add up ([adding]) the last finished case takes them too, for ADD_S
+// seconds after its end or its last answer: a late stray key must not
+// change a case that is done (✎ does it on purpose).
+const ADD_S = 20;
+function answerCase(adding) {
+  const last = cases[cases.length - 1];
+  return cases.find(c => c.id === openCase) || cases.find(c => c.id === editCase) || askCase() ||
+    (adding && last && performance.now() - (last.touched || 0) < ADD_S * 1000 ? last : null);
+}
+// An answer: about the case of answerCase, else it starts a new case that
+// already has it. [add] (Shift, or «несколько ответов сразу»): the answer
+// joins the case's other answers, or leaves them when it is there already;
+// it never starts a case in the «несколько» mode.
+function pickTruth(k, add) {
   if (!labelling() || !TRUTH[k]) return; unlockAudio();
   if (TRUTH[k].expect !== "none" && !parked) return say("Позы, где тревога нужна, ставятся только в стоящей машине: отметь «Машина стоит».");
   flash = null;
-  const target = cases.find(c => c.id === openCase) || cases.find(c => c.id === editCase) || askCase();
-  editCase = null;
-  if (target) { if (target.id === openCase) pickedTruth = k; sendMark("case", {caseId: target.id, edge: "truth", truth: k}); return; }
-  pickedTruth = k; sendMark("case", {caseId: newCaseId(), edge: "start", truth: k});
+  const adding = add || multi, target = answerCase(adding);
+  if (!target) {
+    if (multi) return say(cases.length ? "Пробел: новый случай. Поменять ответ у готового: ✎ в его строке." : "Сначала пробел: начни случай. Потом ответы, можно несколько.");
+    pickedTruth = k; sendMark("case", {caseId: newCaseId(), edge: "start", truth: k}); return;
+  }
+  let truth = k;
+  if (adding) {
+    // Two quick keys: the second adds to the first, whose echo from the
+    // phone may still be on the way ([sent]).
+    const parts = truthParts(target.sent || target.truth), rest = parts.filter(p => p !== k);
+    if (parts.includes(k) && !rest.length) return;
+    truth = truthKey(parts.includes(k) ? rest : [...parts, k]);
+  } else editCase = null;
+  if (target.id === openCase) pickedTruth = truth;
+  target.sent = truth;
+  sendMark("case", {caseId: target.id, edge: "truth", truth});
 }
 let socket = null;
 function send(obj) { if (socket && socket.readyState === 1) socket.send(JSON.stringify(obj)); }
@@ -609,11 +657,14 @@ document.getElementById("lb-mark").addEventListener("click", () => sendMark("mar
   // Not remembered.
   const box = document.getElementById("lb-parked");
   box.addEventListener("change", () => { parked = box.checked; document.getElementById("lb-truths").classList.toggle("parked", parked); box.blur(); renderLabel(true); });
+  const many = document.getElementById("lb-multi");
+  try { multi = many.checked = localStorage.getItem("nscontrol.multi") === "1"; } catch (e) {}
+  many.addEventListener("change", () => { multi = many.checked; try { localStorage.setItem("nscontrol.multi", multi ? "1" : "0"); } catch (e) {} many.blur(); renderLabel(true); });
   const sound = document.getElementById("lb-sound");
   try { sound.checked = localStorage.getItem("nscontrol.beep") !== "0"; } catch (e) { sound.checked = true; }
   sound.addEventListener("change", () => { try { localStorage.setItem("nscontrol.beep", sound.checked ? "1" : "0"); } catch (e) {} unlockAudio(); sound.blur(); });
 }
-document.getElementById("lb-truths").addEventListener("click", e => { const b = e.target.closest("button[data-truth]"); if (b) pickTruth(b.dataset.truth); });
+document.getElementById("lb-truths").addEventListener("click", e => { const b = e.target.closest("button[data-truth]"); if (b) pickTruth(b.dataset.truth, e.shiftKey); });
 labelCard.addEventListener("click", e => {
   // A focused button would take the next Space as its own click.
   const b = e.target.closest("button"); if (b) b.blur();
@@ -634,7 +685,7 @@ document.addEventListener("keydown", e => {
   if (e.metaKey || e.ctrlKey || e.altKey || !labelling()) return;
   if (e.target.closest && e.target.closest("input:not([type=checkbox]),select,textarea")) return;
   const act = e.code === "Space" || e.code === "KeyN" ? toggleCase : e.code === "Escape" ? cancelCase
-    : e.code === "KeyM" ? () => sendMark("mark") : KEY_TRUTH[e.code] ? () => pickTruth(KEY_TRUTH[e.code]) : null;
+    : e.code === "KeyM" ? () => sendMark("mark") : KEY_TRUTH[e.code] ? () => pickTruth(KEY_TRUTH[e.code], e.shiftKey) : null;
   if (!act) return;
   e.preventDefault(); if (!e.repeat) act();
 });
@@ -739,7 +790,7 @@ function drawStrip() {
   for (const c of cases) {
     const x0 = x(c.t0), x1 = x(c.t1 == null ? tNow : c.t1); if (x1 < pad) continue;
     g.fillStyle = css("--warn"); g.globalAlpha = .25; g.fillRect(Math.max(pad, x0), 4, Math.max(2, x1 - Math.max(pad, x0)), 36); g.globalAlpha = 1;
-    g.fillStyle = css("--fg"); g.fillText("случай " + c.n + (c.truth ? " · " + TRUTH[c.truth].name : ""), Math.max(pad, x0) + 3, 37);
+    g.fillStyle = css("--fg"); g.fillText("случай " + c.n + (c.truth ? " · " + truthName(c.truth) : ""), Math.max(pad, x0) + 3, 37);
   }
   for (const b of bands) {
     const x0 = x(b.t0), x1 = x(b.t1 == null ? tNow : b.t1); if (x1 < pad) continue;

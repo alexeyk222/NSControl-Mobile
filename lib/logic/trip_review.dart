@@ -171,8 +171,8 @@ class TripCase {
   static const positiveMinUs = 3000000;
 
   /// What the truth wants: `none`, `eyes`, `head`, `any`; null when the
-  /// truth is not given or unknown.
-  String? get expect => truth == null ? null : caseTruths[truth];
+  /// truth is not given or unknown ([truthExpect]).
+  String? get expect => truthExpect(truth);
 
   /// Where alarms count for the case: up to [tailUs] after its end, and
   /// never into the next case.
@@ -195,7 +195,8 @@ class TripCase {
 }
 
 /// The live page's answers (TRUTHS in lab_page_html.dart) and the alarm
-/// each one wants.
+/// each one wants. A truth is one answer or several that happened together,
+/// joined by `+` (`eyes_closed+mirror_right`): see [truthExpect].
 const caseTruths = {
   'road': 'none',
   'mirror_left': 'none',
@@ -216,6 +217,38 @@ const caseTruths = {
   'look_down': 'head',
   'other_alarm': 'any',
 };
+
+/// The answers of a truth (`eyes_closed+mirror_right`: two); empty when
+/// the truth is not given or one of its answers is unknown.
+List<String> truthParts(String? truth) {
+  if (truth == null || truth.isEmpty) return const [];
+  final parts = truth.split('+').toSet().toList();
+  return parts.every(caseTruths.containsKey) ? parts : const [];
+}
+
+/// What a truth wants: `none`, `eyes`, `head`, `any`, or null (no or an
+/// unknown truth). Of several answers the alarm-wanted one decides: closed
+/// eyes while looking into a mirror want `eyes`. A lowered head wins over
+/// closed eyes: the head channel sees the pose for sure, the eyes may be
+/// hidden by it (replay allows the other alarm in both steps).
+String? truthExpect(String? truth) {
+  final wants = {for (final part in truthParts(truth)) caseTruths[part]};
+  for (final want in const ['head', 'eyes', 'any', 'none']) {
+    if (wants.contains(want)) return want;
+  }
+  return null;
+}
+
+/// One spelling of a truth: the alarm-wanted answers first, then the order
+/// of [caseTruths]. Unknown truths are returned as they are.
+String truthKey(String truth) {
+  final parts = truthParts(truth);
+  if (parts.isEmpty) return truth;
+  final order = caseTruths.keys.toList();
+  int rank(String k) =>
+      (caseTruths[k] == 'none' ? order.length : 0) + order.indexOf(k);
+  return (parts..sort((a, b) => rank(a).compareTo(rank(b)))).join('+');
+}
 
 /// Cases of a recording, in the order they started. [review]: its `case`
 /// items correct the truth and the bounds given on the live page.
@@ -239,14 +272,16 @@ List<TripCase> tripCases(
         cancelled.add(id);
     }
     final truth = line['truth'];
-    if (truth is String && truth.isNotEmpty) c.truth = truth;
+    if (truth is String && truth.isNotEmpty) c.truth = truthKey(truth);
   }
   for (final item in review?.items ?? const <TripReviewItem>[]) {
     final c = item.isCase ? cases[item.caseId] : null;
     if (c == null) continue;
     c.startUs = item.atUs;
     if (item.endedUs case final end? when end >= item.atUs) c.endUs = end;
-    if (item.truth case final truth?) c.truth = truth.isEmpty ? null : truth;
+    if (item.truth case final truth?) {
+      c.truth = truth.isEmpty ? null : truthKey(truth);
+    }
   }
   final result = cases.values.where((c) => !cancelled.contains(c.id)).toList()
     ..sort((a, b) => a.startUs.compareTo(b.startUs));

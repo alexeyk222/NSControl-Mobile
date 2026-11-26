@@ -95,6 +95,15 @@ const TRUTHS = [
   ["other_alarm","другое с тревогой","any","KeyV"]];
 const TRUTH = Object.fromEntries(TRUTHS.map(([k, name, expect, code]) => [k, {name, expect, code, key: code.replace(/^(Digit|Key)/, "")}]));
 const KEY_TRUTH = Object.fromEntries(TRUTHS.map(t => [t[3], t[0]]));
+// A truth is one answer or several that happened together, joined by "+"
+// ("eyes_closed+mirror_right"), as on the live page and in trip_review.dart.
+// Of several answers the alarm-wanted one decides, a lowered head before
+// closed eyes.
+function truthParts(t) { const p = t ? [...new Set(String(t).split("+"))] : []; return p.length && p.every(k => TRUTH[k]) ? p : []; }
+function truthExpect(t) { const w = truthParts(t).map(k => TRUTH[k].expect); return ["head", "eyes", "any", "none"].find(x => w.includes(x)) || null; }
+function truthKey(parts) { const rank = k => (TRUTH[k].expect === "none" ? TRUTHS.length : 0) + TRUTHS.findIndex(t => t[0] === k); return [...parts].sort((a, b) => rank(a) - rank(b)).join("+"); }
+function truthName(t) { return truthParts(t).map(k => TRUTH[k].name).join(" + "); }
+function known(t) { return truthParts(t).length ? truthKey(truthParts(t)) : null; }
 // Why the system was wrong, when the reviewer can tell (optional).
 const TECH = {glare:"блики / очки",bump:"кочка / тряска",face_lost:"лицо потеряно / край кадра",mount:"держатель сдвинулся"};
 const POSITIVE_MIN_US = 3e6, CASE_TAIL_US = 1e6;
@@ -164,14 +173,14 @@ function buildCases() {
     if (m.edge === "start") c.atUs = m.atUs;
     if (m.edge === "end") c.endedUs = m.atUs;
     if (m.edge === "cancel") cancelled.add(m.caseId);
-    if (m.truth && TRUTH[m.truth]) c.truth = c.live = m.truth;
+    if (known(m.truth)) c.truth = c.live = known(m.truth);
   }
   const list = [...byId.values()].filter(c => !cancelled.has(c.caseId));
   if (review && Array.isArray(review.items)) {
     for (const s of review.items) {
       const c = s.kind === "case" ? list.find(c => c.caseId === s.caseId) : null; if (!c) continue;
       c.atUs = s.atUs; if (s.endedUs != null && s.endedUs >= s.atUs) c.endedUs = s.endedUs;
-      if (s.truth != null) c.truth = TRUTH[s.truth] ? s.truth : null;
+      if (s.truth != null) c.truth = known(s.truth);
       c.note = s.note || "";
     }
   }
@@ -187,7 +196,7 @@ function caseResult(c) {
   const types = [...new Set(c.alarms.map(a => a.eventType))], names = types.map(t => TYPES[t] || t).join(", ");
   if (c.endedUs == null) return {code: "unsure", text: "случай без конца, не оценивается", cls: "skip"};
   if (!c.truth) return {code: "ask", text: names ? "тревога: " + names + " · что было?" : "что было?", cls: ""};
-  const want = TRUTH[c.truth].expect;
+  const want = truthExpect(c.truth);
   if (want === "none") return c.alarms.length ? {code: "false_alarm", text: "✗ ложная: " + names, cls: "no"} : {code: "ok", text: "✓ тихо", cls: "ok"};
   if (c.endedUs - c.atUs < POSITIVE_MIN_US) return {code: "too_short", text: "не в счёт: короче 3 с", cls: "skip"};
   const type = want === "eyes" ? "eyes_closed" : want === "head" ? "head_pitch_down" : null;
@@ -197,9 +206,12 @@ function caseResult(c) {
 }
 // An alarm outside the cases: the answer says what happened, the verdict
 // follows (nothing that wants an alarm happened: false).
-function setTruth(it, k) {
-  it.truth = k;
-  if (it.kind === "event") { it.verdict = TRUTH[k].expect === "none" ? "false" : "true"; it.cause = k; }
+// [add] (Shift): the answer joins the others, or leaves them when it is
+// there already.
+function setTruth(it, k, add) {
+  const parts = truthParts(it.truth), rest = parts.filter(p => p !== k);
+  it.truth = !add ? k : parts.includes(k) ? (rest.length ? truthKey(rest) : null) : truthKey([...parts, k]);
+  if (it.kind === "event") { it.verdict = !it.truth ? null : truthExpect(it.truth) === "none" ? "false" : "true"; it.cause = it.truth; }
 }
 
 function buildItems() {
@@ -224,7 +236,7 @@ function buildItems() {
       : (m.kind === "false" || m.kind === "true") && !m.eventId ? events.filter(i => i.atUs <= m.atUs + 1e6 && m.atUs - i.atUs <= 60e6).pop() : null;
     if (target) {
       if (m.kind === "false" || m.kind === "true") { target.live = m.kind; target.verdict = m.kind; }
-      if (m.cause) { target.cause = m.cause; if (TRUTH[m.cause]) target.truth = m.cause; }
+      if (m.cause) { target.cause = m.cause; if (known(m.cause)) target.truth = known(m.cause); }
       continue;
     }
     if (m.eventId) continue;
@@ -238,7 +250,7 @@ function buildItems() {
       if (s.kind === "case") continue;
       const it = items.find(i => s.kind === "event" ? i.eventId === s.eventId : i.kind === "mark" && Math.abs(i.atUs - s.atUs) < 1000);
       if (it) Object.assign(it, {verdict: s.verdict, cause: s.cause || null, note: s.note || "", windowFromUs: s.windowFromUs != null ? s.windowFromUs : it.windowFromUs, windowToUs: s.windowToUs != null ? s.windowToUs : it.windowToUs},
-        s.kind === "event" ? {truth: s.truth && TRUTH[s.truth] ? s.truth : TRUTH[s.cause] ? s.cause : null, tech: s.tech || null} : {});
+        s.kind === "event" ? {truth: known(s.truth) || known(s.cause), tech: s.tech || null} : {});
     }
   }
   scoreGaps = review && review.scoreGaps != null ? !!review.scoreGaps : !cases.length;
@@ -252,10 +264,10 @@ function renderList() {
     let title, vt, cls;
     if (it.kind === "case") {
       const r = caseResult(it);
-      title = `случай ${it.n}${it.truth ? " · " + TRUTH[it.truth].name : ""}`; vt = r.text.replace(/ через .*$/, ""); cls = r.cls === "ok" ? "true" : r.cls === "no" ? "false" : "none";
+      title = `случай ${it.n}${it.truth ? " · " + truthName(it.truth) : ""}`; vt = r.text.replace(/ через .*$/, ""); cls = r.cls === "ok" ? "true" : r.cls === "no" ? "false" : "none";
     } else {
       title = (it.kind === "event" ? "тревога: " + (TYPES[it.eventType] || it.eventType) : `метка: ${({mark:"что-то не так",miss:"пропуск",false:"ложная",true:"верная"})[it.mark] || it.mark}${it.source === "phone" ? " (телефон)" : ""}`) +
-        (it.cause ? " · " + ((TRUTH[it.cause] || {}).name || CAUSES[it.cause] || it.cause) : "");
+        (it.cause ? " · " + (truthName(it.cause) || CAUSES[it.cause] || it.cause) : "");
       const v = it.verdict;
       vt = !v ? "что было?" : it.kind === "event" ? ({false:"✗ ложная",true:"✓ верная",unsure:"спорно"})[v] : ({no_issue:"✓ всё в порядке",miss_eyes:"✗ пропуск: глаза",miss_head:"✗ пропуск: голова"})[v] || "спорно";
       cls = !v ? "none" : (v === "false" || v === "false_alarm" || v.startsWith("miss")) ? "false" : v === "true" || v === "no_issue" ? "true" : "none";
@@ -271,8 +283,9 @@ function near(list, t, key = "t") { let lo = 0, hi = list.length - 1; while (lo 
 // its start to 4 s after its end, an alarm or a mark 12 s before to 6 s after.
 function span(it) { return it.kind === "case" ? [it.atUs - 4e6, (it.endedUs != null ? it.endedUs : it.atUs) + 4e6] : [it.atUs - 12e6, it.atUs + 6e6]; }
 function truthButtons(it) {
-  const btn = ([k, n, e]) => `<button data-truth="${k}" class="${it.truth === k ? "on" : ""} ${e !== "none" ? "bad" : ""}"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`;
-  return `<div class="grp">Что было на самом деле. Тревога не нужна:</div>${TRUTHS.filter(t => t[2] === "none").map(btn).join("")}` +
+  const on = truthParts(it.truth);
+  const btn = ([k, n, e]) => `<button data-truth="${k}" class="${on.includes(k) ? "on" : ""} ${e !== "none" ? "bad" : ""}"><kbd>${TRUTH[k].key}</kbd> ${n}</button>`;
+  return `<div class="grp">Что было на самом деле (Shift + ответ: добавить ещё один). Тревога не нужна:</div>${TRUTHS.filter(t => t[2] === "none").map(btn).join("")}` +
     `<div class="grp">Тревога нужна:</div>${TRUTHS.filter(t => t[2] !== "none").map(btn).join("")}`;
 }
 function select(i) {
@@ -290,8 +303,8 @@ function select(i) {
       if (p.ms.eyeLeft != null && p.ms.eyeRight != null) eyes = Math.min(eyes == null ? 9 : eyes, Math.max(p.ms.eyeLeft, p.ms.eyeRight));
     }
     head = `Случай ${it.n} в ${fmtT(it.atUs)}`;
-    sub = `${num((end - it.atUs) / 1e6)} с${it.live ? " · на ходу: " + TRUTH[it.live].name : " · на ходу ответа не было"}`;
-    result = `<div class="result ${r.cls}">${it.truth ? TRUTH[it.truth].name + " · " : ""}${r.text}</div>`;
+    sub = `${num((end - it.atUs) / 1e6)} с${it.live ? " · на ходу: " + truthName(it.live) : " · на ходу ответа не было"}`;
+    result = `<div class="result ${r.cls}">${it.truth ? truthName(it.truth) + " · " : ""}${r.text}</div>`;
     body = `<table><tr><th>За время позы</th><th></th></tr><tr><td>наклон вниз, наибольший</td><td>${num(pitch)}° (порог ${L.pitch}°)</td></tr><tr><td>поворот, наибольший</td><td>${num(yaw)}° (предел ±${L.yaw}°)</td></tr>
     <tr><td>глаза, наименьшее открытие</td><td>${eyes == null ? "не видны" : num(eyes, 2)}</td></tr>
     <tr><td>тревоги в окне случая</td><td>${it.alarms.map(a => `${TYPES[a.eventType] || a.eventType} в ${fmtT(a.atUs)}`).join(", ") || "нет"}</td></tr></table>`;
@@ -300,7 +313,7 @@ function select(i) {
     head = `${isEvent ? "Тревога «" + (TYPES[it.eventType] || it.eventType) + "»" : "Метка"} в ${fmtT(it.atUs)}`;
     sub = `${isEvent ? `признак с ${fmtT(it.signStartedUs)}${it.endedUs ? ", конец " + fmtT(it.endedUs) : ""}` : (it.source === "phone" ? "с телефона" : "с Mac")}${it.live ? " · на ходу: " + (({false:"ложная",true:"верная"})[it.live] || it.live) : ""}`;
     if (isEvent) result = `<div class="result ${it.verdict === "true" ? "ok" : it.verdict === "false" ? "no" : "skip"}">${!it.verdict ? "что было на самом деле?" : it.verdict === "unsure" ? "спорно, не оценивается" :
-      ((TRUTH[it.cause] || {}).name || CAUSES[it.cause] || "") + (it.verdict === "true" ? " · ✓ тревога верная" : " · ✗ тревога ложная")}</div>`;
+      (truthName(it.cause) || CAUSES[it.cause] || "") + (it.verdict === "true" ? " · ✓ тревога верная" : " · ✗ тревога ложная")}</div>`;
     body = `<table><tr><th>В момент</th><th></th></tr><tr><td>зона</td><td>${ZONES[at.zone] || at.zone || "—"}</td></tr><tr><td>наклон / поворот от «дороги»</td><td>${num(ms.pitchDown)}° / ${num(ms.yaw)}° (порог ${L.pitch}°, предел ±${L.yaw}°)</td></tr>
     <tr><td>глаза Л / П, T</td><td>${num(ms.eyeLeft, 2)} / ${num(ms.eyeRight, 2)}, T ${num(ms.eyeThreshold, 2)}</td></tr><tr><td>затвор глаз · водитель</td><td>${at.gate || "—"} · ${at.driver || "—"}</td></tr></table>`;
   }
@@ -315,8 +328,8 @@ function select(i) {
   <div><canvas class="plot" id="pHead"></canvas><canvas class="plot" id="pEyes"></canvas>${body}</div></div>
   ${result}<div class="verdicts">${answers}</div>${bounds}
   <textarea id="note" placeholder="Заметка: что было на самом деле">${it.note || ""}</textarea>`;
-  d.querySelectorAll(".verdicts button").forEach(b => b.onclick = () => {
-    if (b.dataset.truth) setTruth(it, b.dataset.truth);
+  d.querySelectorAll(".verdicts button").forEach(b => b.onclick = e => {
+    if (b.dataset.truth) setTruth(it, b.dataset.truth, e.shiftKey);
     else if (b.dataset.clear) it.truth = null;
     else { it.verdict = b.dataset.v; if (isEvent) { it.truth = null; it.cause = null; } }
     changed(); select(sel);
@@ -413,7 +426,8 @@ function summary() {
   const ev = items.filter(i => i.kind === "event"), cases = items.filter(i => i.kind === "case"), h = observedUs() / 3.6e9;
   const res = new Map(cases.map(c => [c, caseResult(c).code])), count = (list, ...codes) => list.filter(c => codes.includes(res.get(c))).length;
   const cell = (n, cls) => `<td class="num ${n && cls ? cls : ""}">${n || "·"}</td>`;
-  const caseRows = TRUTHS.map(([k, name]) => { const list = cases.filter(c => c.truth === k); return list.length ? `<tr><td>${name}</td>${cell(list.length)}${cell(count(list, "ok"), "ok")}${cell(count(list, "false_alarm"), "no")}${cell(count(list, "missed"), "no")}${cell(count(list, "other_type", "too_short", "unsure"))}</tr>` : ""; }).join("");
+  const combos = [...new Set(cases.map(c => c.truth).filter(t => truthParts(t).length > 1))].sort();
+  const caseRows = [...TRUTHS.map(t => t[0]), ...combos].map(k => { const list = cases.filter(c => c.truth === k), name = truthName(k); return list.length ? `<tr><td>${name}</td>${cell(list.length)}${cell(count(list, "ok"), "ok")}${cell(count(list, "false_alarm"), "no")}${cell(count(list, "missed"), "no")}${cell(count(list, "other_type", "too_short", "unsure"))}</tr>` : ""; }).join("");
   const by = (type, v) => ev.filter(i => i.eventType === type && i.verdict === v).length;
   const rows = Object.keys(TYPES).filter(t => ev.some(i => i.eventType === t)).map(t => `<tr><td>${TYPES[t]}</td>${cell(ev.filter(i => i.eventType === t).length)}${cell(by(t, "true"), "ok")}${cell(by(t, "false"), "no")}${cell(by(t, "unsure"))}${cell(ev.filter(i => i.eventType === t && !i.verdict).length)}</tr>`).join("");
   const fp = ev.filter(i => i.verdict === "false" && i.eventType !== "distraction").length;
@@ -424,7 +438,7 @@ function summary() {
   `<p><b>Тревоги вне случаев: ${ev.length}</b></p>` + (rows ? `<table><tr><th>Тревога</th><th class="num">всего</th><th class="num">верных</th><th class="num">ложных</th><th class="num">спорных</th><th class="num">без ответа</th></tr>${rows}</table>` : "") +
   `<p><label><input type="checkbox" id="gaps" ${scoreGaps ? "checked" : ""}> Время вне случаев это настоящая езда: любая тревога там без ответа считается ложной.</label> <span class="muted">На стенде не включать: между случаями ты смотришь на клавиатуру, и это не езда.</span></p>
   <p>Наблюдение ${num(h * 60, 0)} мин; ${scoreGaps ? `ложных тревог глаз и головы вне случаев ${fp}${h > 0 ? `, ≈ ${num(fp / h, 1)} в час (цель КЧ-03: не больше 1 в час)` : ""}` : "ложные в час не считаются: время вне случаев не оценивается"}; пропусков по меткам ${misses}.</p>
-  <p>Причины ложных вне случаев: ${Object.entries(causes).map(([c, n]) => `${(TRUTH[c] || {}).name || CAUSES[c] || c} ${n}`).join(", ") || "—"}.</p>
+  <p>Причины ложных вне случаев: ${Object.entries(causes).map(([c, n]) => `${truthName(c) || CAUSES[c] || c} ${n}`).join(", ") || "—"}.</p>
   <p class="muted">Профиль ${limits().id}. Разбор попадает в подбор порогов так: <code>dart run tool/trip_review.dart запись.jsonl --out размеченная.jsonl</code>, затем <code>tool/tune.dart</code> на размеченной записи (docs/trip-debug.md).</p>`;
   q("#gaps").onchange = e => { scoreGaps = e.target.checked; e.target.blur(); changed(false); };
 }
@@ -449,7 +463,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === " ") { e.preventDefault(); player.timer ? stop() : play(); }
   else {
     const it = items[sel]; if (!it || it.kind === "mark" || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (KEY_TRUTH[e.code]) { e.preventDefault(); setTruth(it, KEY_TRUTH[e.code]); changed(); select(sel); }
+    if (KEY_TRUTH[e.code]) { e.preventDefault(); setTruth(it, KEY_TRUTH[e.code], e.shiftKey); changed(); select(sel); }
     else if (e.code === "KeyU" && it.kind === "event") { it.verdict = "unsure"; it.truth = null; it.cause = null; changed(); select(sel); }
   }
 });
