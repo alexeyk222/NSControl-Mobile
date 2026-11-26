@@ -6,11 +6,13 @@ import '../../services/trip_controller.dart';
 import '../copy.dart';
 import '../design/ns_theme.dart';
 import '../design/tokens.dart';
+import '../presentation/phone_problem.dart';
 import '../presentation/trip_view.dart';
 import '../presentation/voice.dart';
 import '../widgets/buttons.dart';
 import '../widgets/fit_words.dart';
 import '../widgets/marks.dart';
+import '../widgets/problem_card.dart';
 import '../widgets/status_indicator.dart';
 import 'trip_dev_panel.dart';
 
@@ -158,6 +160,7 @@ class _TripScreenState extends State<TripScreen> {
     final theme = NsTheme.of(context);
     final p = theme.trip;
     final view = TripView.from(TripFacts.of(trip, watchLost: _watchLost));
+    final problem = PhoneProblem.of(trip.alertError);
     final paused = trip.userPaused;
     final c = theme.design == NsDesign.roadsign;
     final statusColor = switch (view.tone) {
@@ -185,6 +188,21 @@ class _TripScreenState extends State<TripScreen> {
             notice: view.notice,
             glyph: view.noticeGlyph,
           ),
+        ),
+        // The alarm sound or another phone call failed: the driver must
+        // see it (architect, 26.11). It stays until the trip ends.
+        AnimatedSize(
+          duration: NsMotion.state,
+          child: problem == null
+              ? const SizedBox(width: double.infinity)
+              : Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: ProblemCard(
+                    problem,
+                    key: const Key('trip-problem'),
+                    palette: p,
+                  ),
+                ),
         ),
         const Spacer(flex: 2),
         Align(
