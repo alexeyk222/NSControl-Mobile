@@ -15,13 +15,13 @@ import 'services/mlkit_detector.dart';
 import 'services/platform_bridge.dart';
 import 'services/sleep_controller.dart';
 import 'services/trip_controller.dart';
-import 'ui/integrations_page.dart';
-import 'ui/journal_page.dart';
 import 'logic/detection_profile.dart';
+import 'ui/design/ns_theme.dart';
 import 'ui/lab_page.dart';
-import 'ui/settings_page.dart';
-import 'ui/trip_page.dart';
-import 'ui/alarm_banner.dart';
+import 'ui/presentation/ui_prefs.dart';
+import 'ui/presentation/voice.dart';
+import 'ui/screens/alarm_overlay.dart';
+import 'ui/screens/app_shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +29,6 @@ Future<void> main() async {
   if (Platform.isAndroid) AndroidCamera.registerWith();
   TripRepository? db;
   var settings = AlgorithmSettings();
-  var theme = ThemeMode.system;
   var incomplete = false;
   var developerMode = false;
   var recordTrips = false;
@@ -44,10 +43,6 @@ Future<void> main() async {
     if (stored is Map) {
       settings = AlgorithmSettings.fromJson(Map<String, dynamic>.from(stored));
     }
-    final storedTheme = await db.getSetting('theme');
-    theme =
-        ThemeMode.values.where((t) => t.name == storedTheme).firstOrNull ??
-        ThemeMode.system;
     developerMode = await db.getSetting('developer_mode') == true;
     final profileId = await db.getSetting('trip_profile');
     tripProfile =
@@ -97,6 +92,8 @@ Future<void> main() async {
   trip.journalIncomplete = incomplete || db == null;
   final sleep = SleepController(trip: trip, platform: const PlatformBridge());
   await sleep.load();
+  // The look, the theme and the onboarding (docs/ux/implementation.md).
+  final prefs = await UiPrefs.load(db, save: trip.journal);
   Directory? documents;
   try {
     documents = await getApplicationDocumentsDirectory();
@@ -111,7 +108,7 @@ Future<void> main() async {
     NSControlApp(
       trip: trip,
       sleep: sleep,
-      initialTheme: theme,
+      prefs: prefs,
       initialDeveloperMode: developerMode,
       createLab: recordings == null
           ? null
@@ -143,18 +140,22 @@ Future<void> main() async {
   );
 }
 
+/// The app: the look of [UiPrefs] (A/B/C, light or dark outside a trip),
+/// the scenario of [AppShell] and the alarm over every page.
 class NSControlApp extends StatefulWidget {
   const NSControlApp({
     super.key,
     required this.trip,
     required this.sleep,
-    this.initialTheme = ThemeMode.system,
+    this.prefs,
     this.initialDeveloperMode = false,
     this.createLab,
   });
   final TripController trip;
   final SleepController sleep;
-  final ThemeMode initialTheme;
+
+  /// Interface choices; tests may leave it out (onboarded, look A).
+  final UiPrefs? prefs;
   final bool initialDeveloperMode;
 
   /// Builds the hidden developer lab; null when it is unavailable.
@@ -165,13 +166,17 @@ class NSControlApp extends StatefulWidget {
 
 class _NSControlAppState extends State<NSControlApp>
     with WidgetsBindingObserver {
-  int tab = 0;
-  late ThemeMode theme;
   late bool developerMode;
+  late final UiPrefs prefs =
+      widget.prefs ?? UiPrefs(onboarded: true, save: widget.trip.journal);
+  late final UiVoice voice = UiVoice(
+    platform: widget.trip.platform,
+    enabled: prefs.voice,
+  );
+
   @override
   void initState() {
     super.initState();
-    theme = widget.initialTheme;
     developerMode = widget.initialDeveloperMode;
     WidgetsBinding.instance.addObserver(this);
   }
@@ -187,158 +192,41 @@ class _NSControlAppState extends State<NSControlApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    voice.dispose();
     super.dispose();
   }
 
-  ThemeData _theme(Brightness brightness) {
-    final scheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xff126D62),
-      brightness: brightness,
-    );
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: scheme,
-      brightness: brightness,
-      scaffoldBackgroundColor: brightness == Brightness.light
-          ? const Color(0xffF3F6F4)
-          : const Color(0xff101815),
-      cardTheme: CardThemeData(
-        elevation: 0,
-        margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20),
-          side: BorderSide(color: scheme.outlineVariant.withValues(alpha: .55)),
-        ),
-      ),
-      appBarTheme: AppBarTheme(
-        centerTitle: false,
-        backgroundColor: scheme.surface,
-        scrolledUnderElevation: 0,
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(minimumSize: const Size(0, 48)),
-      ),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 48)),
-      ),
-      textTheme: const TextTheme(
-        headlineMedium: TextStyle(
-          fontSize: 30,
-          fontWeight: FontWeight.w700,
-          letterSpacing: -.8,
-        ),
-        titleMedium: TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-        bodyMedium: TextStyle(fontSize: 14, height: 1.45),
-      ),
-    );
-  }
-
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'NSControl',
-    debugShowCheckedModeBanner: false,
-    locale: const Locale('ru'),
-    supportedLocales: const [Locale('ru')],
-    localizationsDelegates: GlobalMaterialLocalizations.delegates,
-    theme: _theme(Brightness.light),
-    darkTheme: _theme(Brightness.dark),
-    themeMode: theme,
-    home: Scaffold(
-      appBar: AppBar(
-        title: const Row(
-          children: [
-            Icon(Icons.radar_rounded),
-            SizedBox(width: 10),
-            Flexible(
-              child: Text(
-                'NSControl',
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: -.4,
-                ),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          Builder(
-            builder: (context) => Padding(
-              padding: const EdgeInsets.only(right: 20),
-              child: MediaQuery.sizeOf(context).width < 520
-                  ? const Tooltip(
-                      message: 'Данные обрабатываются на устройстве',
-                      child: Icon(Icons.lock_outline, size: 20),
-                    )
-                  : const Chip(
-                      label: Text('На устройстве'),
-                      avatar: Icon(Icons.lock_outline, size: 16),
-                    ),
-            ),
-          ),
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: prefs,
+    builder: (context, _) => MaterialApp(
+      title: 'NSControl',
+      debugShowCheckedModeBanner: false,
+      locale: const Locale('ru'),
+      supportedLocales: const [Locale('ru')],
+      localizationsDelegates: GlobalMaterialLocalizations.delegates,
+      theme: buildNsTheme(prefs.design, Brightness.light),
+      darkTheme: buildNsTheme(prefs.design, Brightness.dark),
+      themeMode: prefs.themeMode,
+      themeAnimationDuration: const Duration(milliseconds: 420),
+      // The alarm lies over every page and route.
+      builder: (context, child) => Stack(
+        children: [
+          ?child,
+          Positioned.fill(child: AlarmOverlay(trip: widget.trip)),
         ],
       ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            AlarmBanner(trip: widget.trip),
-            Expanded(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 1120),
-                  child: switch (tab) {
-                    0 => TripPage(
-                      trip: widget.trip,
-                      sleep: widget.sleep,
-                      developerMode: developerMode,
-                    ),
-                    1 => IntegrationsPage(
-                      trip: widget.trip,
-                      sleep: widget.sleep,
-                    ),
-                    2 => JournalPage(trip: widget.trip),
-                    _ => SettingsPage(
-                      trip: widget.trip,
-                      themeMode: theme,
-                      onTheme: (value) {
-                        setState(() => theme = value);
-                        widget.trip.journal(
-                          (db) => db.setSetting('theme', value.name),
-                        );
-                      },
-                      developerMode: developerMode,
-                      onDeveloperMode: (value) {
-                        setState(() => developerMode = value);
-                        widget.trip.journal(
-                          (db) => db.setSetting('developer_mode', value),
-                        );
-                      },
-                      createLab: widget.createLab,
-                    ),
-                  },
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: tab,
-        onDestinationSelected: (value) => setState(() => tab = value),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.route_outlined),
-            selectedIcon: Icon(Icons.route),
-            label: 'Поездка',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.watch_outlined),
-            selectedIcon: Icon(Icons.watch),
-            label: 'Сон и часы',
-          ),
-          NavigationDestination(icon: Icon(Icons.history), label: 'Журнал'),
-          NavigationDestination(icon: Icon(Icons.tune), label: 'Настройки'),
-        ],
+      home: AppShell(
+        trip: widget.trip,
+        sleep: widget.sleep,
+        prefs: prefs,
+        voice: voice,
+        developerMode: developerMode,
+        onDeveloperMode: (value) {
+          setState(() => developerMode = value);
+          widget.trip.journal((db) => db.setSetting('developer_mode', value));
+        },
+        createLab: widget.createLab,
       ),
     ),
   );

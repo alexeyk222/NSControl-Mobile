@@ -15,6 +15,9 @@ class CalmAlarm extends StatefulWidget {
     required this.builder,
     this.minShow = const Duration(seconds: 2),
     this.linger = const Duration(milliseconds: 800),
+    this.transitionBuilder,
+    this.fadeIn = const Duration(milliseconds: 250),
+    this.fadeOut = const Duration(milliseconds: 600),
   });
 
   /// The active events now; empty when there is no alarm.
@@ -24,6 +27,11 @@ class CalmAlarm extends StatefulWidget {
   final Widget Function(BuildContext context, List<ObservationEvent> events)
   builder;
   final Duration minShow, linger;
+
+  /// How the alarm enters and leaves; fade and grow from the top (a
+  /// banner) by default. The full-screen alarm passes a plain fade.
+  final AnimatedSwitcherTransitionBuilder? transitionBuilder;
+  final Duration fadeIn, fadeOut;
 
   @override
   State<CalmAlarm> createState() => _CalmAlarmState();
@@ -75,18 +83,11 @@ class _CalmAlarmState extends State<CalmAlarm> {
 
   @override
   Widget build(BuildContext context) => AnimatedSwitcher(
-    duration: const Duration(milliseconds: 250),
-    reverseDuration: const Duration(milliseconds: 600),
+    duration: widget.fadeIn,
+    reverseDuration: widget.fadeOut,
     switchInCurve: Curves.easeOut,
     switchOutCurve: Curves.easeIn,
-    transitionBuilder: (child, animation) => FadeTransition(
-      opacity: animation,
-      child: SizeTransition(
-        sizeFactor: animation,
-        alignment: Alignment.topCenter,
-        child: child,
-      ),
-    ),
+    transitionBuilder: widget.transitionBuilder ?? _grow,
     child: _shown.isEmpty
         ? const SizedBox(key: ValueKey('no-alarm'), width: double.infinity)
         : KeyedSubtree(
@@ -94,4 +95,14 @@ class _CalmAlarmState extends State<CalmAlarm> {
             child: widget.builder(context, _shown),
           ),
   );
+
+  static Widget _grow(Widget child, Animation<double> animation) =>
+      FadeTransition(
+        opacity: animation,
+        child: SizeTransition(
+          sizeFactor: animation,
+          alignment: Alignment.topCenter,
+          child: child,
+        ),
+      );
 }
