@@ -31,7 +31,7 @@ class Readiness {
   List<ReadyRow> get rows => [camera, watch, sleep];
 
   /// How long the break advice comes after (`RecommendationEngine`).
-  static const breakAfter = RecommendationEngine.longDrive;
+  static const breakAfter = RecommendationEngine.defaultLongDrive;
 
   static Readiness from(ReadinessFacts f) {
     final reasons = <String>[];
