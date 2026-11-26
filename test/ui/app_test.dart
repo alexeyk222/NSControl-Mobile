@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/domain.dart';
 import 'package:nscontrol/main.dart';
+import 'package:nscontrol/logic/detection_profile.dart';
 import 'package:nscontrol/services/detector.dart';
+import 'package:nscontrol/services/mlkit_signals.dart';
 import 'package:nscontrol/services/sleep_controller.dart';
 import 'package:nscontrol/services/trip_controller.dart';
 import 'package:nscontrol/ui/copy.dart';
@@ -242,6 +244,92 @@ void main() {
     await tester.tap(find.byKey(const Key('global-alarm')));
     await tester.pump();
     expect(trip.snapshot!.hasUnacknowledgedAlert, isFalse);
+    await tearDownApp(tester);
+  });
+
+  /// A face with a normalized box, so the screen can frame it; [size] is
+  /// its pixel side (the larger, the closer to the camera).
+  DetectedFace boxed(int id, FaceBox box, double size) {
+    final s = MlKitSignals.from(
+      trackingId: id,
+      leftEyeOpen: .9,
+      rightEyeOpen: .9,
+      eulerX: 0,
+      eulerY: 2,
+      eulerZ: 0,
+      box: box,
+    );
+    return DetectedFace(
+      s.toMeasurement(),
+      Rect.fromLTWH(0, 0, size, size),
+      signals: s,
+    );
+  }
+
+  final driver = boxed(
+    7,
+    const FaceBox(left: .3, top: .3, width: .35, height: .35),
+    300,
+  );
+  final passenger = boxed(
+    8,
+    const FaceBox(left: .7, top: .1, width: .2, height: .2),
+    120,
+  );
+
+  Future<void> startWithTwoFaces(WidgetTester tester) async {
+    await setUpApp(tester, prefs: UiPrefs(onboarded: true));
+    await tester.tap(find.byKey(const Key('start-trip')));
+    await tester.pump();
+    await calm(tester);
+    final us = clock.us + 200000;
+    clock.us = us + 20000;
+    camera!.onFaces([driver, passenger], us, us + 20000);
+    await tester.pump();
+    await calm(tester);
+  }
+
+  testWidgets('several faces: the closest is framed, a tap picks another', (
+    tester,
+  ) async {
+    await startWithTwoFaces(tester);
+    expect(trip.phase, TripPhase.findingFace);
+    expect(find.text(Copy.calMany), findsOneWidget);
+    expect(platform.spoken, contains(Voice.calManyPick));
+    expect(find.byKey(const Key('face-7')), findsOneWidget);
+    expect(find.byKey(const Key('face-8')), findsOneWidget);
+    // Nothing is confirmed without the driver's tap.
+    await tester.pump(const Duration(seconds: 2));
+    expect(trip.phase, TripPhase.findingFace);
+    await tester.tap(find.byKey(const Key('face-8')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('cal-this-is-me')));
+    await tester.pump();
+    expect(trip.phase, TripPhase.calibrating);
+    expect(find.byKey(const Key('cal-this-is-me')), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tearDownApp(tester);
+  });
+
+  testWidgets('«ТЗ 2.2 (эталон)» waits for one face, no choice', (
+    tester,
+  ) async {
+    await setUpApp(
+      tester,
+      prefs: UiPrefs(onboarded: true),
+      before: () => trip.profile = DetectionProfile.tz22,
+    );
+    await tester.tap(find.byKey(const Key('start-trip')));
+    await tester.pump();
+    await calm(tester);
+    final us = clock.us + 200000;
+    clock.us = us + 20000;
+    camera!.onFaces([driver, passenger], us, us + 20000);
+    await tester.pump();
+    await calm(tester);
+    expect(find.text(Copy.calManyWait), findsOneWidget);
+    expect(find.byKey(const Key('cal-this-is-me')), findsNothing);
+    expect(find.byKey(const Key('face-7')), findsNothing);
     await tearDownApp(tester);
   });
 

@@ -6,6 +6,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nscontrol/logic/domain.dart';
+import 'package:nscontrol/services/detector.dart';
+import 'package:nscontrol/services/mlkit_signals.dart';
 import 'package:nscontrol/services/sleep_controller.dart';
 import 'package:nscontrol/services/trip_controller.dart';
 import 'package:nscontrol/ui/design/ns_theme.dart';
@@ -259,7 +261,36 @@ void main() {
       trip.tripId = 'trip';
       trip.phase = TripPhase.findingFace;
       await shot('camera_search', camera());
-      trip.faces = [mlKitFace(), mlKitFace(id: 8)];
+      // Several faces, with boxes: a frame over each, the closest chosen.
+      DetectedFace boxed(int id, FaceBox box, double side) {
+        final s = MlKitSignals.from(
+          trackingId: id,
+          leftEyeOpen: .9,
+          rightEyeOpen: .9,
+          eulerX: 0,
+          eulerY: 2,
+          eulerZ: 0,
+          box: box,
+        );
+        return DetectedFace(
+          s.toMeasurement(),
+          Rect.fromLTWH(0, 0, side, side),
+          signals: s,
+        );
+      }
+
+      trip.faces = [
+        boxed(
+          7,
+          const FaceBox(left: .3, top: .3, width: .35, height: .35),
+          300,
+        ),
+        boxed(
+          8,
+          const FaceBox(left: .72, top: .12, width: .2, height: .2),
+          120,
+        ),
+      ];
       await shot('camera_many', camera());
       trip.faces = [mlKitFace()];
       trip.phase = TripPhase.calibrating;

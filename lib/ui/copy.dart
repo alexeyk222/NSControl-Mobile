@@ -110,9 +110,8 @@ abstract final class Copy {
   static const calNoFace = 'Поверните телефон к себе'; // cal.hint.no_face
   static const calMany =
       'В кадре кто-то ещё. Коснитесь своего лица'; // cal.hint.many
-  // Until the trip can confirm one face among several (TripController
-  // confirms a single face only), the screen waits instead of asking for a
-  // tap.
+  static const calManyConfirm = 'Это я';
+  // «ТЗ 2.2 (эталон)» keeps one face only (ФТ-02): the screen waits.
   static const calManyWait =
       'В кадре кто-то ещё. Подожду, пока останетесь одни';
   static const calFaceSeen = 'Вижу вас. Не двигайтесь';
@@ -270,6 +269,7 @@ abstract final class Copy {
 abstract final class Voice {
   static const calNoFace = 'Поверните телефон к себе';
   static const calMany = 'В кадре кто-то ещё';
+  static const calManyPick = 'Коснитесь своего лица на экране';
   static const calGo = 'Смотрите на дорогу, как обычно. Пять секунд';
   static const calRetry = 'Ещё раз. Смотрите на дорогу';
   static const calDone = 'Готово. Слежу за дорогой';
