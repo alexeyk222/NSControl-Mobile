@@ -24,6 +24,8 @@ final class WatchLink: NSObject, ObservableObject, WCSessionDelegate {
     @Published private(set) var screen: WatchScreen = .noLink
     @Published private(set) var driveMinutes: Int?
     @Published private(set) var background: BackgroundSession.State = .off
+    /// The look chosen on the iPhone; arrives with every snapshot as `design`.
+    @Published private(set) var design: WatchDesign = .stored
 
     let workout = BackgroundSession()
     private let gate = AlertGate()
@@ -273,6 +275,11 @@ final class WatchLink: NSObject, ObservableObject, WCSessionDelegate {
             } else if type == "snapshot", decision.status == "state_only" {
                 self.loop.snapshot(activeIDs: message["active_event_ids"] as? [String] ?? [])
                 self.driveMinutes = (message["drive_min"] as? NSNumber)?.intValue
+                if let look = (message["design"] as? String).flatMap(WatchDesign.init(rawValue:)),
+                   look != self.design {
+                    self.design = look
+                    look.store()
+                }
                 self.setLevel(message["level"] as? String ?? (message["session_id"] == nil ? "idle" : "observing"))
             } else if type == "cancel" {
                 self.loop.cancel(targetIDs: message["target_ids"] as? [String] ?? [],
