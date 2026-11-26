@@ -359,6 +359,157 @@ void main() {
       },
     );
 
+    test(
+      'staged cases from the page: recorded, compared, labelled for replay',
+      () async {
+        await trip.setLiveDebug(true);
+        final port = trip.debugServer!.boundPort!;
+        await trip.start();
+        final socket = await WebSocket.connect(
+          'ws://127.0.0.1:$port/ws?k=${trip.debugServer!.key}',
+        );
+        final text = <Map<String, dynamic>>[];
+        socket.listen((m) {
+          if (m is String) text.add(jsonDecode(m) as Map<String, dynamic>);
+        });
+        await settle();
+        void send(Map<String, Object?> m) =>
+            socket.add(jsonEncode({'type': 'mark', 'kind': 'case', ...m}));
+
+        calibrate();
+        drive(2, arkitFace);
+        // Case 1: eyes closed, the alarm is wanted and comes.
+        send({'caseId': 'c1', 'edge': 'start'});
+        await settle();
+        drive(2.5, () => arkitFace(open: .05));
+        trip.acknowledge({trip.snapshot!.eyes.activeEvent!.id});
+        drive(1, arkitFace);
+        send({'caseId': 'c1', 'edge': 'end', 'truth': 'eyes_closed'});
+        await settle();
+        drive(8, arkitFace);
+        // Case 2: a mirror glance, no alarm wanted; the truth comes later.
+        send({'caseId': 'c2', 'edge': 'start'});
+        await settle();
+        drive(3, arkitFace);
+        send({'caseId': 'c2', 'edge': 'end'});
+        await settle();
+        send({'caseId': 'c2', 'edge': 'truth', 'truth': 'mirror_left'});
+        // Not a case: no id.
+        send({'edge': 'start'});
+        // Cancelled, and one left open: the trip's end closes it.
+        send({'caseId': 'c3', 'edge': 'start'});
+        send({'caseId': 'c3', 'edge': 'cancel'});
+        send({'caseId': 'c4', 'edge': 'start', 'truth': 'road'});
+        await settle();
+        drive(3, arkitFace);
+        final live = text.where((l) => l['kind'] == 'case').toList();
+        expect(live.map((l) => '${l['caseId']} ${l['edge']}'), [
+          'c1 start',
+          'c1 end',
+          'c2 start',
+          'c2 end',
+          'c2 truth',
+          'c3 start',
+          'c3 cancel',
+          'c4 start',
+        ]);
+        await socket.close();
+        await trip.finish();
+
+        final file = (await LabRecorder(dir).list()).single;
+        final recorded = await file.readAsString();
+        final lines = [
+          for (final l in const LineSplitter().convert(recorded))
+            jsonDecode(l) as Map<String, dynamic>,
+        ];
+        final cases = tripCases(lines);
+        expect(cases.map((c) => c.truth), [
+          'eyes_closed',
+          'mirror_left',
+          'road',
+        ]);
+        expect(cases.last.endUs, isNotNull);
+        final alarms = [
+          for (final l in lines)
+            if (l['type'] == 'event' && l['change'] == 'started')
+              (
+                ((l['event'] as Map)['thresholdUs'] as int) +
+                    (l['sessionOffsetUs'] as int),
+                (l['event'] as Map)['type'] as String,
+              ),
+        ];
+        expect(cases.map((c) => caseOutcome(c, alarms)), ['ok', 'ok', 'ok']);
+        // Both edges of each case start a clip; the truth does not.
+        expect(lines.where((l) => l['kind'] == 'case').map((l) => l['edge']), [
+          'start',
+          'end',
+          'start',
+          'end',
+          'truth',
+          'start',
+          'cancel',
+          'start',
+          'end',
+        ]);
+        // No voice for the case the trip's end closed.
+        expect(platform.spoken, isNot(contains('Отметил')));
+
+        final empty = TripReview(recordingId: 'x', items: const []);
+        expect(
+          Recording.parse(
+            labelTrip(recorded, empty, scoreGaps: false),
+          ).labels.map((l) => l.step).toSet(),
+          isNot(contains(TripReviewSteps.drive)),
+        );
+        final recording = Recording.parse(labelTrip(recorded, empty));
+        expect(
+          recording.labels.map((l) => l.step).toSet(),
+          containsAll([
+            TripReviewSteps.caseEyes,
+            TripReviewSteps.caseQuiet,
+            TripReviewSteps.drive,
+          ]),
+        );
+        final result = ReplayRunner(recording).run(
+          ReplayOptions(
+            engine: recording.engines.single,
+            profile: DetectionProfile.v1,
+          ),
+        );
+        final eyes = result.episodes.singleWhere(
+          (e) => e.episode.step == TripReviewSteps.caseEyes,
+        );
+        expect(
+          [...eyes.matched, ...eyes.late].map((e) => e.type),
+          contains('eyes_closed'),
+        );
+        expect(result.episodes.expand((e) => e.unexpected), isEmpty);
+      },
+    );
+
+    test('case outcomes', () {
+      TripCase c(String? truth, {int? end = 5000000}) => TripCase('c', 0)
+        ..endUs = end
+        ..truth = truth;
+      const eyes = [(2000000, 'eyes_closed')];
+      const head = [(2000000, 'head_pitch_down')];
+      expect(caseOutcome(c('road'), const []), 'ok');
+      expect(caseOutcome(c('mirror_left'), head), 'false_alarm');
+      // Up to 1 s after the end still counts.
+      expect(
+        caseOutcome(c('road'), const [(5900000, 'eyes_closed')]),
+        'false_alarm',
+      );
+      expect(caseOutcome(c('road'), const [(6100000, 'eyes_closed')]), 'ok');
+      expect(caseOutcome(c('eyes_closed'), eyes), 'ok');
+      expect(caseOutcome(c('eyes_closed'), const []), 'missed');
+      expect(caseOutcome(c('nod'), eyes), 'other_type');
+      expect(caseOutcome(c('other_alarm'), head), 'ok');
+      expect(caseOutcome(c(null), eyes), 'unsure');
+      expect(caseOutcome(c('road', end: null), const []), 'unsure');
+      expect(caseOutcome(c('something new'), const []), 'unsure');
+    });
+
     test('nothing goes out without the recording or a live page', () async {
       trip.recordTrips = false;
       await trip.start();

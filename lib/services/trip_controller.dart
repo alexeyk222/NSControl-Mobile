@@ -441,6 +441,7 @@ class TripController extends ChangeNotifier {
     error = null;
     fatiguePerMinute.clear();
     tripBreaks = 0;
+    _openCases.clear();
     tripEscalations = 0;
     tripEyesAlarms = 0;
     tripHeadAlarms = 0;
@@ -1605,6 +1606,10 @@ class TripController extends ChangeNotifier {
     if (!active) return;
     _lifecycleGeneration++;
     final id = tripId!;
+    // A case left open on the page ends with the trip.
+    for (final id in _openCases.toList()) {
+      mark(kind: 'case', source: 'phone', caseId: id, edge: 'end');
+    }
     phase = TripPhase.idle;
     userPaused = false;
     await _endSession(EventEndReason.tripEnded);
@@ -2136,23 +2141,37 @@ class TripController extends ChangeNotifier {
       return v is String && v.isNotEmpty && v.length <= 200 ? v : null;
     }
 
+    final edge = text('edge');
     mark(
       kind: text('kind') ?? 'mark',
       source: 'mac',
       eventId: text('eventId'),
       cause: text('cause'),
       note: text('note'),
+      caseId: text('caseId'),
+      edge: caseEdges.contains(edge) ? edge : null,
+      truth: text('truth'),
     );
   }
 
   /// Mark kinds of the review (docs/trip-debug.md): something odd here,
-  /// the alarm was false, the alarm was right, an alarm was missed.
-  static const markKinds = {'mark', 'false', 'true', 'miss'};
+  /// the alarm was false, the alarm was right, an alarm was missed, and a
+  /// staged case (its start, end and what really happened).
+  static const markKinds = {'mark', 'false', 'true', 'miss', 'case'};
+
+  /// Edges of a case mark: the case starts, ends, or gets its truth later.
+  static const caseEdges = {'start', 'end', 'truth', 'cancel'};
+
+  /// Cases started and not ended or cancelled; finish() ends them.
+  final _openCases = <String>{};
 
   /// A mark of the review at this moment: from the phone (a double tap on
   /// the trip screen, said back by voice) or from the live page on the Mac
   /// (a passenger, keys or buttons). A verdict about one alarm carries its
   /// [eventId]; `false`/`true` without it are about the latest alarm.
+  /// A case (`kind` case) is staged by the tester on the live page: its
+  /// [caseId] ties the `start` and `end` edges, and [truth] says what really
+  /// happened (docs/trip-debug.md, «Случаи»).
   /// The mark goes into the recording and the live page, and starts a clip.
   void mark({
     String kind = 'mark',
@@ -2160,8 +2179,16 @@ class TripController extends ChangeNotifier {
     String? eventId,
     String? cause,
     String? note,
+    String? caseId,
+    String? edge,
+    String? truth,
   }) {
     if (!active || !markKinds.contains(kind)) return;
+    if (kind == 'case') {
+      if (caseId == null || edge == null) return;
+      if (edge == 'start') _openCases.add(caseId);
+      if (edge == 'end' || edge == 'cancel') _openCases.remove(caseId);
+    }
     // Now, and never before the last analysed frame.
     final now = clock.elapsedMicroseconds;
     final at = _recUs(now > _lastCapturedUs ? now : _lastCapturedUs);
@@ -2173,13 +2200,19 @@ class TripController extends ChangeNotifier {
       'eventId': ?eventId,
       'cause': ?cause,
       'note': ?note,
+      'caseId': ?caseId,
+      'edge': ?edge,
+      'truth': ?truth,
       'sessionOffsetUs': _recUs(sessionBaseUs),
     };
     _remember(line);
     _record(line);
-    // A verdict about an alarm already has the alarm's clip.
-    if (eventId == null) clips?.trigger(atUs: at, reason: kind);
-    if (source == 'phone') _say('Отметил');
+    // A verdict about an alarm already has the alarm's clip; a case's truth
+    // given later or its cancel is not a moment.
+    if (eventId == null && edge != 'truth' && edge != 'cancel') {
+      clips?.trigger(atUs: at, reason: kind);
+    }
+    if (source == 'phone' && kind != 'case') _say('Отметил');
     _notify();
   }
 

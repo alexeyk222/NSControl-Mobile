@@ -299,6 +299,10 @@ abstract final class ScenarioExpectations {
     'trip_distraction_true': {distraction},
     'trip_eyes_missed': {eyesClosed},
     'trip_head_missed': {headPitchDown},
+    // Staged cases: the tester's answer wants this alarm
+    // (`trip_case_quiet` wants none).
+    'trip_case_eyes': {eyesClosed},
+    'trip_case_head': {headPitchDown},
   };
 
   /// Steps that only change the conditions of the main steps.
@@ -318,6 +322,8 @@ abstract final class ScenarioExpectations {
     'trip_head_true': {eyesClosed},
     'trip_eyes_missed': {headPitchDown},
     'trip_head_missed': {eyesClosed},
+    'trip_case_eyes': {headPitchDown},
+    'trip_case_head': {eyesClosed},
   };
 
   /// Steps whose glance durations the report lists (mirror limit, ПМИ).

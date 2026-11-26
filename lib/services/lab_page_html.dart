@@ -57,6 +57,18 @@ kbd{font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 4px;
 #alarms .row b{color:var(--warn)}
 #alarms .verdict{font-weight:600}
 td.over{color:var(--warn);font-weight:600}
+#case-btn{padding:9px 18px;font-size:15px;font-weight:600}
+#case-btn.open{background:var(--warn);border-color:var(--warn);color:var(--card)}
+#case-state{font-size:13px;color:var(--muted);align-self:center}
+#case-truths{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 8px}
+#case-truths button{padding:4px 9px;font-size:13px}
+#case-truths .grp{width:100%;font-size:12px;color:var(--muted);margin-top:2px}
+#case-sum{font-size:13px;margin-bottom:4px}
+#cases{max-height:320px;overflow:auto;font-size:13px}
+#cases .row{padding:5px 0;border-bottom:1px solid var(--line)}
+#cases .st{color:var(--muted);font-size:12px}
+.ok{color:#2e9d5b;font-weight:600}
+.no{color:var(--warn);font-weight:600}
 </style>
 </head>
 <body>
@@ -119,7 +131,19 @@ const CAUSES = {mirror:"зеркало",blind_spot:"слепая зона / че
   drowsy:"сонливость",deliberate:"намеренно (проверка)",long_look:"долго смотрел вниз"};
 const FALSE_CAUSES = ["mirror","blind_spot","instruments","phone","talk","squint","glare","yawn","bump","face_lost","mount","other"];
 const TRUE_CAUSES = ["drowsy","deliberate","long_look","other"];
-const KINDS = {mark:"метка",false:"ложная",true:"верная",miss:"пропуск"};
+const KINDS = {mark:"метка",false:"ложная",true:"верная",miss:"пропуск",case:"случай"};
+// Staged cases: the tester starts a case, takes a pose, says what really
+// happened; the page compares it with the alarms in the case's window.
+// expect: none (no alarm wanted), eyes, head, any.
+const TRUTHS = [
+  ["road","дорога","none"],["mirror_left","левое зеркало","none"],["mirror_right","правое зеркало / через плечо","none"],
+  ["mirror_center","салонное зеркало","none"],["instruments","приборы / магнитола","none"],["phone_short","телефон коротко","none"],
+  ["talk","разговор / смех","none"],["yawn","зевок","none"],["squint","прищур / солнце","none"],["hand_face","рука у лица","none"],
+  ["blink","долгое моргание (< 1 с)","none"],["other_quiet","другое, тревога не нужна","none"],
+  ["eyes_closed","глаза закрыты ≥ 2 с","eyes"],["nod","клюю носом","head"],["look_down","смотрю вниз долго","head"],
+  ["other_alarm","другое, тревога нужна","any"]];
+const TRUTH = Object.fromEntries(TRUTHS.map(([k, name, expect]) => [k, {name, expect}]));
+let cases = [], openCase = null, pickedTruth = null, casesShownAt = 0;
 let rtt = null, lastDerived = null, lastFrames = {}, dirty = true;
 let prevPhase = {eyes:null, head:null};
 
@@ -136,6 +160,16 @@ videoCard.appendChild(vbar); grid.appendChild(videoCard);
 const limitsCard = el("div", "card");
 limitsCard.appendChild(el("h3", null, `Пороги и автоматы<span id="l-profile">—</span>`));
 const limitsTable = el("table"); limitsCard.appendChild(limitsTable); grid.appendChild(limitsCard);
+const casesCard = el("div", "card");
+casesCard.appendChild(el("h3", null, `Случаи<span>начни, прими позу, отметь что было</span>`));
+casesCard.appendChild(el("div", "marks", `<button id="case-btn">Новый случай <kbd>N</kbd></button><button id="case-cancel" style="display:none">Отменить</button><span id="case-state"></span>`));
+casesCard.appendChild(el("div", null,
+  `<div id="case-truths"><div class="grp">Что было на самом деле. Тревога не нужна:</div>` +
+  TRUTHS.filter(t => t[2] === "none").map(([k, n]) => `<button data-truth="${k}">${n}</button>`).join("") +
+  `<div class="grp">Тревога нужна:</div>` +
+  TRUTHS.filter(t => t[2] !== "none").map(([k, n]) => `<button data-truth="${k}" class="bad">${n}</button>`).join("") + `</div>`));
+casesCard.appendChild(el("div", null, `<div id="case-sum"></div><div id="cases"></div>`));
+grid.appendChild(casesCard);
 const marksCard = el("div", "card");
 marksCard.appendChild(el("h3", null, `Метки и тревоги<span>пишутся в запись поездки</span>`));
 marksCard.appendChild(el("div", "marks",
@@ -183,6 +217,7 @@ function reset() {
   series.clear(); bands.length = 0; events.length = 0; zones.length = 0; tNow = 0; threshold = null;
   lastFrames = {}; prevPhase = {eyes:null, head:null}; dirty = true;
   alarms = []; marks = []; boxes.length = 0; lastMeasure = null; renderAlarms();
+  cases = []; openCase = null; pickedTruth = null; renderCases();
 }
 function setChip(id, text, cls) { const c = document.getElementById(id); c.textContent = text; c.className = "chip" + (cls ? " " + cls : ""); }
 
@@ -193,6 +228,7 @@ function onLine(m) {
       reset(); engines = m.engines || []; primary = engines[0] || null; meta = m; limits = limitsOf(m);
       thresholds = {eyes: limits.eyesClosedUs / 1e6, head: limits.headDownUs / 1e6};
       if (m.source === "trip") document.title = "NSControl · Поездка";
+      casesCard.style.display = m.source === "trip" ? "" : "none";
       setChip("c-profile", "профиль " + ((m.detectionProfile || {}).id || "—"));
       renderLimits();
       setChip("c-engine", "движок " + (engines.join(" + ") || "—"));
@@ -230,6 +266,7 @@ function onLine(m) {
         }
       }
       if (m.stats) { push("derived|aps", t, m.stats.aps); push("derived|latency10", t, m.stats.latencyMs / 10); }
+      caseStats(m, t, now);
       const z = m.zone || "unknown";
       if (!zones.length || zones[zones.length - 1][1] !== z) zones.push([t, z]);
       while (zones.length > 1 && zones[1][0] < t - WINDOW - 5) zones.shift();
@@ -243,7 +280,7 @@ function onLine(m) {
       const off = (m.sessionOffsetUs || 0) / 1e6;
       if (m.change === "started") {
         events.push({t: e.thresholdUs / 1e6 + off, type: e.type});
-        { alarms.push({id: e.id, type: e.type, t: e.thresholdUs / 1e6 + off, t0: e.signStartedUs / 1e6 + off, t1: null, verdict: null, cause: null}); renderAlarms(); }
+        { alarms.push({id: e.id, type: e.type, t: e.thresholdUs / 1e6 + off, t0: e.signStartedUs / 1e6 + off, t1: null, verdict: null, cause: null}); renderAlarms(); renderCases(); }
         addFeed((e.type === "distraction" ? "Расширение: " : "ТРЕВОГА: ") + name, "ev");
       }
       else {
@@ -260,6 +297,7 @@ function onLine(m) {
       dirty = true; break;
     }
     case "mark": {
+      if (m.kind === "case") { onCase(m); dirty = true; break; }
       const t = m.atUs / 1e6; marks.push({t, kind: m.kind, source: m.source, eventId: m.eventId, cause: m.cause});
       const a = m.eventId ? alarms.find(a => a.id === m.eventId) : (m.kind === "false" || m.kind === "true") ? latestAlarm(t) : null;
       if (a && (m.kind === "false" || m.kind === "true")) { a.verdict = m.kind; if (m.cause) a.cause = m.cause; }
@@ -357,6 +395,96 @@ function renderAlarms() {
       `<select data-id="${a.id}"><option value="">причина…</option>${opts}</select></div>`;
   }).join("");
 }
+function onCase(m) {
+  const t = m.atUs / 1e6;
+  let c = cases.find(c => c.id === m.caseId);
+  if (!c) { c = {id: m.caseId, n: cases.length + 1, t0: t, t1: null, truth: null, st: {}}; cases.push(c); }
+  if (m.edge === "start") { c.t0 = t; if (c.t1 == null) openCase = c.id; addFeed(`Случай ${c.n}: начало`, "lb"); }
+  if (m.edge === "end") { c.t1 = t; if (openCase === c.id) openCase = null; addFeed(`Случай ${c.n}: конец`, "lb"); }
+  if (m.edge === "cancel") {
+    cases = cases.filter(x => x.id !== c.id); cases.forEach((x, i) => x.n = i + 1);
+    if (openCase === c.id) openCase = null; addFeed("Случай отменён", "lb"); renderCases(); return;
+  }
+  if (m.truth && TRUTH[m.truth]) { c.truth = m.truth; if (m.edge === "truth") addFeed(`Случай ${c.n}: ${TRUTH[m.truth].name}`, "lb"); }
+  if (openCase === c.id) pickedTruth = c.truth;
+  renderCases();
+}
+function caseOf(t) { return c => t >= c.t0 && (c.t1 == null || t <= c.t1 + 1); }
+function caseStats(m, t, now) {
+  const live = cases.filter(caseOf(t)); if (!live.length) return;
+  const ms = m.measure || {};
+  const timer = ch => { const c = m[ch]; return c && (c.phase === "signPresent" || c.phase === "warning") && c.signStartedUs != null ? (now - c.signStartedUs) / 1e6 : 0; };
+  const eyes = ms.eyeLeft != null && ms.eyeRight != null ? Math.max(ms.eyeLeft, ms.eyeRight) : null;
+  const upd = (st, k, v, f) => { if (v != null && isFinite(v)) st[k] = st[k] == null ? v : f(st[k], v); };
+  for (const c of live) {
+    upd(c.st, "pitch", ms.pitchDown, Math.max); upd(c.st, "yaw", ms.yaw == null ? null : Math.abs(ms.yaw), Math.max);
+    upd(c.st, "eyes", eyes, Math.min); upd(c.st, "te", timer("eyes"), Math.max); upd(c.st, "th", timer("head"), Math.max);
+    c.st.frames = (c.st.frames || 0) + 1;
+    if (m.attention && m.attention.eyeGate && m.attention.eyeGate !== "none") c.st.gate = m.attention.eyeGate;
+  }
+  if (performance.now() - casesShownAt > 1000) renderCases();
+}
+function caseAlarms(c) { const end = (c.t1 != null ? c.t1 : tNow) + 1; return alarms.filter(a => a.t >= c.t0 && a.t <= end); }
+// [text, ok|no|""]: what the case wanted against the alarms in its window.
+function caseVerdict(c) {
+  const got = caseAlarms(c), types = [...new Set(got.map(a => a.type))];
+  const names = types.map(t => ALARM_NAMES[t] || t).join(", ");
+  if (!c.truth) return [got.length ? "тревога: " + names + " · что было?" : (c.t1 == null ? "идёт…" : "что было?"), ""];
+  const want = TRUTH[c.truth].expect;
+  const open = c.t1 == null;
+  if (want === "none") return got.length ? ["✗ ложная: " + names, "no"] : [open ? "пока тихо" : "✓ тихо", open ? "" : "ok"];
+  const type = want === "eyes" ? "eyes_closed" : want === "head" ? "head_pitch_down" : null;
+  const hit = got.find(a => type == null || a.type === type);
+  if (hit) return [`✓ ${ALARM_NAMES[hit.type] || hit.type} через ${num(hit.t - c.t0, 1)} с`, "ok"];
+  if (got.length) return ["≈ другой тип: " + names, "no"];
+  return open ? ["ждёт тревогу…", ""] : ["✗ пропуск", "no"];
+}
+function renderCases() {
+  casesShownAt = performance.now();
+  const btn = document.getElementById("case-btn"); if (!btn) return;
+  const open = cases.find(c => c.id === openCase);
+  btn.innerHTML = open ? `Закончить случай ${open.n} <kbd>N</kbd>` : `Новый случай <kbd>N</kbd>`;
+  btn.className = open ? "open" : "";
+  document.getElementById("case-cancel").style.display = open ? "" : "none";
+  document.getElementById("case-state").textContent = open
+    ? `идёт ${num(tNow - open.t0, 0)} с · ${open.truth ? TRUTH[open.truth].name : "отметь, что делаешь"}`
+    : cases.length ? "кнопка ниже отметит последний случай" : "";
+  const target = open || cases[cases.length - 1];
+  for (const b of document.querySelectorAll("#case-truths button")) b.classList.toggle("on", !!target && target.truth === b.dataset.truth);
+  const done = cases.filter(c => c.t1 != null && c.truth), v = done.map(caseVerdict);
+  document.getElementById("case-sum").innerHTML = cases.length
+    ? `Случаев ${cases.length}: <span class="ok">✓ ${v.filter(x => x[1] === "ok").length}</span> · <span class="no">ложных ${v.filter(x => x[0].startsWith("✗ ложная")).length}</span> · <span class="no">пропусков ${v.filter(x => x[0].startsWith("✗ пропуск")).length}</span> · <span class="no">другой тип ${v.filter(x => x[0].startsWith("≈")).length}</span>` +
+      (cases.length - done.length ? ` · без ответа ${cases.length - done.length}` : "")
+    : `<span style="color:var(--muted)">Нажми «Новый случай», прими позу, отметь кнопкой выше, что делаешь, и закончи. Тревоги в окне случая сравниваются с ответом.</span>`;
+  document.getElementById("cases").innerHTML = cases.slice().reverse().map(c => {
+    const [text, cls] = caseVerdict(c), st = c.st, dur = (c.t1 != null ? c.t1 : tNow) - c.t0;
+    const opts = TRUTHS.map(([k, n]) => `<option value="${k}" ${c.truth === k ? "selected" : ""}>${n}</option>`).join("");
+    const facts = [st.pitch != null ? `наклон до ${num(st.pitch, 0)}°` : null, st.yaw != null ? `поворот до ${num(st.yaw, 0)}°` : null,
+      st.eyes != null ? `глаза от ${num(st.eyes, 2)}` : "глаза не видны", st.te ? `признак глаз ${num(st.te, 1)} с` : null,
+      st.th ? `признак головы ${num(st.th, 1)} с` : null, st.gate ? `затвор: ${st.gate}` : null].filter(Boolean).join(" · ");
+    return `<div class="row"><b>${c.n}</b> ${fmtT(c.t0)} · ${num(dur, 1)} с ` +
+      (c.id === openCase ? `<i>${c.truth ? TRUTH[c.truth].name : "идёт"}</i>` : `<select data-case="${c.id}"><option value="">что было?</option>${opts}</select>`) +
+      ` <span class="${cls}">${text}</span><div class="st">${facts}</div></div>`;
+  }).join("");
+}
+function newCaseId() { return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function toggleCase() {
+  if (openCase) { sendMark("case", {caseId: openCase, edge: "end", truth: pickedTruth || undefined}); return; }
+  pickedTruth = null; sendMark("case", {caseId: newCaseId(), edge: "start"});
+}
+document.getElementById("case-btn").addEventListener("click", toggleCase);
+document.getElementById("case-cancel").addEventListener("click", () => { if (openCase) sendMark("case", {caseId: openCase, edge: "cancel"}); });
+document.getElementById("case-truths").addEventListener("click", e => {
+  const b = e.target.closest("button[data-truth]"); if (!b) return;
+  const target = cases.find(c => c.id === openCase) || cases[cases.length - 1]; if (!target) return;
+  if (target.id === openCase) pickedTruth = b.dataset.truth;
+  sendMark("case", {caseId: target.id, edge: "truth", truth: b.dataset.truth});
+});
+document.getElementById("cases").addEventListener("change", e => {
+  const s = e.target.closest("select[data-case]"); if (!s || !s.value) return;
+  sendMark("case", {caseId: s.dataset.case, edge: "truth", truth: s.value});
+});
+renderCases();
 let socket = null;
 function send(obj) { if (socket && socket.readyState === 1) socket.send(JSON.stringify(obj)); }
 function sendMark(kind, extra) { send(Object.assign({type: "mark", kind}, extra || {})); }
@@ -373,6 +501,7 @@ alarmsList.addEventListener("change", e => {
 marksCard.querySelector(".marks").addEventListener("click", e => { const b = e.target.closest("button[data-kind]"); if (b) sendMark(b.dataset.kind); });
 document.addEventListener("keydown", e => {
   if (e.target.closest && e.target.closest("input,select,textarea")) return;
+  if (e.key.toLowerCase() === "n" || e.key.toLowerCase() === "т") { e.preventDefault(); toggleCase(); return; }
   const k = {" ": "mark", f: "false", t: "true", m: "miss", "а": "false", "е": "true", "ь": "miss"}[e.key.toLowerCase()];
   if (k) { e.preventDefault(); sendMark(k); }
 });
@@ -472,6 +601,11 @@ function drawStrip() {
     g.fillStyle = ZONE_COLORS[z] || "#bbb"; g.fillRect(Math.max(pad, x(ts)), 4, Math.max(0, x(te) - Math.max(pad, x(ts))), 16);
   }
   g.font = "11px sans-serif"; g.fillStyle = css("--muted"); g.fillText("зона", 2, 16); g.fillText("метки", 2, 38);
+  for (const c of cases) {
+    const x0 = x(c.t0), x1 = x(c.t1 == null ? tNow : c.t1); if (x1 < pad) continue;
+    g.fillStyle = css("--warn"); g.globalAlpha = .25; g.fillRect(Math.max(pad, x0), 4, Math.max(2, x1 - Math.max(pad, x0)), 36); g.globalAlpha = 1;
+    g.fillStyle = css("--fg"); g.fillText("случай " + c.n + (c.truth ? " · " + TRUTH[c.truth].name : ""), Math.max(pad, x0) + 3, 37);
+  }
   for (const b of bands) {
     const x0 = x(b.t0), x1 = x(b.t1 == null ? tNow : b.t1); if (x1 < pad) continue;
     g.fillStyle = css("--accent"); g.fillRect(Math.max(pad, x0), 26, Math.max(2, x1 - Math.max(pad, x0)), 14);
@@ -488,8 +622,9 @@ function drawTrip() {
   const step = t1 > 1800 ? 600 : t1 > 600 ? 300 : 60;
   for (let s = 0; s <= t1; s += step) g.fillText(fmtT(s).replace(/\.\d$/, ""), x(s) - 10, h - 1);
   for (const a of alarms) { g.fillStyle = a.verdict === "false" ? MARK_COLORS.false : a.verdict === "true" ? MARK_COLORS.true : css("--warn"); g.fillRect(x(a.t0 != null ? a.t0 : a.t), 4, Math.max(3, x(a.t1 != null ? a.t1 : a.t) - x(a.t0 != null ? a.t0 : a.t)), 16); }
+  for (const c of cases) { const v = caseVerdict(c); g.fillStyle = v[1] === "ok" ? MARK_COLORS.true : v[1] === "no" ? css("--warn") : css("--accent"); g.fillRect(x(c.t0), 26, Math.max(3, x(c.t1 != null ? c.t1 : tNow) - x(c.t0)), 10); }
   for (const m of marks) { if (m.eventId) continue; g.fillStyle = MARK_COLORS[m.kind] || "#888"; g.beginPath(); g.moveTo(x(m.t), 26); g.lineTo(x(m.t) - 5, 36); g.lineTo(x(m.t) + 5, 36); g.fill(); }
-  document.getElementById("t-info").textContent = `${fmtT(tNow).replace(/\.\d$/, "")} · тревог ${alarms.length}, меток ${marks.filter(m => !m.eventId).length}`;
+  document.getElementById("t-info").textContent = `${fmtT(tNow).replace(/\.\d$/, "")} · тревог ${alarms.length}, меток ${marks.filter(m => !m.eventId).length}, случаев ${cases.length}`;
 }
 function frame() {
   if (dirty) { for (const c of CHARTS) draw(c); drawStrip(); drawTrip(); dirty = false; }
