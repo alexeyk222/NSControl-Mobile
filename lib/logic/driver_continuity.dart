@@ -84,6 +84,28 @@ class DriverContinuity {
     _lastDistance = distanceM;
   }
 
+  /// Several faces at the confirmation of the face and in the calibration
+  /// window (not in observation, which stops on several faces): the one
+  /// that is the driver by geometry (box, distance) as last seen, with the
+  /// calibrated id. Null when none fits or more than one does: the driver
+  /// cannot be told apart, and the frame is not usable.
+  FaceSignals? pick(int atUs, List<FaceSignals> faces) {
+    final fits = [
+      for (final f in faces)
+        if (_matches(atUs, f)) f,
+    ];
+    if (fits.length != 1) {
+      _decision = ContinuityDecision.ambiguous;
+      return null;
+    }
+    final face = fits.single;
+    final id = face.trackingId;
+    if (id != null && id != trackingId) _aliases.add(id);
+    _confirm(atUs, face);
+    _decision = ContinuityDecision.same;
+    return id == trackingId ? face : _withId(face);
+  }
+
   /// Returns [faces] with the calibrated id restored where the face is the
   /// driver; everything else is passed on as is.
   List<FaceSignals> resolve(int atUs, List<FaceSignals> faces) {

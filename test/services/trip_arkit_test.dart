@@ -906,6 +906,66 @@ void main() {
     },
   );
 
+  group('confirming the face with several faces', () {
+    /// A passenger at the right edge, smaller and further away.
+    FaceSignals passenger() => arkitFace(
+      id: 20,
+      view: 10,
+      box: const FaceBox(left: .7, top: .1, width: .2, height: .2),
+    );
+
+    /// Calibrates on the driver while [other] is in every frame too.
+    void calibrateWith(FaceSignals Function() other) {
+      trip.clock.stop();
+      final base = trip.clock.elapsedMicroseconds;
+      arkit().emit([arkitFace(), other()], base);
+      expect(trip.closestFace!.measurement.trackingId, 11);
+      trip.confirmFace(11);
+      final start = trip.calibrationStartUs;
+      for (var t = start; t <= start + 10200000; t += 33000) {
+        arkit().emit([arkitFace(), other()], t);
+      }
+      trip.finishCalibration(start + 10300000);
+    }
+
+    test('a passenger at the side does not spoil the calibration', () async {
+      await trip.start();
+      calibrateWith(passenger);
+      expect(trip.error, isNull);
+      expect(trip.phase, TripPhase.observing);
+      expect(trip.calibration!.neutralYaw, closeTo(38, .5));
+      // Observation still pauses on two faces (ФТ-02).
+      observe(1, () => null);
+      for (var i = 0; i < 10; i++) {
+        lastUs += 33000;
+        arkit().emit([arkitFace(), passenger()], lastUs);
+      }
+      expect(trip.multipleFaces, isTrue);
+    });
+
+    test('two faces side by side that cannot be told apart', () async {
+      await trip.start();
+      calibrateWith(
+        () => arkitFace(
+          id: 20,
+          box: const FaceBox(left: .35, top: .3, width: .3, height: .3),
+        ),
+      );
+      expect(trip.phase, TripPhase.findingFace);
+      // The frames are unusable, not a changed face.
+      expect(trip.error, contains('Пригодно менее 90%'));
+    });
+
+    test('«ТЗ 2.2 (эталон)» keeps one face for the confirmation', () async {
+      trip.profile = DetectionProfile.tz22;
+      await trip.start();
+      arkit().emit([arkitFace(), passenger()], 1000);
+      trip.confirmFace(11);
+      expect(trip.phase, TripPhase.findingFace);
+      expect(trip.error, contains('одно лицо'));
+    });
+  });
+
   test('«ТЗ 2.2 (эталон)»: a second face stops until confirmed', () async {
     trip.profile = DetectionProfile.tz22;
     await trip.start();
